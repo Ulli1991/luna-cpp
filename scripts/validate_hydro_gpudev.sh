@@ -40,6 +40,6 @@ for side in 12 16 32; do
         srun --ntasks=1 "$validation_root/$backend/table_mesh_check" \
             "$validation_root/$backend-faces-$side.csv" "$side"
     done
-    python3 compare_faces.py "$validation_root/cpu-faces-$side.csv" "$validation_root/gpu-faces-$side.csv"
-    python3 compare_faces.py "$validation_root/cpu-faces-$side.csv.hydro.csv" "$validation_root/gpu-faces-$side.csv.hydro.csv"
+    python3 python/compare_faces.py "$validation_root/cpu-faces-$side.csv" "$validation_root/gpu-faces-$side.csv"
+    python3 python/compare_faces.py "$validation_root/cpu-faces-$side.csv.hydro.csv" "$validation_root/gpu-faces-$side.csv.hydro.csv"
 done
