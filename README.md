@@ -171,19 +171,19 @@ research_notes/stage1_1d_2026-11-04.md.
 
 ## Figures
 
-From `scripts/make_figures.py`.
+From `scripts/make_figures.py`, in LUNA's figure style (`scripts/figstyle.py`).
 
 ![Sod density](docs/figures/sod.png)
 
-Sod, t = 0.25, N = 512, cell means at centroids against the exact solution, in the insets every cell (static lies on LUNA, drawn dashed). Moving has the sharper contact and 2.5 times LUNA's error at the tail of the rarefaction (x = 0.48); the strip clips the contact and shock spikes. HLLC, MUSCL-Hancock, FP64; LUNA: MC, Pallas, CFL 0.8; static: uniform points, face limiter, LUNA's time step rule at 0.8; moving: face limiter, the default rule at 0.4, regularised. Job 31917206, voronoi-cpp 947946a.
+Sod, t = 0.25, N = 512, cell means at centroids against the exact solution; the boxes mark the zooms, open markers are cells (static lies on LUNA, drawn dashed). Moving has the sharper contact and 2.5 times LUNA's error at the tail of the rarefaction (x = 0.48); the strip clips the contact and shock spikes. HLLC, MUSCL-Hancock, FP64; LUNA: MC, Pallas, CFL 0.8; static: uniform points, face limiter, LUNA's time step rule at 0.8; moving: face limiter, the default rule at 0.4, regularised. Job 31917206, voronoi-cpp 947946a.
 
 ![Shu-Osher density](docs/figures/shu_osher.png)
 
-Shu-Osher, t = 1.8, N = 1024 on [-5, 5]. (a) On LUNA's domain moving fails: the grown inflow cell flattens the waves (job 31917208, 947946a, runs as for Sod). (b) Padded domain [-15, 5], same cell width: moving follows the reference, at the default rule at 0.3 (0.4 was not run padded), OpenMP, job 31920121, branch dim-1d-diag. Curves: luna-reference-solutions 99a52d0, `luna/shu_osher/shu_osher_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/shu_osher/so_ppmx_rk4_16384.npz` (AthenaK c52f88f).
+Shu-Osher, t = 1.8, N = 1024 on [-5, 5]. Top: on LUNA's domain moving fails: the grown inflow cell flattens the waves (job 31917208, 947946a, runs as for Sod). Middle: padded domain [-15, 5], same cell width: moving follows the reference, at the default rule at 0.3 (0.4 was not run padded), OpenMP, job 31920121, branch dim-1d-diag. Bottom: zooms of the regions marked above, open markers a regular subset of the cells where they would touch. Curves: luna-reference-solutions 99a52d0, `luna/shu_osher/shu_osher_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/shu_osher/so_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
 ![Woodward-Colella density](docs/figures/woodward_colella.png)
 
-Woodward-Colella, t = 0.038, N = 2048, reflecting walls; insets at the contacts near 0.6 and 0.765 and the shock near 0.8. Moving holds them in far fewer cells than LUNA, with an overshoot at x = 0.765. Job 31917210, 947946a, runs as for Sod. Curves: luna-reference-solutions 99a52d0, `luna/woodward_colella/woodward_colella_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/woodward_colella/a9_ppmx_rk4_16384.npz` (AthenaK c52f88f).
+Woodward-Colella, t = 0.038, N = 2048, reflecting walls; zooms on each contact and shock, open markers a regular subset of the cells where they would touch. Moving holds them in far fewer cells than LUNA, with an overshoot at x = 0.765. Job 31917210, 947946a, runs as for Sod. Curves: luna-reference-solutions 99a52d0, `luna/woodward_colella/woodward_colella_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/woodward_colella/a9_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
 ![Field L1 by N](docs/figures/convergence_1d.png)
 
@@ -203,7 +203,7 @@ Kelvin-Helmholtz after McNally, Lyra & Passy (2012), N^2 cells, one A100 at 1305
 
 ![Sedov 3D](docs/figures/sedov_3d.png)
 
-Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot rank schemes, order below 1 for every code (0.66 LUNA minmod, 0.78 moving, n = 128 to 256). Left: volume-weighted shells at 128^3, branch dim-limiters, jobs 31918879 (moving), 31918880 (static), 31918732 (LUNA). Right: field L1 over r < 1.5 R_s of the piecewise-constant field, not sampled at generators; older code, jobs 31879294, 31879807 (LUNA minmod 128-448, moving 64-256, 256 with the per-cell loop, static 64-192), LUNA MC 128 and 256 from dim-limiters. Ours: HLLC, jittered, Courant 0.3, face limiter.
+Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot rank schemes, order below 1 for every code (0.66 LUNA minmod, 0.78 moving, n = 128 to 256). Left: volume-weighted shells at 128^3 with zooms on the shell and the shock front, markers are shells, not cells, branch dim-limiters, jobs 31918879 (moving), 31918880 (static), 31918732 (LUNA). Right: field L1 over r < 1.5 R_s of the piecewise-constant field, not sampled at generators; older code, jobs 31879294, 31879807 (LUNA minmod 128-448, moving 64-256, 256 with the per-cell loop, static 64-192), LUNA MC 128 and 256 from dim-limiters. Ours: HLLC, jittered, Courant 0.3, face limiter; moving is one pass in all these runs, older than the two-pass default.
 
 ## Limitations and open items
 
@@ -246,6 +246,6 @@ Every test in the suite reports accuracy per cost: GPU-seconds to a target error
   `exact_riemann.hpp`, `luna_1d_values.hpp`.
 - `extern/voronoi-cpp/`: the mesh library, pinned submodule.
 - `scripts/`: `hydro_a100.sh`, `hydro_speed_a100.sh`, `dim1d_a100.sh`, `two_pass_a100.sh`, `snapshot_hash.sh`, `compare_1d.py`,
-  `hydro_sedov_compare.py`, `sedov_field_l1.py`, `norm3d.py`, `luna_*.py`, `make_figures.py`, `lint_cpp.sh`.
+  `hydro_sedov_compare.py`, `sedov_field_l1.py`, `norm3d.py`, `luna_*.py`, `make_figures.py`, `figstyle.py`, `lint_cpp.sh`.
 - `docs/figures/`: the figures.
 - `research_notes/`, `reports/`: status notes.
