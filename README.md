@@ -31,7 +31,7 @@ CUDA (A100), on Raven:
 module load gcc/14 cuda/13.0 cmake hdf5-serial
 cmake -S . -B build-cuda -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH=/u/uli/kokkos-cuda \
-  -DCMAKE_CXX_COMPILER=/u/uli/kokkos-src/bin/nvcc_wrapper
+  -DCMAKE_CXX_COMPILER=/u/uli/kokkos-src/bin/nvcc_wrapper -DCMAKE_CXX_EXTENSIONS=OFF
 cmake --build build-cuda -j4
 ```
 
@@ -55,7 +55,9 @@ build one program use those names (`--target hydro_1d` would build the submodule
 
 - Release: `-O3 -DNDEBUG` (CMake's default), C++17 required (Kokkos sets `-std=c++20`), warnings
   `-Wall -Wextra -Wpedantic` on the programs.
-- CUDA: `nvcc_wrapper` with `-extended-lambda -arch=sm_80` (from Kokkos' AMPERE80).
+- CUDA: `nvcc_wrapper` with `-extended-lambda -arch=sm_80` (from Kokkos' AMPERE80). Kokkos forces
+  `CMAKE_CXX_EXTENSIONS=OFF` for this install and warns unless it is given. Do not set it for the OpenMP build: there
+  the code compiles with `-std=gnu++20`, and `-std=c++20` changes gcc's FP contraction, so the bits.
 - OpenMP: `-fopenmp` from Kokkos; no `-march` is set by the project (`-DCMAKE_CXX_FLAGS=-march=icelake-server` on
   Raven's CPUs).
 - `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (always on in `CMakeLists.txt`) writes the compilation database clang-tidy
