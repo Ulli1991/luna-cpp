@@ -4,8 +4,8 @@ Moving-mesh finite-volume hydro in Kokkos C++ on GPUs (CUDA, validated on an A10
 the same code for checks), on the exact Voronoi meshes of
 [voronoi-cpp](https://github.com/Ulli1991/voronoi-cpp), which it includes as a git submodule.
 
-MUSCL-Hancock with HLLC or HLL, AREPO-style least-squares gradients and mesh regularisation, on a static or moving
-mesh, bit-reproducible run to run, in 3D (periodic boxes) and 1D (with walls). On Sedov 3D the moving mesh is more
+MUSCL-Hancock with HLLC or HLL (on a moving mesh AREPO next generation's two flux passes), AREPO-style least-squares
+gradients and mesh regularisation, on a static or moving mesh, bit-reproducible run to run, in 3D (periodic boxes) and 1D (with walls). On Sedov 3D the moving mesh is more
 accurate than the static mesh at the same resolution in 4.6x fewer steps (see "The hydro").
 
 BSD 3-Clause, see [LICENSE](LICENSE).
@@ -47,7 +47,7 @@ cmake --build build-omp -j4
 Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the desired backend. On Raven, build at most with
 `-j4` on the login node, or inside a Slurm job; run GPU work through Slurm.
 
-`cmake --build` with no target gives `hydro_sedov`, `hydro_1d` and the tests. The pinned voronoi-cpp still holds its
+`cmake --build` with no target gives `hydro_sedov`, `hydro_1d`, `hydro_wave3d` and the tests. The pinned voronoi-cpp still holds its
 own copy of the hydro, so the CMake targets here are `luna_hydro_library`, `luna_hydro_sedov` and `luna_hydro_1d`; to
 build one program use those names (`--target hydro_1d` would build the submodule's copy).
 
@@ -71,6 +71,7 @@ Details and run times are in [TESTING.md](TESTING.md). The mesh's own tests are 
 | Test | Specifies |
 |---|---|
 | `hydro` | HLLC and HLL against reference fluxes and under rotation; uniform states stay uniform, conservation to rounding, bit-identical runs, the two update loops agree to rounding on jittered and uniform meshes; moving mesh: uniform state with a bulk velocity, conservation, Galilean invariance of a moving blast |
+| `hydro_wave` | the moving 3D step on smooth flow, both integrators: Yee's vortex (jitter 0.1) and a sound wave (jitter 0.25), L1 of rho, v, P and the rate of rho against measured bounds; two passes keep second order where one pass loses it |
 | `hydro1d` | the 1D hydro: uniform states, conservation, bit-identical runs, inflow; Sod against the exact solution, static and moving; LUNA's final states of Sod, Shu-Osher and Woodward-Colella at N = 16 to 1e-12 |
 
 ```sh
@@ -95,40 +96,51 @@ order, so runs are bit-reproducible. Two update loops: per face (a face
 flux array, then a per-cell gather; default at second order) or per cell
 (each face flux computed from both sides; default at first order).
 
+On a moving mesh at order 1 the default integrator is AREPO next generation's two passes: fluxes on the mesh of the
+start of the step, half applied, the mesh update, fluxes on the new mesh from the same primitives and gradients advanced
+a whole step, half applied. `--integrator=one-pass` selects the MUSCL-Hancock step of the static mesh there, with the
+bits it had before (hash in research_notes/two_pass_2026-11-05.md). The numbers below that a moving run gives are for the
+integrator named in each; costs and accuracy of the two side by side are in that note.
+
 ```text
 hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]
             [--riemann=hllc|hll] [--precision=default|mixed|low|...] [--moving] [--bulk=km/s] [--out=dir] [--snapshots=10] [--steps=max] [--input-order] [--memory]
+            [--integrator=one-pass|two-pass]
+hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--jitter=spacings] [--out=file.npy]
 sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode> (see the script)
 ```
 
 `hydro_sedov` (needs HDF5; on Raven `module load hdf5-serial`) runs a
 Sedov blast (1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr) and writes HDF5
 snapshots. Measured on one A100, double, jittered points in Morton order,
-median of 40 steps. The 2.1M column is current (static job 31879405, moving job 31886231,
-HLLC rows; the same code varies by about 10 % between GPU jobs). In the 16.8M
-column the moving rows are current (job 31885794); the static rows and the
+median of 40 steps. The 2.1M column is current (static job 31879405, moving jobs 31925156 and
+31925157, HLLC rows; the same code varies by about 10 % between GPU jobs). In the 16.8M
+column the moving rows are current (job 31925157, 1305 MHz); the static rows and the
 HLL and first-order rows are the earlier code (jobs 31699864, 31699865,
 31700852, kept until they are re-measured):
 
 | Million cell updates per second | 2,097,152 cells | 16,777,216 cells |
 |---|---|---|
-| moving mesh, MUSCL-Hancock HLLC, per-face loop (mesh update and face lists included) | **84** | 88 (whole run, job 31885794) |
+| moving mesh, two passes (default), HLLC, per-face loop (mesh update and face lists included) | **66** | 68 (whole run) |
+| moving mesh, one pass, same | 84 | 88 (whole run) |
 | static mesh, MUSCL-Hancock HLLC, per-face loop | **152** | 105 |
 | static mesh, MUSCL-Hancock HLL, per-face loop | 116 | 114 |
 | static mesh, first order HLLC, per-cell loop | 288 | 290 |
 | device memory, mesh + hydro (static, per-face, second order) | 2434 B/cell | 2371 B/cell (41.2 GB in use) |
-| device memory, moving mesh + hydro (per-face) | 2298 B/cell | 2298 B/cell (40.1 GB in use, whole run, job 31885794); `--precision=mixed` 2334 B/cell (40.7 GB, job 31885795) |
+| device memory, moving mesh + hydro, two passes (per-face) | 2319 B/cell | 2319 B/cell (40.5 GB in use, whole run); `--precision=mixed` 2445 B/cell, does not fit at 256^3, see Limitations |
+| device memory, moving mesh + hydro, one pass (per-face) | 2298 B/cell | 2298 B/cell (40.1 GB in use, whole run); `--precision=mixed` 2334 B/cell (40.7 GB, job 31925336) |
 
-Sedov at 128^3 (job 31699863), HLLC: shock radius 0.978 of the
+Sedov at 128^3 (job 31699863; the moving numbers of this paragraph are one pass), HLLC: shock radius 0.978 of the
 Sedov-Taylor value at 1e4 yr, L1 density error 0.075 rho0 (first order:
 0.104); mass and energy conserved to 2e-16. On the moving mesh (jobs
 31700850-51): 354 steps instead of 1642, L1 density error 0.058 rho0, the
 same numbers with the whole box moving at 500 km/s; at 256^3 L1 0.034 in
-288 s of GPU time (job 31702077; now 177 s, job 31885794). These L1 values are sampled at
+288 s of GPU time (job 31702077; now 176 s, job 31925157, two passes 230 s). These L1 values are sampled at
 the mesh generators, which flatters a moving mesh; the field L1 (the integral
 of |rho_h - rho| dV) is the fair norm and is what the test suite will report
 (research_notes/accuracy_score_exploration_2026-11-04.md). Details:
-research_notes/hydro_stage1_2026-10-31.md, hydro_stage3_2026-10-31.md.
+research_notes/hydro_stage1_2026-10-31.md, hydro_stage3_2026-10-31.md. Field L1 of density, r < 1.5 R_s (one pass, two
+passes): 128^3 0.0629, 0.0648; 256^3 0.0369, 0.0377 (research_notes/two_pass_2026-11-05.md).
 
 ### 1D (`hydro_1d`, `finite_volume_1d.hpp`)
 
@@ -183,7 +195,7 @@ GPU seconds of the stepping loop, one A100, one point per N, dotted lines the ta
 
 ![3D Yee vortex](docs/figures/vortex_3d.png)
 
-Yee vortex in a 3D slab, 10 x 10 x 2.5, nx x nx x nx/4 cells, t = 10. L1 of cell values against the exact average over each cell, v the vector. Moving one pass is first order; two passes (a switch on branch dim-1d-diag, not on main) reach order 2.2, then 1.5, and stay above static. O(h) floor: exact averages as a piecewise-constant field against the exact field; it binds a field norm, not this measure. Ours: HLLC, face limiter, Courant 0.3, jitter 0.1, start from the point value at the centroid, jobs 31920446, 31922276. LUNA: MC, HLLC, Pallas, CFL 0.8, luna-reference-solutions 99a52d0 `luna/yee_vortex/yee_vortex_convergence.npz` (LUNA debcdae + uncommitted, bitwise at 60cf841).
+Yee vortex in a 3D slab, 10 x 10 x 2.5, nx x nx x nx/4 cells, t = 10. L1 of cell values against the exact average over each cell, v the vector. Moving one pass is first order; two passes (now the default) reach order 2.2, then 1.5, and stay above static. O(h) floor: exact averages as a piecewise-constant field against the exact field; it binds a field norm, not this measure. Ours: HLLC, face limiter, Courant 0.3, jitter 0.1, start from the point value at the centroid, jobs 31920446, 31922276. LUNA: MC, HLLC, Pallas, CFL 0.8, luna-reference-solutions 99a52d0 `luna/yee_vortex/yee_vortex_convergence.npz` (LUNA debcdae + uncommitted, bitwise at 60cf841).
 
 ![2D Kelvin-Helmholtz](docs/figures/kh_2d.png)
 
@@ -196,9 +208,12 @@ Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot ran
 ## Limitations and open items
 
 - The hydro step is not yet at its target (~300 M cell updates/s): on the A100 at 128^3 double precision runs at
-  152 M cell updates/s static, its hydro part at 140 M cells/s on a moving mesh, the whole moving step at
-  73 M cell updates/s. Compile-time precision options (`--precision=`, default double): mixed +10 %, low +19 % on the
-  hydro static, +4 % / +7 % on the whole moving step (research_notes/hydro_speed_2026-11-04.md).
+  152 M cell updates/s static, its hydro part at 140 M cells/s on a moving mesh (one pass), the whole moving step at
+  84 M cell updates/s with one pass, 66 with two. Compile-time precision options (`--precision=`, default double): mixed +10 %, low +19 % on the
+  hydro static, +4 % / +7 % on the whole moving step with one pass (research_notes/hydro_speed_2026-11-04.md).
+- Moving 256^3 on a 40 GB A100: two passes in double fit (2319 B/cell, 40484 of 42405 MB in use); with `--precision=mixed`
+  they do not (2445 B/cell, about 42.6 GB needed): use `--integrator=one-pass` there, or `--precision=grad32`
+  (2255 B/cell). The double area and centroid arrays stay beside mixed's float face rows.
 - On the CPU (gcc's default FP contraction) some hydro modes differ from the GPU in the last bits; the A100 runs are
   bit-identical run to run.
 - Periodic boxes only in 3D; only 1D has walls.
@@ -209,7 +224,7 @@ Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot ran
 
 ## Roadmap
 
-1. Hydro speed, first round done: 107 -> 152 M cell updates/s static double, 56 -> 73 for the whole moving step. The
+1. Hydro speed, first round done: 107 -> 152 M cell updates/s static double, 56 -> 73 for the whole moving step (one pass). The
    remaining limit is memory waits in the gradient sweep; sliced lists, 16-bit offsets, tiles and a face-major update
    did not help (research_notes/hydro_speed_2026-11-04.md).
 2. 2D hydro on voronoi-cpp's 2D mesh; Kelvin-Helmholtz after McNally, Lyra & Passy (2012).
@@ -227,10 +242,10 @@ Every test in the suite reports accuracy per cost: GPU-seconds to a target error
 
 ## Repository layout
 
-- `src/hydro/`: the hydro (header-only). `src/bench/`: `hydro_sedov`, `hydro_1d`. `src/test/`: the tests,
+- `src/hydro/`: the hydro (header-only). `src/bench/`: `hydro_sedov`, `hydro_1d`, `hydro_wave3d`. `src/test/`: the tests,
   `exact_riemann.hpp`, `luna_1d_values.hpp`.
 - `extern/voronoi-cpp/`: the mesh library, pinned submodule.
-- `scripts/`: `hydro_a100.sh`, `hydro_speed_a100.sh`, `dim1d_a100.sh`, `snapshot_hash.sh`, `compare_1d.py`,
-  `hydro_sedov_compare.py`, `luna_*.py`, `make_figures.py`, `lint_cpp.sh`.
+- `scripts/`: `hydro_a100.sh`, `hydro_speed_a100.sh`, `dim1d_a100.sh`, `two_pass_a100.sh`, `snapshot_hash.sh`, `compare_1d.py`,
+  `hydro_sedov_compare.py`, `sedov_field_l1.py`, `norm3d.py`, `luna_*.py`, `make_figures.py`, `lint_cpp.sh`.
 - `docs/figures/`: the figures.
 - `research_notes/`, `reports/`: status notes.
