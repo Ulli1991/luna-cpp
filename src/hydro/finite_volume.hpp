@@ -95,6 +95,12 @@ constexpr Integrator default_integrator(Motion motion, int order) {
     return motion == Motion::moving && order == 1 ? Integrator::two_pass : Integrator::one_pass;
 }
 
+// The time step of time_step(): AREPO next generation's, or in 2D LUNA's
+// (RAMSES) rule, the smallest over the cells of
+// courant / sum_d (|v_d - w_d| + c) / dx, dx = sqrt(V) (on a square lattice LUNA's
+// cell_dt, integrators.py:11-13; w = 0 on a static mesh).
+enum class StepRule { arepo, luna };
+
 // Times of the phases of a step, in ms, summed over steps (fenced).
 // primitives and sweep (point velocities, time step and gradients): in
 // time_step(); fluxes: with the per-cell loop the fluxes and the update.
@@ -176,6 +182,7 @@ public:
     Integrator integrator() const { return integrator_; }
     const Gas& gas() const { return gas_; }
     const MeshStats& mesh_stats() const { return mesh_stats_; }
+    void set_step_rule(StepRule rule) { rule_ = rule; }
 
     // The global time step: the smallest of AREPO next generation's cell
     // time steps (FORCE_EQUAL_TIMESTEPS, time_integration/timestep.cc:39-63)
@@ -616,6 +623,25 @@ public:
             smallest = Kokkos::fmin(smallest, courant * step);
         }
     };
+    // LUNA's rule (StepRule).
+    template <bool Moving>
+    struct LunaStep {
+        static_assert(D == 2, "StepRule::luna: 2D");
+        Prims prim;
+        Points w;
+        double courant;
+
+        KOKKOS_INLINE_FUNCTION void operator()(int i, double& smallest) const {
+            const double c = prim(i, V), dx = prim(i, V + 1) * Kokkos::sqrt(M_PI);
+            double rate = 0;
+            for (int a = 0; a < D; ++a) {
+                double relative = prim(i, 1 + a);
+                if constexpr (Moving) relative -= w(i, a);
+                rate += (Kokkos::abs(relative) + c) / dx;
+            }
+            smallest = Kokkos::fmin(smallest, courant / rate);
+        }
+    };
     // The pair terms: vsig_ij and d_ij are the same from both sides, so each
     // face gives both cells' terms at once; only their minimum is wanted.
     struct FaceStep {
@@ -650,6 +676,12 @@ public:
             Kokkos::parallel_for("hydro::sweep", cells,
                                  Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_});
         double by_cell = 0, by_face = 0;
+        if constexpr (D == 2) {
+            if (rule_ == StepRule::luna) {
+                Kokkos::parallel_reduce("hydro::luna_step", cells, LunaStep<Moving>{prims_, w_, courant}, Kokkos::Min<double>(by_cell));
+                return by_cell;
+            }
+        }
         Kokkos::parallel_reduce("hydro::cell_step", cells, CellStep<Moving>{prims_, w_, courant}, Kokkos::Min<double>(by_cell));
         Kokkos::parallel_reduce("hydro::face_step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
                                 FaceStep{prims_, geometry_, courant}, Kokkos::Min<double>(by_face));
@@ -782,6 +814,7 @@ public:
             const int o = geo.owner_of(f), j = geo.neighbour_of(f);
             const Vec a = geo.area_of(f);
             const double magnitude = Kokkos::sqrt(dot(a, a));
+            if (magnitude == 0) return State{};  // cospherical or cocircular corners (an exact lattice): no normal, no flux
             Vec wf{};
             if constexpr (Moving) wf = face_velocity(f, o, j);
             State L, R;
@@ -827,6 +860,7 @@ public:
             const int o = this->geo.owner_of(f), j = this->geo.neighbour_of(f);
             const Vec a = this->geo.area_of(f);
             const double magnitude = Kokkos::sqrt(dot(a, a));
+            if (magnitude == 0) return State{};  // as FaceFlux
             const Vec wf = this->face_velocity(f, o, j);
             const State L = pass_side(o, this->geo.face_offset(f, o), fallbacks_o);
             const State R = pass_side(j, this->geo.face_offset(f, j), fallbacks_j);
@@ -942,6 +976,7 @@ private:
     Integrator integrator_;
     int n_, faces_ = 0;
     bool swept_ = false;
+    StepRule rule_ = StepRule::arepo;
     long long fallbacks_ = 0;
     Kokkos::Timer timer_;
     Cells q_, next_;
