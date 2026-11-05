@@ -1,0 +1,7 @@
+# A pull request whenever voronoi-cpp moves; CI tests it before the pin changes.
+version: 2
+updates:
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: daily
