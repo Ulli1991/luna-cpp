@@ -279,8 +279,10 @@ using Moving = hydro::FiniteVolume<3, Exec>;
 struct MovingRun {
     HydroMesh mesh;
     Moving fv;
-    MovingRun(const Points& points, const hydro::Gas& gas, hydro::Motion motion, const Box& box = {})
-        : mesh(Exec{}, box), fv(Exec{}, build(mesh, points), gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion) {}
+    MovingRun(const Points& points, const hydro::Gas& gas, hydro::Motion motion, const Box& box = {},
+              hydro::Integrator integrator = hydro::Integrator::two_pass)
+        : mesh(Exec{}, box), fv(Exec{}, build(mesh, points), gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion,
+                                motion == hydro::Motion::moving ? integrator : hydro::Integrator::one_pass) {}
     static HydroMesh& build(HydroMesh& mesh, const Points& points) {
         mesh.update(to_device(points));
         mesh.update_cells();
@@ -290,7 +292,8 @@ struct MovingRun {
 
 // A blast at the box centre (pressure 100 within r < 0.15, else 1), moving
 // with velocity (bulk, 0, 0).
-HostCells blast(const HydroMesh& mesh, double bulk, const hydro::Gas& gas) {
+template <class AnyMesh>
+HostCells blast(const AnyMesh& mesh, double bulk, const hydro::Gas& gas) {
     const auto x = to_host(mesh.positions());
     HostCells h("blast", x.extent(0));
     for (std::size_t i = 0; i < x.extent(0); ++i) {
@@ -321,12 +324,13 @@ std::array<double, 8> profile(const HydroMesh& mesh, const HostCells& u, double 
     return sum;
 }
 
-void moving_tests(Check& check) {
+void moving_tests(Check& check, hydro::Integrator integrator) {
+    std::cout << "moving tests, " << (integrator == hydro::Integrator::two_pass ? "two passes (the default)" : "one pass") << ":\n";
     const hydro::Gas gas{5.0 / 3.0};
     const int n = 4096;
     const Points points = make_points("jittered", n);
     {  // a uniform state with a bulk velocity
-        MovingRun run(points, gas, hydro::Motion::moving);
+        MovingRun run(points, gas, hydro::Motion::moving, {}, integrator);
         const State U = hydro::conserved(State{1.3, 1.0, 0.5, -0.25, 0.7}, gas);
         HostCells h("uniform", n);
         for (int i = 0; i < n; ++i)
@@ -345,7 +349,7 @@ void moving_tests(Check& check) {
                      "moving mesh: a uniform state with a bulk velocity stays uniform over 5 steps (" + sci(worst) + ")");
     }
     {  // conservation with moving cells
-        MovingRun run(points, gas, hydro::Motion::moving);
+        MovingRun run(points, gas, hydro::Motion::moving, {}, integrator);
         set_state(run.fv, run.mesh, rough_state(n, gas));
         auto sums = [&](const HostCells& q) {
             std::array<long double, 5> s{};
@@ -368,7 +372,7 @@ void moving_tests(Check& check) {
     {  // 60 moving steps with the per-face loop (its face fluxes grow the mesh's
        // spare ring pool, which the ring compaction then meets): the mesh is
        // still the exact mesh of the points
-        MovingRun run(points, gas, hydro::Motion::moving);
+        MovingRun run(points, gas, hydro::Motion::moving, {}, integrator);
         set_state(run.fv, run.mesh, rough_state(n, gas));
         for (int s = 0; s < 60; ++s) run.fv.step(run.fv.time_step(0.3));
         // The reference is built from the snapped positions the mesh uses.
@@ -381,7 +385,7 @@ void moving_tests(Check& check) {
         check.expect(c.pass(), "moving mesh, 60 steps: the mesh equals an exact rebuild (" + what.str() + ")");
     }
     {  // two identical moving runs give the same bits, step by step
-        MovingRun a(points, gas, hydro::Motion::moving), b(points, gas, hydro::Motion::moving);
+        MovingRun a(points, gas, hydro::Motion::moving, {}, integrator), b(points, gas, hydro::Motion::moving, {}, integrator);
         set_state(a.fv, a.mesh, blast(a.mesh, 0, gas));
         set_state(b.fv, b.mesh, blast(b.mesh, 0, gas));
         auto same = [&](const auto& x, const auto& y) {
@@ -426,7 +430,7 @@ void moving_tests(Check& check) {
         const Points stretched = make_points("jittered", n, box);
         const int m = static_cast<int>(stretched.size());
         {
-            MovingRun run(stretched, gas, hydro::Motion::moving, box);
+            MovingRun run(stretched, gas, hydro::Motion::moving, box, integrator);
             const State U = hydro::conserved(State{1.3, 1.0, 0.5, -0.25, 0.7}, gas);
             HostCells h("uniform", m);
             for (int i = 0; i < m; ++i)
@@ -445,7 +449,7 @@ void moving_tests(Check& check) {
                                             sci(worst) + ", " + std::to_string(m) + " cells)");
         }
         {
-            MovingRun run(stretched, gas, hydro::Motion::moving, box);
+            MovingRun run(stretched, gas, hydro::Motion::moving, box, integrator);
             set_state(run.fv, run.mesh, rough_state(m, gas));
             auto sums = [&](const HostCells& q) {
                 std::array<long double, 5> s{};
@@ -474,7 +478,7 @@ void moving_tests(Check& check) {
         double moving_error = 0, cfl = 1;
         double profile_error[2] = {};
         for (const auto motion : {hydro::Motion::moving, hydro::Motion::static_mesh}) {
-            MovingRun rest(points, gas, motion), flow(points, gas, motion);
+            MovingRun rest(points, gas, motion, {}, integrator), flow(points, gas, motion, {}, integrator);
             set_state(rest.fv, rest.mesh, blast(rest.mesh, 0, gas));
             set_state(flow.fv, flow.mesh, blast(flow.mesh, bulk, gas));
             for (int s = 0; s < steps; ++s) {
@@ -512,6 +516,90 @@ void moving_tests(Check& check) {
 }
 }  // namespace
 
+// The two-pass integrator (Integrator::two_pass): both update loops, every stored precision kind.
+template <class Precision>
+void two_pass_tests(Check& check, const std::string& name_of_precision, double uniform_within) {
+    using FV = hydro::FiniteVolume<3, Exec, hydro::HLLC, Precision>;
+    const hydro::Gas gas{5.0 / 3.0};
+    const int n = 4096;
+    const Points points = make_points("jittered", n);
+    for (const auto update : {hydro::Update::per_face, hydro::Update::per_cell}) {
+        const std::string head = "two passes, " + name_of_precision + ", " + name(update) + ": ";
+        auto make = [&](typename FV::Mesh& mesh) {
+            mesh.update(to_device(points));
+            mesh.update_cells();
+            return FV(Exec{}, mesh, gas, 1, update, hydro::Limiter::face_centroid, hydro::Motion::moving, hydro::Integrator::two_pass);
+        };
+        {  // a uniform state with a bulk velocity
+            typename FV::Mesh mesh(Exec{}, 1.0);
+            FV fv = make(mesh);
+            const State U = hydro::conserved(State{1.3, 1.0, 0.5, -0.25, 0.7}, gas);
+            HostCells h("uniform", n);
+            for (int i = 0; i < n; ++i)
+                for (int v = 0; v < 5; ++v) h(i, v) = U[v];
+            set_state(fv, mesh, h);
+            const double dt = std::ldexp(1.0, -12);
+            for (int s = 0; s < 5; ++s) {
+                fv.time_step(0.3);
+                fv.step(dt);
+            }
+            const HostCells after = host_state(fv, mesh);
+            double worst = 0;
+            for (int i = 0; i < n; ++i) worst = std::max(worst, relative({after(i, 0), after(i, 1), after(i, 2), after(i, 3), after(i, 4)}, U));
+            check.expect(worst < uniform_within, head + "a uniform state with a bulk velocity stays uniform over 5 steps (" + sci(worst) + ")");
+        }
+        {  // conservation
+            typename FV::Mesh mesh(Exec{}, 1.0);
+            FV fv = make(mesh);
+            set_state(fv, mesh, rough_state(n, gas));
+            auto sums = [&](const HostCells& q) {
+                std::array<long double, 5> s{};
+                for (int i = 0; i < n; ++i)
+                    for (int v = 0; v < 5; ++v) s[v] += q(i, v);
+                return s;
+            };
+            const auto before = sums(host_extensive(fv));
+            for (int s = 0; s < 10; ++s) fv.step(fv.time_step(0.3));
+            const auto after = sums(host_extensive(fv));
+            const double scale = static_cast<double>(before[0]) * std::sqrt(static_cast<double>(before[4] / before[0]));
+            double worst = std::max(std::abs(static_cast<double>((after[0] - before[0]) / before[0])),
+                                    std::abs(static_cast<double>((after[4] - before[4]) / before[4])));
+            for (int v = 1; v <= 3; ++v) worst = std::max(worst, std::abs(static_cast<double>(after[v] - before[v])) / scale);
+            check.expect(worst < 1e-14, head + "conserved over 10 steps (" + sci(worst) + ")");
+        }
+        {  // two identical runs
+            typename FV::Mesh mesh_a(Exec{}, 1.0), mesh_b(Exec{}, 1.0);
+            FV a = make(mesh_a), b = make(mesh_b);
+            set_state(a, mesh_a, blast(mesh_a, 0, gas));
+            set_state(b, mesh_b, blast(mesh_b, 0, gas));
+            for (int s = 0; s < 15; ++s) {
+                a.step(a.time_step(0.3));
+                b.step(b.time_step(0.3));
+            }
+            const auto qa = to_host(a.state()), qb = to_host(b.state());
+            check.expect(std::memcmp(qa.data(), qb.data(), qa.span() * sizeof(double)) == 0, head + "two identical runs give the same bits over 15 steps");
+        }
+    }
+}
+
+// Two passes exist only on a moving mesh at order 1.
+void two_pass_refused(Check& check) {
+    using FV = hydro::FiniteVolume<3, Exec>;
+    const hydro::Gas gas{5.0 / 3.0};
+    FV::Mesh mesh(Exec{}, 1.0);
+    mesh.update(to_device(make_points("jittered", 4096)));
+    mesh.update_cells();
+    auto refused = [&](int order, hydro::Motion motion) {
+        try {
+            FV fv(Exec{}, mesh, gas, order, hydro::Update::per_face, hydro::Limiter::face_centroid, motion, hydro::Integrator::two_pass);
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+        return false;
+    };
+    check.expect(refused(1, hydro::Motion::static_mesh) && refused(0, hydro::Motion::moving), "two passes: a static mesh and order 0 are refused");
+}
+
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     Check check;
@@ -524,6 +612,11 @@ int main(int argc, char** argv) {
     // reduced (float face rows and weights, FP16 gradients, float fluxes and Riemann).
     mesh_tests<hydro::HLLC, hydro::Precision<double, float>>(check, "jittered", "HLLC weight32");
     mesh_tests<hydro::HLLC, hydro::Precision<float, float, hydro::Half, float, float>>(check, "jittered", "HLLC lowweights");
-    moving_tests(check);
+    moving_tests(check, hydro::Integrator::two_pass);
+    moving_tests(check, hydro::Integrator::one_pass);
+    two_pass_tests<hydro::Precision<>>(check, "double", 1e-13);
+    two_pass_tests<hydro::Precision<float, void, float, float>>(check, "mixed", 1e-6);
+    two_pass_tests<hydro::Precision<float, void, hydro::Half, float, float>>(check, "low", 1e-6);
+    two_pass_refused(check);
     return check.failed() != 0;
 }

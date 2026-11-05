@@ -45,6 +45,7 @@ function(hydro_program target output source)
 endfunction()
 
 hydro_program(luna_hydro_1d hydro_1d src/bench/hydro_1d.cpp)
+hydro_program(luna_hydro_wave3d hydro_wave3d src/bench/hydro_wave3d.cpp)
 # Snapshots need HDF5.
 if(HDF5_FOUND)
     hydro_program(luna_hydro_sedov hydro_sedov src/bench/hydro_sedov.cpp)
@@ -54,7 +55,7 @@ else()
 endif()
 
 if(BUILD_TESTING)
-    foreach(test hydro hydro1d)
+    foreach(test hydro hydro1d hydro_wave)
         hydro_program(${test}_test ${test}_test src/test/${test}_test.cpp)
         add_test(NAME ${test} COMMAND ${test}_test)
         set_tests_properties(${test} PROPERTIES TIMEOUT 600)
