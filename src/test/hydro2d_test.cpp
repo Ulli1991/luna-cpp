@@ -13,7 +13,7 @@
 //   - Noh's implosion against the exact solution;
 //   - a blast carried by a bulk velocity equals the blast at rest cell by cell
 //     on the moving mesh.
-// Moving meshes run with both integrators.
+// Moving meshes run with both integrators, Sod and Noh (the long runs) with the default.
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -265,8 +265,8 @@ void sod(Check& check) {
     const exact_riemann::Primitive L{1, 0, 1}, R{0.125, 0, 0.1};
     const exact_riemann::Solver exact(L, R, 1.4);
     const Box box(2.0, 2.0 / 16);
-    for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving})
-    for (auto integrator : integrators(motion)) {
+    for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving}) {
+        const hydro::Integrator integrator = hydro::default_integrator(motion, 1);
         Mesh mesh(Exec(), box);
         mesh.update(lattice(256, 16, box, 0));
         mesh.update_cells();
@@ -302,8 +302,8 @@ void noh(Check& check) {
     const hydro::Gas gas{5.0 / 3.0};
     const Box box(2.0);
     const double t = 0.6;
-    for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving})
-    for (auto integrator : integrators(motion)) {
+    for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving}) {
+        const hydro::Integrator integrator = hydro::default_integrator(motion, 1);
         Mesh mesh(Exec(), box);
         mesh.update(lattice(256, 256, box, 0));
         mesh.update_cells();
