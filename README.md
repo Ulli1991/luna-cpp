@@ -5,7 +5,7 @@ the same code for checks), on the exact Voronoi meshes of
 [voronoi-cpp](https://github.com/Ulli1991/voronoi-cpp), which it includes as a git submodule.
 
 MUSCL-Hancock with HLLC or HLL (on a moving mesh AREPO next generation's two flux passes), AREPO-style least-squares
-gradients and mesh regularisation, on a static or moving mesh, bit-reproducible run to run, in 3D (periodic boxes) and 1D (with walls). On Sedov 3D the moving mesh is more
+gradients and mesh regularisation, on a static or moving mesh, bit-reproducible run to run, in 3D and 2D (periodic boxes) and 1D (with walls). On Sedov 3D the moving mesh is more
 accurate than the static mesh at the same resolution in 4.6x fewer steps (see "The hydro").
 
 BSD 3-Clause, see [LICENSE](LICENSE).
@@ -74,6 +74,7 @@ Details and run times are in [TESTING.md](TESTING.md). The mesh's own tests are 
 |---|---|
 | `hydro` | HLLC and HLL against reference fluxes and under rotation; uniform states stay uniform, conservation to rounding, bit-identical runs, the two update loops agree to rounding on jittered and uniform meshes; moving mesh: uniform state with a bulk velocity, conservation, Galilean invariance of a moving blast |
 | `hydro_wave` | the moving 3D step on smooth flow, both integrators: Yee's vortex (jitter 0.1) and a sound wave (jitter 0.25), L1 of rho, v, P and the rate of rho against measured bounds; two passes keep second order where one pass loses it |
+| `hydro2d` | the 2D hydro, static and moving, both integrators: uniform states, conservation, bit-identical runs, sound-wave order in cell averages over the actual polygons, Sod, Noh, a Galilean blast |
 | `hydro1d` | the 1D hydro: uniform states, conservation, bit-identical runs, inflow; Sod against the exact solution, static and moving; LUNA's final states of Sod, Shu-Osher and Woodward-Colella at N = 16 to 1e-12 |
 
 ```sh
@@ -143,6 +144,12 @@ of |rho_h - rho| dV) is the fair norm and is what the test suite will report
 (research_notes/accuracy_score_exploration_2026-11-04.md). Details:
 research_notes/hydro_stage1_2026-10-31.md, hydro_stage3_2026-10-31.md. Field L1 of density, r < 1.5 R_s (one pass, two
 passes): 128^3 0.0629, 0.0648; 256^3 0.0369, 0.0377 (research_notes/two_pass_2026-11-05.md).
+
+### 2D (`hydro_kh2d`, `hydro::FiniteVolume<2>`)
+
+`hydro_kh2d <N> [--moving] [--integrator=one-pass|two-pass] [--bulk=<u>] ...` runs the smooth Kelvin-Helmholtz test of
+McNally, Lyra & Passy (2012). Results and the comparison with LUNA at the same N: research_notes/stage2_2d_2026-11-05.md;
+`scripts/dim2d_a100.sh` runs the ladders, `scripts/compare_kh.py` makes the tables.
 
 ### 1D (`hydro_1d`, `finite_volume_1d.hpp`)
 
@@ -218,7 +225,7 @@ Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot ran
   (2255 B/cell). The double area and centroid arrays stay beside mixed's float face rows.
 - On the CPU (gcc's default FP contraction) some hydro modes differ from the GPU in the last bits; the A100 runs are
   bit-identical run to run.
-- Periodic boxes only in 3D; only 1D has walls.
+- Periodic boxes only in 3D and 2D; only 1D has walls.
 - 1D moving mesh, inflow: no refinement, so the gas that enters from an inflow wall fills a few grown cells. That gas
   is not uniform in general (Shu-Osher: acoustic waves cross it), so the error there does not converge.
 - 1D moving mesh: the error of Woodward-Colella stops falling near N = 2^15, at every Courant number tried
@@ -229,10 +236,9 @@ Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot ran
 1. Hydro speed, first round done: 107 -> 152 M cell updates/s static double, 56 -> 73 for the whole moving step (one pass). The
    remaining limit is memory waits in the gradient sweep; sliced lists, 16-bit offsets, tiles and a face-major update
    did not help (research_notes/hydro_speed_2026-11-04.md).
-2. 2D hydro on voronoi-cpp's 2D mesh; Kelvin-Helmholtz after McNally, Lyra & Passy (2012).
-3. Multi-GPU hydro, on the mesh's domain decomposition and ghost layers (voronoi-cpp).
-4. Refinement and derefinement: conservative remap from the volumes, on the mesh's split and merge.
-5. Self-gravity by multigrid, after the hydro suite passes at speed, starting from LUNA's gravity solvers (same author;
+2. Multi-GPU hydro, on the mesh's domain decomposition and ghost layers (voronoi-cpp).
+3. Refinement and derefinement: conservative remap from the volumes, on the mesh's split and merge.
+4. Self-gravity by multigrid, after the hydro suite passes at speed, starting from LUNA's gravity solvers (same author;
    multigrid with coarse-grid gather): V-cycles warm-started from the previous step's potential, aiming at 2-4
    V-cycles per step, so the solve runs at full GPU speed. Options: an auxiliary Cartesian grid (deposit, solve,
    interpolate) or multigrid on the Voronoi mesh itself with gravity as face fluxes. Coarse levels are inefficient on
@@ -244,10 +250,10 @@ Every test in the suite reports accuracy per cost: GPU-seconds to a target error
 
 ## Repository layout
 
-- `src/hydro/`: the hydro (header-only). `src/bench/`: `hydro_sedov`, `hydro_1d`, `hydro_wave3d`. `src/test/`: the tests,
+- `src/hydro/`: the hydro (header-only). `src/bench/`: `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`. `src/test/`: the tests,
   `exact_riemann.hpp`, `luna_1d_values.hpp`.
 - `extern/voronoi-cpp/`: the mesh library, pinned submodule.
-- `scripts/`: `hydro_a100.sh`, `hydro_speed_a100.sh`, `dim1d_a100.sh`, `two_pass_a100.sh`, `snapshot_hash.sh`, `compare_1d.py`,
+- `scripts/`: `hydro_a100.sh`, `hydro_speed_a100.sh`, `dim1d_a100.sh`, `dim2d_a100.sh`, `two_pass_a100.sh`, `snapshot_hash.sh`, `compare_1d.py`, `compare_kh.py`,
   `hydro_sedov_compare.py`, `sedov_field_l1.py`, `norm3d.py`, `luna_*.py`, `make_figures.py`, `figstyle.py`, `lint_cpp.sh`.
 - `docs/figures/`: the figures.
 - `research_notes/`, `reports/`: status notes.
