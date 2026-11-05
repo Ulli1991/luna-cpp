@@ -58,13 +58,13 @@ STYLE = {"luna": dict(color=BLUE, ls="-", marker="o", ms=3.0),
 REF = dict(color=BLACK, lw=0.7)
 AK = dict(color=BLACK, lw=0.8, ls=DOT)
 plt.rcParams.update({
-    "font.family": "serif", "font.serif": ["STIXGeneral"], "mathtext.fontset": "stix", "font.size": 10,
-    "axes.linewidth": 0.5, "axes.labelsize": 11, "axes.grid": False, "axes.unicode_minus": True,
+    "font.family": "serif", "font.serif": ["cmr10"], "mathtext.fontset": "cm", "axes.formatter.use_mathtext": True, "font.size": 8,
+    "axes.linewidth": 0.5, "axes.labelsize": 9, "axes.grid": False,
     "xtick.direction": "in", "ytick.direction": "in", "xtick.top": True, "ytick.right": True,
     "xtick.minor.visible": True, "ytick.minor.visible": True, "xtick.major.size": 3.5, "ytick.major.size": 3.5,
     "xtick.minor.size": 1.8, "ytick.minor.size": 1.8, "xtick.major.width": 0.5, "ytick.major.width": 0.5,
-    "xtick.minor.width": 0.4, "ytick.minor.width": 0.4, "xtick.labelsize": 9.5, "ytick.labelsize": 9.5,
-    "legend.frameon": False, "legend.fontsize": 8.5, "legend.handlelength": 2.4, "legend.labelspacing": 0.25,
+    "xtick.minor.width": 0.4, "ytick.minor.width": 0.4, "xtick.labelsize": 8, "ytick.labelsize": 8,
+    "legend.frameon": False, "legend.fontsize": 7.5, "legend.handlelength": 2.4, "legend.labelspacing": 0.25,
     "legend.borderaxespad": 0.3, "legend.borderpad": 0, "lines.linewidth": 1.0, "savefig.dpi": 300,
     "figure.facecolor": "white", "savefig.facecolor": "white", "axes.facecolor": "white",
 })
@@ -103,19 +103,19 @@ def inset(ax, rect, xlim, ylim, runs, refs, xticks, yticks, text=None, at=(0.06,
         line(a, static[0], static[1], "static", lw=0.6, zorder=4)
     a.set_xlim(*xlim)
     a.set_ylim(*ylim)
-    a.tick_params(labelsize=7.5, length=2.2, width=0.4, pad=1.5)
+    a.tick_params(labelsize=6.5, length=2.2, width=0.4, pad=1.5)
     a.tick_params(which="minor", length=1.2, width=0.3)
     a.set_xticks(xticks)
     a.set_yticks(yticks)
     for sp in a.spines.values():
         sp.set_linewidth(0.4)
     if text:
-        a.text(*at, text, transform=a.transAxes, fontsize=8.5, va="bottom", ha="left" if at[0] < 0.4 else "center", style="italic")
+        a.text(*at, text, transform=a.transAxes, fontsize=7, va="bottom", ha="left" if at[0] < 0.4 else "center")
     return a
 
 
 def corner(ax, text, x=0.03, y=0.95, ha="left"):
-    ax.text(x, y, text, transform=ax.transAxes, fontsize=10, va="top", ha=ha)
+    ax.text(x, y, text, transform=ax.transAxes, fontsize=8, va="top", ha=ha)
 
 
 def key(s, label, marker=False):
@@ -408,7 +408,7 @@ def fig_vortex():
         ax.set_ylabel(ylabel)
     axes[0].legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=BLUE, ls=DASH, lw=0.9, marker="o", ms=3, mew=0.5, mfc="none", label="LUNA MC, point start"),
                             key("static", "static", True), key("moving", "moving, one pass", True), key("two", "moving, two passes", True),
-                            rkey(r"$O(h)$ floor", dict(color=BLACK, ls=DOT, lw=0.9))], loc="lower left", fontsize=8)
+                            rkey(r"$O(h)$ floor", dict(color=BLACK, ls=DOT, lw=0.9))], loc="lower left")
     save(fig, "vortex_3d")
 
 
@@ -465,7 +465,7 @@ def fig_sedov():
         line(i, x, y, s, lw=0.8)
     i.set_xlim(0.88, 1.06)
     i.set_ylim(0.8, 4.2)
-    i.tick_params(labelsize=7.5, length=2.2, width=0.4, pad=1.5)
+    i.tick_params(labelsize=6.5, length=2.2, width=0.4, pad=1.5)
     i.tick_params(which="minor", length=1.2, width=0.3)
     for sp in i.spines.values():
         sp.set_linewidth(0.4)
@@ -485,7 +485,7 @@ def fig_sedov():
     b.set_xlabel(r"$n$")
     b.set_ylabel(r"$L_1(\rho)$")
     b.legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=BLUE, ls=DASH, lw=0.9, marker="o", ms=3, mew=0.5, mfc="none", label="LUNA minmod"),
-                      key("static", "static", True), key("moving", "moving", True), rkey("Sedov–Taylor")], loc="upper right")
+                      key("static", "static", True), key("moving", "moving", True), rkey("Sedov-Taylor")], loc="upper right")
     save(fig, "sedov_3d")
 
 
