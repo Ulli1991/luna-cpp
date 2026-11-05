@@ -159,39 +159,39 @@ research_notes/stage1_1d_2026-11-04.md.
 
 ## Figures
 
-From `scripts/make_figures.py`; each figure states its runs, jobs and commit in its footer.
+From `scripts/make_figures.py`.
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/sod-dark.png"><img src="docs/figures/sod.png" alt="Sod density"></picture>
+![Sod density](docs/figures/sod.png)
 
-Sod density, N = 512: moving against LUNA and static (same values) and the exact solution; moving has the sharper contact and twice LUNA's error at the rarefaction.
+Sod, t = 0.25, N = 512, cell means at centroids against the exact solution, in the insets every cell (static lies on LUNA, drawn dashed). Moving has the sharper contact and 2.5 times LUNA's error at the tail of the rarefaction (x = 0.48); the strip clips the contact and shock spikes. HLLC, MUSCL-Hancock, FP64; LUNA: MC, Pallas, CFL 0.8; static: uniform points, face limiter, LUNA's time step rule at 0.8; moving: face limiter, the default rule at 0.4, regularised. Job 31917206, voronoi-cpp 947946a.
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/shu_osher-dark.png"><img src="docs/figures/shu_osher.png" alt="Shu-Osher density"></picture>
+![Shu-Osher density](docs/figures/shu_osher.png)
 
-Shu-Osher density, N = 1024: on LUNA's domain moving fails, the grown inflow cell flattens the waves; on the padded domain it follows the reference, at rule 0.3 on OpenMP (older branch, the default 0.4 was not run padded). References: luna-reference-solutions 99a52d0.
+Shu-Osher, t = 1.8, N = 1024 on [-5, 5]. (a) On LUNA's domain moving fails: the grown inflow cell flattens the waves (job 31917208, 947946a, runs as for Sod). (b) Padded domain [-15, 5], same cell width: moving follows the reference, at the default rule at 0.3 (0.4 was not run padded), OpenMP, job 31920121, branch dim-1d-diag. Curves: luna-reference-solutions 99a52d0, `luna/shu_osher/shu_osher_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/shu_osher/so_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/woodward_colella-dark.png"><img src="docs/figures/woodward_colella.png" alt="Woodward-Colella density"></picture>
+![Woodward-Colella density](docs/figures/woodward_colella.png)
 
-Woodward-Colella density, N = 2048: moving holds the contacts in far fewer cells than LUNA, with an overshoot at x = 0.765. References: luna-reference-solutions 99a52d0.
+Woodward-Colella, t = 0.038, N = 2048, reflecting walls; insets at the contacts near 0.6 and 0.765 and the shock near 0.8. Moving holds them in far fewer cells than LUNA, with an overshoot at x = 0.765. Job 31917210, 947946a, runs as for Sod. Curves: luna-reference-solutions 99a52d0, `luna/woodward_colella/woodward_colella_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/woodward_colella/a9_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/convergence_1d-dark.png"><img src="docs/figures/convergence_1d.png" alt="Field L1 by N"></picture>
+![Field L1 by N](docs/figures/convergence_1d.png)
 
-Field L1 by N, 1D: Sod, moving ahead of LUNA in rho, 2-13 % over it in P; Shu-Osher, a floor at 0.037 on LUNA's domain, padded runs at LUNA's level; Woodward-Colella, ahead of LUNA with a stall near 3.4e-4 in rho.
+Field L1 of the reconstructed field (`scripts/compare_1d.py`), against the exact solution on Sod, LUNA MC 2^21 cells on Shu-Osher, LUNA MC 2^20 cells on Woodward-Colella. Sod: moving ahead of LUNA in rho, 2-13 % over it in P. Shu-Osher: a floor at 0.037 on LUNA's domain, padded runs (norm on [-5, 5], N per length 10) at LUNA's level: LUNA's rule 0.4, job 31919016, default rule at 0.3, job 31920121, branch dim-1d-diag. Woodward-Colella: ahead of LUNA, with a stall near 3.4e-4 in rho. Jobs 31917206/8/10, 947946a.
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/time_to_target_1d-dark.png"><img src="docs/figures/time_to_target_1d.png" alt="GPU seconds to a target error"></picture>
+![GPU time against field L1](docs/figures/time_to_target_1d.png)
 
-GPU seconds to a target error, 1D: LUNA wins Sod and Shu-Osher; on Woodward-Colella it is close in rho and P, LUNA leads in v, and only moving reaches rho 1e-3 in the ladder.
+GPU seconds of the stepping loop, one A100, one point per N, dotted lines the targets of the notes; LUNA's compile not counted, below ~1e5 cells a step is launch latency. LUNA wins Sod and Shu-Osher, where moving reaches no target. On Woodward-Colella it is close in rho and P, and only moving reaches rho 1e-3 in the ladder. One job per test: Sod 31917206, Shu-Osher 31917208 at 1095 MHz, Woodward-Colella 31917210 at 1305 MHz, 947946a.
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/vortex_3d-dark.png"><img src="docs/figures/vortex_3d.png" alt="3D Yee vortex"></picture>
+![3D Yee vortex](docs/figures/vortex_3d.png)
 
-3D Yee vortex, L1 against exact cell averages: moving one pass is first order, two passes (branch dim-1d-diag, not on main) reach order 2.2, then 1.5, and stay above static. O(h) floor marked.
+Yee vortex in a 3D slab, 10 x 10 x 2.5, nx x nx x nx/4 cells, t = 10. L1 of cell values against the exact average over each cell, v the vector. Moving one pass is first order; two passes (a switch on branch dim-1d-diag, not on main) reach order 2.2, then 1.5, and stay above static. O(h) floor: exact averages as a piecewise-constant field against the exact field; it binds a field norm, not this measure. Ours: HLLC, face limiter, Courant 0.3, jitter 0.1, start from the point value at the centroid, jobs 31920446, 31922276. LUNA: MC, HLLC, Pallas, CFL 0.8, luna-reference-solutions 99a52d0 `luna/yee_vortex/yee_vortex_convergence.npz` (LUNA debcdae + uncommitted, bitwise at 60cf841).
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/kh_2d-dark.png"><img src="docs/figures/kh_2d.png" alt="2D Kelvin-Helmholtz"></picture>
+![2D Kelvin-Helmholtz](docs/figures/kh_2d.png)
 
-2D Kelvin-Helmholtz: LUNA and static lead at equal N and in GPU time, one-flux moving stalls near 4e-4, two fluxes recover. Hydro on voronoi-cpp branch dim-2d, not yet on luna-cpp main.
+Kelvin-Helmholtz after McNally, Lyra & Passy (2012), N^2 cells, one A100 at 1305 MHz; e(t) = M / M_ref - 1 against their published reference curve, max over t <= 1.5, dotted lines the targets. LUNA and static lead at equal N, LUNA in GPU time; one-flux moving stalls near 4e-4, two fluxes recover. All HLLC, FP64; LUNA MC, Pallas, CFL 0.8; ours face limiter, per-face, LUNA's rule 0.8. Jobs 31922404/5/6, voronoi-cpp branch dim-2d: this hydro is not yet on luna-cpp main.
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/sedov_3d-dark.png"><img src="docs/figures/sedov_3d.png" alt="Sedov 3D"></picture>
+![Sedov 3D](docs/figures/sedov_3d.png)
 
-Sedov 3D, a shock test that cannot rank schemes: density profile (dim-limiters) and field L1 ladder (older code, LUNA ladder minmod, MC at 128 and 256).
+Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot rank schemes, order below 1 for every code (0.66 LUNA minmod, 0.78 moving, n = 128 to 256). Left: volume-weighted shells at 128^3, branch dim-limiters, jobs 31918879 (moving), 31918880 (static), 31918732 (LUNA). Right: field L1 over r < 1.5 R_s of the piecewise-constant field, not sampled at generators; older code, jobs 31879294, 31879807 (LUNA minmod 128-448, moving 64-256, 256 with the per-cell loop, static 64-192), LUNA MC 128 and 256 from dim-limiters. Ours: HLLC, jittered, Courant 0.3, face limiter.
 
 ## Limitations and open items
 
@@ -232,5 +232,5 @@ Every test in the suite reports accuracy per cost: GPU-seconds to a target error
 - `extern/voronoi-cpp/`: the mesh library, pinned submodule.
 - `scripts/`: `hydro_a100.sh`, `hydro_speed_a100.sh`, `dim1d_a100.sh`, `snapshot_hash.sh`, `compare_1d.py`,
   `hydro_sedov_compare.py`, `luna_*.py`, `make_figures.py`, `lint_cpp.sh`.
-- `docs/figures/`: the figures, light and dark.
+- `docs/figures/`: the figures.
 - `research_notes/`, `reports/`: status notes.
