@@ -157,6 +157,42 @@ kernel. Peak device memory: 144 B/cell static, 152 B/cell moving. Runs are
 bit-reproducible (the hash of the final state and positions). Field accuracy on Sod, Shu-Osher and Woodward-Colella:
 research_notes/stage1_1d_2026-11-04.md.
 
+## Figures
+
+From `scripts/make_figures.py`; each figure states its runs, jobs and commit in its footer.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/sod-dark.png"><img src="docs/figures/sod.png" alt="Sod density"></picture>
+
+Sod density, N = 512: moving against LUNA and static (same values) and the exact solution; moving has the sharper contact and twice LUNA's error at the rarefaction.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/shu_osher-dark.png"><img src="docs/figures/shu_osher.png" alt="Shu-Osher density"></picture>
+
+Shu-Osher density, N = 1024: on LUNA's domain moving fails, the grown inflow cell flattens the waves; on the padded domain it follows the reference, at rule 0.3 on OpenMP (older branch, the default 0.4 was not run padded). References: luna-reference-solutions 99a52d0.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/woodward_colella-dark.png"><img src="docs/figures/woodward_colella.png" alt="Woodward-Colella density"></picture>
+
+Woodward-Colella density, N = 2048: moving holds the contacts in far fewer cells than LUNA, with an overshoot at x = 0.765. References: luna-reference-solutions 99a52d0.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/convergence_1d-dark.png"><img src="docs/figures/convergence_1d.png" alt="Field L1 by N"></picture>
+
+Field L1 by N, 1D: Sod, moving ahead of LUNA in rho, 2-13 % over it in P; Shu-Osher, a floor at 0.037 on LUNA's domain, padded runs at LUNA's level; Woodward-Colella, ahead of LUNA with a stall near 3.4e-4 in rho.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/time_to_target_1d-dark.png"><img src="docs/figures/time_to_target_1d.png" alt="GPU seconds to a target error"></picture>
+
+GPU seconds to a target error, 1D: LUNA wins Sod and Shu-Osher; on Woodward-Colella it is close in rho and P, LUNA leads in v, and only moving reaches rho 1e-3 in the ladder.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/vortex_3d-dark.png"><img src="docs/figures/vortex_3d.png" alt="3D Yee vortex"></picture>
+
+3D Yee vortex, L1 against exact cell averages: moving one pass is first order, two passes (branch dim-1d-diag, not on main) reach order 2.2, then 1.5, and stay above static. O(h) floor marked.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/kh_2d-dark.png"><img src="docs/figures/kh_2d.png" alt="2D Kelvin-Helmholtz"></picture>
+
+2D Kelvin-Helmholtz: LUNA and static lead at equal N and in GPU time, one-flux moving stalls near 4e-4, two fluxes recover. Hydro on voronoi-cpp branch dim-2d, not yet on luna-cpp main.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/sedov_3d-dark.png"><img src="docs/figures/sedov_3d.png" alt="Sedov 3D"></picture>
+
+Sedov 3D, a shock test that cannot rank schemes: density profile (dim-limiters) and field L1 ladder (older code, LUNA ladder minmod, MC at 128 and 256).
+
 ## Limitations and open items
 
 - The hydro step is not yet at its target (~300 M cell updates/s): on the A100 at 128^3 double precision runs at
@@ -195,5 +231,6 @@ Every test in the suite reports accuracy per cost: GPU-seconds to a target error
   `exact_riemann.hpp`, `luna_1d_values.hpp`.
 - `extern/voronoi-cpp/`: the mesh library, pinned submodule.
 - `scripts/`: `hydro_a100.sh`, `hydro_speed_a100.sh`, `dim1d_a100.sh`, `snapshot_hash.sh`, `compare_1d.py`,
-  `hydro_sedov_compare.py`, `luna_*.py`, `lint_cpp.sh`.
+  `hydro_sedov_compare.py`, `luna_*.py`, `make_figures.py`, `lint_cpp.sh`.
+- `docs/figures/`: the figures, light and dark.
 - `research_notes/`, `reports/`: status notes.
