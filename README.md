@@ -18,6 +18,8 @@ git clone --recursive https://github.com/Ulli1991/luna-cpp.git
 
 (In an existing clone: `git submodule update --init --recursive`.)
 
+A build stops if `extern/voronoi-cpp` is behind voronoi-cpp `main`: update the pin and commit it. `-DLUNA_ALLOW_OLD_PIN=ON` only warns, to reproduce an old result.
+
 Dependencies:
 
 - CMake 3.16 or later, a C++17 compiler (gcc 14/15 tested).
