@@ -6,6 +6,7 @@
 //               [--limiter=face|cell|none] [--riemann=hllc|hll] [--precision=<name>]
 //               [--moving] [--bulk=<km/s>] [--no-blast] [--box=fx,fy,fz] [--out=<dir>]
 //               [--snapshots=10] [--steps=<max>] [--input-order] [--memory]
+//               [--integrator=one-pass|two-pass]
 //
 // side^3 generating points in a 50 pc periodic box (jittered: a lattice
 // moved by up to 0.1 spacings; uniform: uniform random). AREPO units (kpc,
@@ -30,7 +31,9 @@
 // state, positions and volumes (bits),
 // the face sides whose extrapolation fell back to the cell state (total,
 // steps with any, most in one step) and what the mesh updates did;
-// --memory adds device memory (Kokkos allocations) per phase.
+// --memory adds device memory (Kokkos allocations) per phase. --integrator:
+// hydro::Integrator, default two-pass on a moving mesh at order 1, else one-pass;
+// two-pass exists only there.
 
 
 #include "finite_volume.hpp"
@@ -202,6 +205,7 @@ struct Options {
     hydro::Update update = hydro::Update::per_face;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
     bool moving = false, input_order = false, blast = true;
+    hydro::Integrator integrator = hydro::Integrator::one_pass;
     double bulk = 0;
     long long max_steps = 0;
     Box box{1.0};
@@ -270,7 +274,7 @@ void run(const Options& o, Points points) {
               << " deposit_cells=" << deposit << " deposit_volume=" << deposited << " luna_volume=" << target
               << " deposit_radius_max=" << (deposit > 0 ? r[by_distance[deposit - 1]] : 0.0) << " p_inject=" << p_inject << "\n";
 
-    FV fv(exec, mesh, gas, o.order, o.update, o.limiter, o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh);
+    FV fv(exec, mesh, gas, o.order, o.update, o.limiter, o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh, o.integrator);
     {  // Q = U V: the background moving with the bulk velocity, the blast's pressure on top
         auto Q = Kokkos::create_mirror_view(fv.state());
         for (long long i = 0; i < n; ++i) {
@@ -372,7 +376,8 @@ void run(const Options& o, Points points) {
     const Totals after = totals(fv);
     const double hydro_ms = median(prim_ms) + median(sweep_ms) + median(flux_ms) + median(update_ms);
     const double step_ms = hydro_ms + median(drift_ms) + median(mesh_ms) + median(cells_ms);
-    std::cout << "run: precision=" << o.precision << " order=" << o.order << " update=" << (o.update == hydro::Update::per_cell ? "cell" : "face")
+    std::cout << "run: integrator=" << (o.integrator == hydro::Integrator::two_pass ? "two-pass" : "one-pass") << " precision=" << o.precision
+              << " order=" << o.order << " update=" << (o.update == hydro::Update::per_cell ? "cell" : "face")
               << " steps=" << steps << " limiter=" << o.limit << " riemann=" << o.riemann << " mesh=" << (o.moving ? "moving" : "static")
               << " bulk=" << o.bulk << " blast=" << o.blast << " t=" << t << " wall_s=" << wall_s << " s_per_step=" << wall_s / steps
               << " gpu_s=" << gpu_ms * 1e-3 << "\n";
@@ -437,7 +442,7 @@ int main(int argc, char** argv) {
         std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]"
                      " [--riemann=hllc|hll] [--precision=default|weight32|weight64|flux32|grad32|grad16|geo32|riemann32|mixed|mixed16|low|lowweights]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
-                     " [--snapshots=10] [--steps=max] [--input-order] [--memory]\n";
+                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--integrator=one-pass|two-pass]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -455,6 +460,11 @@ int main(int argc, char** argv) {
     o.riemann = flag(argc, argv, "--riemann", "hllc");
     o.precision = flag(argc, argv, "--precision", "default");
     o.moving = flag(argc, argv, "--moving", "") == "1";
+    const std::string integrator = flag(argc, argv, "--integrator", "");
+    if (!integrator.empty() && integrator != "one-pass" && integrator != "two-pass") throw std::invalid_argument("hydro_sedov: --integrator=one-pass|two-pass");
+    o.integrator = integrator.empty() ? hydro::default_integrator(o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh, o.order)
+                   : integrator == "two-pass" ? hydro::Integrator::two_pass
+                                              : hydro::Integrator::one_pass;
     o.blast = flag(argc, argv, "--no-blast", "") != "1";
     o.bulk = std::stod(flag(argc, argv, "--bulk", "0"));  // km/s along x
     o.out = flag(argc, argv, "--out", "");
