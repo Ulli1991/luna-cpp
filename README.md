@@ -4,6 +4,10 @@ Moving-mesh hydrodynamics on GPUs. The fluid is solved on exact Voronoi meshes f
 
 The scheme is MUSCL-Hancock with HLLC or HLL on static meshes, and AREPO next generation's two flux passes on moving ones, with least-squares gradients and mesh regularisation in the style of AREPO. It runs in 3D and 2D (periodic boxes) and 1D (with walls), and is bit-reproducible from run to run. On Sedov 3D at 256³ the moving mesh takes 925 steps where the static mesh takes 5834.
 
+![Control flow of a run](docs/figures/flow_step.png)
+
+One run from start to finish. Each step takes a time step, then one of three paths: a static mesh, the default two-pass moving mesh, or one pass. The green boxes are calls into voronoi-cpp.
+
 BSD 3-Clause, see [LICENSE](LICENSE).
 
 ## Install and build
