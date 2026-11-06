@@ -84,6 +84,7 @@ TEXTS, BOXES = [], []  # panel labels and box letters, zoom boxes, of the figure
 FAILED = []  # (figure, what) of every overlap
 WIDTH = FIGSIZE[0] * 2  # every figure
 LEGEND = dict(loc="upper right", fontsize=LABEL)
+KH_MESH_WINDOWS = (((0, 1), (0, 1)), ((0.2, 0.5), (0.1, 0.4)), ((0.28, 0.36), (0.2, 0.28)), ((0.328, 0.354), (0.249, 0.275)))  # kh_2d_mesh, nested
 KH_VMIN, KH_VMAX = 0.9, 2.1  # LUNA's KH figures, magma (its scripts/validation/plots/kh_grid.py)
 KH_WINDOW = ((0.27, 0.57), (0.11, 0.41))  # the roll-up of the zoom panels
 DIFF = {}
@@ -544,7 +545,7 @@ def kh_field(kind, t, n, m):
 
 def fig_kh_density():
     """Density maps by time, one colour scale; a zoom on a roll-up; the difference from LUNA at the finest N."""
-    n, fine = 1024, 2048
+    n = fine = 2048
     window = KH_WINDOW
     times = ("1.0", "1.5", "2.5", "3.0")
     last = len(times)
@@ -556,14 +557,11 @@ def fig_kh_density():
         ref = kh_field("luna", t, fine, fine)
         for c, (kind, name) in enumerate(names):
             ax = axes[r, c]
-            rho = kh_field(kind, t, n, 2 * n if kind != "luna" else n)
+            rho = kh_field(kind, t, n, n)
             image = ax.imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
-            corner(ax, f"({panels[4 * r + c]}) {name}, $t = {t}$", y=0.97)
+            corner(ax, f"({panels[4 * r + c]}) {name}, $N = {n}$, $t = {t}$", y=0.97)
             if t == "1.5":
-                if kind == "moving":
-                    kh_voronoi(axes[last, c], np.fromfile(f"{KH_FIELDS}/field_moving_t{t}_{n}.bin").reshape(-1, 7), window, "0.85", 0.05)
-                else:
-                    axes[last, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
+                axes[last, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
                 axes[last, c].set_xlim(*window[0])
                 axes[last, c].set_ylim(*window[1])
                 corner(axes[last, c], f"({panels[4 * last + c]}) {name}, $t = 1.5$", y=0.97)
@@ -725,6 +723,11 @@ def sedov_column(run, m=2 * SIDE, samples=4 * SIDE):
     return np.load(cache)["column"]
 
 
+def filled(values):
+    """A shell with no generator in it has no value: leave a gap in the curve."""
+    return np.where(values == 0, np.nan, values)
+
+
 def fig_sedov_shock():
     prof = {run: sedov_profiles(run) for run in ("moving", "luna")}
     rho0, e0 = MP / UNIT_RHO, 1e51 / (1e10 * MSUN * 1e10)
@@ -732,15 +735,15 @@ def fig_sedov_shock():
     outer = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.2)
     top = outer[0].subgridspec(1, 2, wspace=0.22)
     a, b = fig.add_subplot(top[0]), fig.add_subplot(top[1])
-    maps = outer[1].subgridspec(1, 3, wspace=0.34)
-    names = {"moving": (MOVING_C, "o-"), "luna": (LUNA_C, "o-")}
-    for run, (color, _) in names.items():
+    maps = outer[1].subgridspec(1, 4, width_ratios=[1, 1, 0.42, 1], wspace=0.06)
+    names = {"luna": (LUNA_C, "o"), "moving": (MOVING_C, "^")}
+    for run, (color, marker) in names.items():
         p = prof[run]
         t = p["t"][1:] * UNIT_T / YEAR
         peak = p["r"][p["rho"][1:].argmax(axis=1)] * KPC / PC
-        a.loglog(t, peak, color=color, marker="o", ms=MS, lw=LW, label=f"{RUNS_3D[run]}, peak-$\\rho$ location")
+        a.loglog(t, peak, color=color, marker=marker, ms=MS, lw=LW, label=f"{RUNS_3D[run]}, peak-$\\rho$ location")
     t_all = prof["luna"]["t"][1:]
-    t_line = np.geomspace(1, t_all[-1] * UNIT_T / YEAR, 200)
+    t_line = np.geomspace(500, 1.4 * t_all[-1] * UNIT_T / YEAR, 200)
     a.loglog(t_line, [exact_sedov.solution(np.array([0.0]), x * YEAR / UNIT_T, e0, rho0, 5 / 3)[3] * KPC / PC for x in t_line], color="0.5", lw=1.0,
              label=rf"$R_s(t) = \xi (E t^2/\rho_0)^{{1/5}}$, $\xi$={exact_sedov.xi0(5 / 3):.2f}")
     a.set_xlabel("t [yr]")
@@ -753,27 +756,35 @@ def fig_sedov_shock():
         rho, _, _, R = exact_sedov.solution(r_fine, t, e0, rho0, 5 / 3)
         b.semilogy(r_fine * KPC / PC, np.maximum(rho, 1e-300) * UNIT_RHO / MP, **REF)
         for run, (color, _) in names.items():
-            b.semilogy(prof[run]["r"] * KPC / PC, prof[run]["rho"][i] * UNIT_RHO / MP, color=color, lw=LW)
+            b.semilogy(prof[run]["r"] * KPC / PC, filled(prof[run]["rho"][i]) * UNIT_RHO / MP, color=color, lw=LW)
         b.text(R * KPC / PC, 4.6, f"{t * UNIT_T / YEAR / 1e3:.0f}", ha="center", fontsize=LABEL)
     b.set_xlim(0, 16)
-    b.set_ylim(1e-3, 12)
+    b.set_ylim(1e-3, 100)
     b.set_xlabel("r [pc]")
     b.set_ylabel(r"n [cm$^{-3}$]")
     b.legend(handles=[plt.Line2D([], [], color=MOVING_C, lw=LW, label=RUNS_3D["moving"]), plt.Line2D([], [], color=LUNA_C, lw=LW, label=RUNS_3D["luna"]), rkey("Sedov-Taylor", REF)],
              loc="lower right", fontsize=LABEL)
-    corner(b, r"$t$ [$10^3$ yr] above each shock", 0.03, 0.05, va="bottom")
-    ours, theirs = sedov_column("moving"), sedov_column("luna")
+    corner(b, r"$t$ [$10^3$ yr] above each shock", 0.03, 0.97)
+    ours, theirs = sedov_column("moving") / 1e-4, sedov_column("luna") / 1e-4
     lo, hi = min(ours.min(), theirs.min()), max(ours.max(), theirs.max())
     L = BOX * KPC / PC
-    panels = [("moving, two passes", ours, dict(cmap="magma", vmin=lo, vmax=hi)), ("LUNA MC", theirs, dict(cmap="magma", vmin=lo, vmax=hi)),
-              ("moving $-$ LUNA", ours - theirs, dict(cmap="RdBu_r", vmin=-abs(ours - theirs).max(), vmax=abs(ours - theirs).max()))]
-    axes = [fig.add_subplot(maps[i]) for i in range(3)]
-    for ax, (label, field, kw) in zip(axes, panels):
+    spread = abs(ours - theirs).max()
+    panels = [(0, "moving, two passes", ours, dict(cmap="magma", vmin=lo, vmax=hi), None),
+              (1, "LUNA MC", theirs, dict(cmap="magma", vmin=lo, vmax=hi), r"$\Sigma$ [$10^{-4}$ g cm$^{-2}$]"),
+              (3, "moving $-$ LUNA", ours - theirs, dict(cmap="RdBu_r", vmin=-spread, vmax=spread), r"$\Delta\Sigma$ [$10^{-4}$ g cm$^{-2}$]")]
+    for slot, label, field, kw, title in panels:
+        ax = fig.add_subplot(maps[slot])
         im = ax.imshow(field.T, origin="lower", extent=(0, L, 0, L), aspect="equal", **kw)
+        ax.grid(False)
+        ax.set_xticks((0, 20, 40))
         ax.set_xlabel("x [pc]")
-        ax.set_ylabel("y [pc]")
+        if slot == 0:
+            ax.set_ylabel("y [pc]")
+        else:
+            ax.tick_params(labelleft=False)
         corner(ax, label, 0.03, 0.97)
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03, label=r"$\Sigma$ [g cm$^{-2}$]")
+        if title:
+            fig.colorbar(im, cax=ax.inset_axes([1.03, 0, 0.05, 1]), label=title)
     save(fig, "sedov3d_shock")
 
 
@@ -789,7 +800,7 @@ def fig_sedov_radial():
     for run, (color, ls) in style.items():
         p = prof[run]
         r = p["r"] * KPC / PC
-        n, vr, Pc = p["rho"][-1] * UNIT_RHO / MP, p["vr"][-1], p["P"][-1] * UNIT_P
+        n, vr, Pc = filled(p["rho"][-1]) * UNIT_RHO / MP, np.where(p["rho"][-1] == 0, np.nan, p["vr"][-1]), filled(p["P"][-1]) * UNIT_P
         kw = dict(color=color, ls=ls, lw=LW, label=RUNS_3D[run])
         axes[0, 0].plot(r, n, **kw)
         axes[0, 1].plot(r, vr, **kw)
@@ -806,6 +817,7 @@ def fig_sedov_radial():
         ax.set_yscale(scale)
         ax.set_xlabel("r [pc]")
         ax.set_ylabel(ylabel)
+    axes[0, 0].set_ylim(1e-4, 30)
     axes[0, 0].legend(loc="lower right", fontsize=LABEL)
     save(fig, "sedov3d_radial")
 
@@ -841,14 +853,6 @@ def cell_collection(ax, polygons, colours, edge=None, lw=0.0, **kw):
     return cells
 
 
-def kh_voronoi(ax, rows, window, edge=None, lw=0.0):
-    _, polygons, colours = voronoi_polygons(rows[:, :2], rows[:, 5], window)
-    cell_collection(ax, polygons, colours, edge, lw, cmap="magma", norm=matplotlib.colors.Normalize(KH_VMIN, KH_VMAX))
-    ax.set_xlim(*window[0])
-    ax.set_ylim(*window[1])
-    ax.set_aspect("equal")
-
-
 def smooth_map(rows, gradient, window, m):
     """Nearest cell plus the run's limited gradient from the centroid, periodic, on m^2 pixels of a window: the field the scheme has."""
     (x0, x1), (y0, y1) = window
@@ -859,10 +863,10 @@ def smooth_map(rows, gradient, window, m):
     return (rows[near, 5] + (gradient[near] * d).sum(1)).reshape(m, m)
 
 
-def fading_edges(ax, rows, window, pixels, full=8.0):
+def fading_edges(ax, rows, window, pixels, lw, full=8.0):
     """The Voronoi edges of a window, exact, thin and semi-transparent, fading out below `full` pixels of length."""
     (x0, x1), (y0, y1) = window
-    near, _, _ = voronoi_polygons(rows[:, :2], rows[:, 5], window)
+    near, _, _ = voronoi_polygons(rows[:, :2], rows[:, 5], window, margin=0.03)
     v = Voronoi(near)
     ridges = np.array([r for r in v.ridge_vertices if min(r) >= 0])
     segments = v.vertices[ridges]
@@ -870,22 +874,24 @@ def fading_edges(ax, rows, window, pixels, full=8.0):
     segments = segments[keep]
     length = np.hypot(*(segments[:, 1] - segments[:, 0]).T) / (x1 - x0) * pixels
     colours = np.ones((len(segments), 4))
-    colours[:, 3] = 0.55 * np.clip(length / full, 0, 1)
-    ax.add_collection(LineCollection(segments, colors=colours, linewidths=0.2))
+    colours[:, 3] = 0.6 * np.clip(length / full, 0, 1)
+    ax.add_collection(LineCollection(segments, colors=colours, linewidths=lw))
 
 
 def fig_kh_mesh():
-    """The moving mesh as AREPO's figures show it: the reconstructed field, the Voronoi edges over it, fading where cells are unresolved."""
-    t, n = "2.5", 512
+    """The moving mesh as AREPO's figures show it: the reconstructed field, the Voronoi edges over it, fading where cells are unresolved;
+    the whole box and three nested zooms into a billow, each box marked on the panel before."""
+    t, n = "4.0", 512
     rows = np.fromfile(f"{SEDOV_256}/kh_mesh512_t{t}.bin").reshape(-1, 7)
     gradient = np.fromfile(f"{SEDOV_256}/kh_mesh512_t{t}.grad.bin").reshape(-1, 2)
-    whole, inner = ((0, 1), (0, 1)), ((0.17, 0.37), (0.13, 0.33))
-    fig, axes = plt.subplots(1, 2, figsize=(WIDTH, WIDTH * 0.47), gridspec_kw=dict(wspace=0.05, left=0.01, right=0.93, top=0.99, bottom=0.01))
-    dpi, pixels = 300, 1800
-    for ax, window, label in ((axes[0], whole, f"moving, two passes, $N = {n}$, $t = {t}$"), (axes[1], inner, "zoom into a roll-up")):
+    windows = KH_MESH_WINDOWS
+    fig, axes = plt.subplots(1, 4, figsize=(WIDTH, WIDTH * 0.235), gridspec_kw=dict(wspace=0.09, left=0.005, right=0.925, top=0.99, bottom=0.01))
+    labels = (f"moving, two passes, $N = {n}$, $t = 4$", "(a)", "(b)", "(c)")
+    pixels = 1000
+    for ax, window, label, lw in zip(axes, windows, labels, (0.1, 0.15, 0.3, 0.5)):
         image = ax.imshow(smooth_map(rows, gradient, window, pixels).T, origin="lower", extent=(*window[0], *window[1]), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX,
                           interpolation="bilinear")
-        fading_edges(ax, rows, window, pixels)
+        fading_edges(ax, rows, window, pixels, lw)
         ax.set_xlim(*window[0])
         ax.set_ylim(*window[1])
         ax.set_xticks([])
@@ -893,26 +899,27 @@ def fig_kh_mesh():
         ax.grid(False)
         ax.minorticks_off()
         corner(ax, label, y=0.97)
-    mark(axes[0], inner[0], inner[1], "")
     to_fig = fig.transFigure.inverted()
-    for y, side in ((inner[1][0], 0), (inner[1][1], 1)):
-        fig.add_artist(ConnectionPatch(xyA=(inner[0][1], y), coordsA=axes[0].transData, xyB=(0, side), coordsB=axes[1].transAxes, color=EDGE, lw=0.6, clip_on=False, zorder=10))
-        CONNECTORS.append((to_fig.transform(axes[0].transData.transform((inner[0][1], y))), to_fig.transform(axes[1].transAxes.transform((0, side)))))
-    fig.colorbar(image, ax=axes.ravel().tolist(), location="right", fraction=0.02, pad=0.01, label=r"$\rho$")
-    save(fig, "kh_2d_mesh", dpi=dpi)
+    for ax, target, inner, letter in zip(axes, axes[1:], windows[1:], "abc"):
+        mark(ax, inner[0], inner[1], letter)
+        TEXTS[-1].set_bbox(dict(fc="white", ec="none", pad=0.8))
+        for y, side in ((inner[1][0], 0), (inner[1][1], 1)):
+            fig.add_artist(ConnectionPatch(xyA=(inner[0][1], y), coordsA=ax.transData, xyB=(0, side), coordsB=target.transAxes, color=EDGE, lw=0.6, clip_on=False, zorder=10))
+            CONNECTORS.append((to_fig.transform(ax.transData.transform((inner[0][1], y))), to_fig.transform(target.transAxes.transform((0, side)))))
+    fig.colorbar(image, ax=axes.ravel().tolist(), location="right", fraction=0.012, pad=0.01, label=r"$\rho$")
+    save(fig, "kh_2d_mesh", dpi=300)
 
 
 def fig_kh_evolution():
-    """Moving and LUNA MC at one N, LUNA MC at the finest N as the reference; moving: nearest cell plus the run's limited gradient."""
-    n, fine = 1024, 2048
+    """Moving and LUNA MC at N = 2048, to t = 5: ours the reconstructed field, nearest cell plus the limited gradient; LUNA cell values."""
+    n = 2048
     times = ("0", "1.0", "2.5", "4.0", "5.0")
-    fig, axes = plt.subplots(3, 5, figsize=(WIDTH, WIDTH * 0.575), gridspec_kw=dict(wspace=0.04, hspace=0.04, left=0.01, right=0.92, top=0.99, bottom=0.01))
-    rows = (("moving", n, 2 * n, f"moving, $N = {n}$"), ("luna", n, n, f"LUNA MC, $N = {n}$"), ("luna", fine, fine, f"LUNA MC, $N = {fine}$"))
-    for r, (kind, size, pixels, name) in enumerate(rows):
+    fig, axes = plt.subplots(2, 5, figsize=(WIDTH, WIDTH * 0.385), gridspec_kw=dict(wspace=0.04, hspace=0.04, left=0.01, right=0.92, top=0.99, bottom=0.01))
+    for r, (kind, name) in enumerate((("moving", "moving"), ("luna", "LUNA MC"))):
         for c, t in enumerate(times):
             ax = axes[r, c]
-            image = ax.imshow(kh_field(kind, t, size, pixels).T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
-            corner(ax, f"{name}, $t = {float(t):g}$", y=0.97)
+            image = ax.imshow(kh_field(kind, t, n, n).T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
+            corner(ax, f"{name}, $N = {n}$, $t = {float(t):g}$", y=0.97)
             ax.grid(False)
             ax.set_xticks([])
             ax.set_yticks([])
