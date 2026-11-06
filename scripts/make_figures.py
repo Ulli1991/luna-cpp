@@ -21,7 +21,7 @@ import h5py
 import matplotlib
 import matplotlib.ticker
 import numpy as np
-from matplotlib.patches import Rectangle
+from matplotlib.patches import ConnectionPatch, Rectangle
 from PIL import Image
 
 matplotlib.use("Agg")
@@ -61,7 +61,8 @@ REF = dict(color="k", lw=THIN, zorder=2.7)
 AK = dict(color="k", lw=THIN, ls=":", zorder=2.7)
 MS = 2.8      # open markers
 LABEL = 10    # letters and labels inside panels, as in LUNA's figures
-EDGE = "0.75"  # zoom boxes and connectors
+EDGE = "0.65"  # connectors
+CONNECTORS = []  # of the figure being drawn, figure coordinates
 WIDTH = FIGSIZE[0] * 2  # every figure
 LEGEND = dict(loc="upper right", fontsize=LABEL)
 
@@ -76,7 +77,7 @@ def save(fig, name):
     fig.savefig(path)
     plt.close(fig)
     Image.open(path).convert("RGB").quantize(256, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE).save(path, optimize=True)
-    print(f"{path} {os.path.getsize(path) / 1024:.0f} kB")
+    print(f"{path} {os.path.getsize(path) / 1024:.0f} kB, connectors crossing: {crossings()}")
 
 
 def line(ax, x, y, s, **over):
@@ -216,12 +217,9 @@ def sedov_state(path):
     return np.sqrt(((pos - 0.025) ** 2).sum(0)), vol, rho, t
 
 
-def zoom(main, ax, xlim, xticks, runs, refs, letter, label, ylim=None, through=()):
-    """A zoom panel: reference, static as a thin line (it lies on LUNA's cells), cells of the others; its region boxed on main.
-
-    The connectors run straight down from the box to the bottom of `through` (the axes under main), then fan out to the
-    panel's top corners below the tick labels: same order on both ends, so they do not cross if the zooms' x ranges do not overlap.
-    """
+def zoom(main, ax, xlim, xticks, runs, refs, letter, label, ylim=None):
+    """A zoom panel: reference, static as a thin line (it lies on LUNA's cells), cells of the others; its region boxed on main,
+    connectors from the box's bottom corners to the panel's top corners."""
     ys = [y[(x >= xlim[0]) & (x <= xlim[1])] for x, y, *_ in [*runs, *refs]]
     if ylim is None:
         lo, hi = min(y.min() for y in ys if y.size), max(y.max() for y in ys if y.size)
@@ -242,16 +240,21 @@ def zoom(main, ax, xlim, xticks, runs, refs, letter, label, ylim=None, through=(
     ax.tick_params(labelsize=LABEL)
     corner(ax, f"({letter}) {label}")
     mark(main, xlim, ylim, letter)
-    fig = main.figure
-    last = through[-1] if through else main
+    to_fig = main.figure.transFigure.inverted()
     for x, side in ((xlim[0], 0), (xlim[1], 1)):
-        main.plot([x, x], [main.get_ylim()[0], ylim[0]], color=EDGE, lw=0.5, zorder=1, scalex=False, scaley=False)
-        for a in through:
-            a.axvline(x, color=EDGE, lw=0.5, zorder=1)
-        xf = fig.transFigure.inverted().transform(main.transData.transform((x, ylim[0])))[0]
-        end = ax.get_position()
-        fig.add_artist(plt.Line2D([xf, end.x1 if side else end.x0], [last.get_position().y0 - 0.33 / fig.get_figheight(), end.y1],
-                                  transform=fig.transFigure, color=EDGE, lw=0.5))
+        main.figure.add_artist(ConnectionPatch(xyA=(x, ylim[0]), coordsA=main.transData, xyB=(side, 1), coordsB=ax.transAxes,
+                                               color=EDGE, lw=0.6, clip_on=False, zorder=10))
+        CONNECTORS.append((to_fig.transform(main.transData.transform((x, ylim[0]))), to_fig.transform(ax.transAxes.transform((side, 1)))))
+
+
+def crossings():
+    """Pairs of connectors of a figure that cross; the zooms' windows and lower limits are chosen to keep this at 0."""
+    def side(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    n = sum(side(p, q, u) * side(p, q, v) < 0 and side(u, v, p) * side(u, v, q) < 0
+            for i, (p, q) in enumerate(CONNECTORS) for u, v in CONNECTORS[i + 1:])
+    CONNECTORS.clear()
+    return n
 
 
 def mark(main, xlim, ylim, letter):
@@ -269,7 +272,7 @@ def fig_sod():
     fine = np.linspace(0, 1, 40001)
     exact = ex(fine)[0]
     fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 2))
-    outer = fig.add_gridspec(2, 1, height_ratios=[4, 2.2], hspace=0.24)
+    outer = fig.add_gridspec(2, 1, height_ratios=[4, 2.2], hspace=0.16)
     top = outer[0].subgridspec(2, 1, height_ratios=[3.2, 1], hspace=0)
     ax = fig.add_subplot(top[0])
     res = fig.add_subplot(top[1], sharex=ax)
@@ -292,7 +295,7 @@ def fig_sod():
     views = (((0.19, 0.23), [0.20, 0.21, 0.22], "a", "rarefaction head"), ((0.46, 0.52), [0.47, 0.49, 0.51], "b", "rarefaction tail"),
              ((0.70, 0.76), [0.71, 0.73, 0.75], "c", "contact"), ((0.92, 0.955), [0.93, 0.94, 0.95], "d", "shock"))
     for a, (xlim, ticks, letter, label) in zip(z, views):
-        zoom(ax, a, xlim, ticks, runs, refs, letter, label, through=[res])
+        zoom(ax, a, xlim, ticks, runs, refs, letter, label)
     z[0].set_ylabel(r"$\rho$")
     for a in z:
         a.set_xlabel(r"$x$")
@@ -310,7 +313,7 @@ def fig_shu_osher():
     ar = reference_file("athenak/shu_osher/so_ppmx_rk4_16384.npz")["ref_rho"]
     refs = [(centres(-5, 5, lr.size), lr, REF), (centres(-5, 5, ar.size), ar, AK)]
     fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 2.6))
-    outer = fig.add_gridspec(2, 1, height_ratios=[2.5, 1.1], hspace=0.18)
+    outer = fig.add_gridspec(2, 1, height_ratios=[2.5, 1.1], hspace=0.11)
     top = outer[0].subgridspec(2, 1, hspace=0)
     a = fig.add_subplot(top[0])
     b = fig.add_subplot(top[1], sharex=a)
@@ -332,7 +335,7 @@ def fig_shu_osher():
                       rkey("LUNA, high resolution", REF), rkey("AthenaK PPMX", AK)], **LEGEND)
     z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
     runs = [(xl, rl, "luna"), (xs, rs, "static"), (x, r, "moving"), (xw, rw, "padded")]
-    views = (((-3.2, 0.2), [-3, -2, -1, 0], "a", "left-going waves"), ((0.6, 1.72), [0.8, 1.2, 1.6], "b", "wave train"),
+    views = (((-3.2, 0.2), [-3, -2, -1, 0], "a", "left-going waves"), ((0.6, 1.4), [0.8, 1.0, 1.2], "b", "wave train"),
              ((1.76, 1.92), [1.8, 1.85, 1.9], "c", "post-shock peak"), ((2.33, 2.45), [2.36, 2.40, 2.44], "d", "main shock"))
     for ax, (xlim, ticks, letter, label) in zip(z, views):
         zoom(b, ax, xlim, ticks, runs, refs, letter, label)
@@ -351,7 +354,7 @@ def fig_woodward_colella():
     ar = reference_file("athenak/woodward_colella/a9_ppmx_rk4_16384.npz")["ref_rho"]
     refs = [(centres(0, 1, lr.size), lr, REF), (centres(0, 1, ar.size), ar, AK)]
     fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.8))
-    outer = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.24)
+    outer = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.16)
     ax = fig.add_subplot(outer[0])
     for rx, ry, kw in refs:
         ax.plot(rx, ry, **kw)
@@ -365,11 +368,11 @@ def fig_woodward_colella():
               **LEGEND)
     z = outer[1].subgridspec(1, 5, wspace=0.3).subplots()
     runs = [(xl, rl, "luna"), (xs, rs, "static"), (x, r, "moving")]
-    views = (((0.585, 0.607), [0.588, 0.596, 0.604], "a", "contact"), ((0.640, 0.656), [0.643, 0.648, 0.653], "b", "shock"),
-             ((0.755, 0.777), [0.758, 0.766, 0.774], "c", "contact"), ((0.788, 0.806), [0.790, 0.797, 0.804], "d", "shock"),
-             ((0.855, 0.875), [0.858, 0.865, 0.872], "e", "shock"))
-    for a, (xlim, ticks, letter, label) in zip(z, views):
-        zoom(ax, a, xlim, ticks, runs, refs, letter, label)
+    views = (((0.585, 0.607), [0.588, 0.596, 0.604], "a", "contact", 2.9), ((0.640, 0.656), [0.643, 0.648, 0.653], "b", "shock", 7.2),
+             ((0.755, 0.777), [0.758, 0.766, 0.774], "c", "contact", 8.6), ((0.788, 0.806), [0.790, 0.797, 0.804], "d", "shock", 8.2),
+             ((0.855, 0.875), [0.858, 0.865, 0.872], "e", "shock", 1.3))
+    for a, (xlim, ticks, letter, label, top) in zip(z, views):
+        zoom(ax, a, xlim, ticks, runs, refs, letter, label, (0, top))  # one lower limit: the connectors do not cross
     z[0].set_ylabel(r"$\rho$")
     for a in z:
         a.set_xlabel(r"$x$")
@@ -482,7 +485,7 @@ def fig_sedov():
     rho0 = 1.6726219e-24 / (1e10 * MSUN / KPC ** 3)
     e0 = 1e51 / (1e10 * MSUN * 1e10)
     fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.8))
-    grid = fig.add_gridspec(2, 3, width_ratios=[1, 1, 1], hspace=0.3, wspace=0.3)
+    grid = fig.add_gridspec(2, 3, width_ratios=[1, 1, 1], hspace=0.2, wspace=0.3)
     a, b = fig.add_subplot(grid[0, :2]), fig.add_subplot(grid[:, 2])
     z = [fig.add_subplot(grid[1, 0]), fig.add_subplot(grid[1, 1])]
     prof = {}
@@ -507,7 +510,7 @@ def fig_sedov():
     a.set_ylim(0, 5.9)
     refs = [(fine / R, exact, REF)]
     zoom(a, z[0], (0.72, 0.95), [0.75, 0.85, 0.95], shells, refs, "a", "shell", ylim=(0.1, 3.3))
-    zoom(a, z[1], (0.95, 1.08), [0.96, 1.0, 1.04], shells, refs, "b", "shock front", ylim=(0.5, 5.2))
+    zoom(a, z[1], (0.95, 1.08), [0.96, 1.0, 1.04], shells, refs, "b", "shock front", ylim=(0.1, 5.2))
     for ax in z:
         ax.set_xlabel(r"$r/R_{\rm s}$")
     z[0].set_ylabel(r"$\rho/\rho_0$")
