@@ -59,6 +59,7 @@ SEDOV_L1 = f"{RUNS}/build-limiters/sedov_l1.json"
 SEDOV_LADDER = f"{RUNS}/build-metric"
 SEDOV_256 = os.environ.get("LUNA_SEDOV_RUNS", f"{RUNS}/sedov_256")  # moving, static, LUNA at 256^3, snapshots every 1000 yr
 PRECISION = f"{RUNS}/build-roofline/logs/ladder-31953468.out"  # scripts/profile_a100.sh ladder on branch roofline, e90a913, 1305 MHz
+DIMS = f"{RUNS}/build-roofline/logs"  # scripts/dims_a100.sh
 SCALING = f"{RUNS}/build-roofline/logs/roof-31928911.out"  # scripts/roofline_a100.sh on branch roofline, job 31928911
 
 spec = importlib.util.spec_from_file_location("compare_1d", f"{HERE}/compare_1d.py")
@@ -1073,9 +1074,96 @@ def fig_throughput_precision():
     save(fig, "throughput_precision")
 
 
+def dims_log(dim):
+    """The sweep of scripts/dims_a100.sh in one dimension: ours {(cells, mode): dict of G cell updates/s and GB}, LUNA {cells: median of the perf lines of each round}, its GB."""
+    path = sorted(glob.glob(f"{DIMS}/dims-{dim}-*.out"))[-1]
+    ours, luna, memory, failed = {}, defaultdict(list), {}, []
+    for block in re.split(r"^== ", open(path).read(), flags=re.M)[1:]:
+        head = block.split("\n")[0].split()
+        side = int(head[1])
+        cells = side ** dim if dim > 1 else side
+        if head[0] == "luna":
+            perf = [float(x) for x in re.findall(r"perf = ([\d.]+) Mcells", block)]
+            if perf:
+                luna[cells].append(statistics.median(perf) * 1e-3)
+                memory[cells] = float(re.findall(r"mem = ([\d.]+) GB", block)[-1])
+            continue
+        if head[0] != "ours":
+            continue
+        mode = "static" if head[2] == "static" else head[2] if dim < 3 else head[2].split("=")[-1] if "=" in head[2] else head[3].split("=")[1]
+        if dim == 3:
+            mode = "static" if head[2] == "static" else head[3].split("=")[1]
+            speed = re.search(r"^throughput_M_per_s: (.*)$", block, re.M)
+            mem = re.search(r"^memory: phase=steps.*?peak_MB=([\d.]+)", block, re.M)
+            if not speed:
+                failed.append((cells, mode))
+                continue
+            rates = dict(re.findall(r"(\w+)=([\d.e+-]+)", speed[1]))
+            phase = dict(re.findall(r"(\w+)=([\d.e+-]+)", re.search(r"^phases_ms_median: (.*)$", block, re.M)[1]))
+            mesh_ms = float(phase["mesh"]) + float(phase["cells"]) + float(phase["drift"])
+            row = dict(hydro=float(rates["hydro"]) * 1e-3, step=float(rates["step"]) * 1e-3, mesh=cells / mesh_ms * 1e-6 if mesh_ms > 0 else 0, GB=float(mem[1]) * 1e-3)
+        elif dim == 2:
+            line = re.search(r"^phase: M cells/s hydro ([\d.]+) .*? mesh ([\d.]+) ", block, re.M)
+            whole = re.search(r"^ours: .*?M_cell_updates_per_s=([\d.]+)", block, re.M)
+            mem = re.search(r"^memory: peak ([\d.]+) B/cell, ([\d.]+) GB", block, re.M)
+            if not whole or not line:
+                failed.append((cells, mode))
+                continue
+            row = dict(hydro=float(line[1]) * 1e-3, step=float(whole[1]) * 1e-3, mesh=float(line[2]) * 1e-3, GB=float(mem[2]) if mem else 0)
+        else:
+            phase = dict(re.findall(r"^phase: (\w+) M_cell_updates_per_s=([\d.e+-]+)", block, re.M))
+            whole = re.search(r"^ours: .*?M_cell_updates_per_s=([\d.e+-]+)", block, re.M)
+            mem = re.search(r"^memory: peak_MB=([\d.]+)", block, re.M)
+            if not whole:
+                failed.append((cells, mode))
+                continue
+            row = dict(hydro=1e-3 / (1 / float(phase["time_step"]) + 1 / float(phase["hydro"])), step=float(whole[1]) * 1e-3,
+                       mesh=float(phase.get("mesh", 0)) * 1e-3, GB=float(mem[1]) * 1e-3 if mem else 0)
+        ours[cells, mode] = row
+    clock = re.search(r"Mcells|NVIDIA[^\n]*", open(path).read())
+    return ours, luna, memory, failed, clock[0]
+
+
+def fig_throughput_dims():
+    fig, axes = plt.subplots(2, 3, figsize=(WIDTH * 1.75, FIGSIZE[1] * 1.45), sharex="col", gridspec_kw=dict(height_ratios=(3, 1.25), hspace=0, wspace=0.24))
+    style = dict(lw=LW, ms=MS)
+    curves = (("static", "hydro", STATIC_C, "-", "s", "hydro, static"), ("two-pass", "hydro", MOVING_C, ":", "^", "hydro, two passes"),
+              ("one-pass", "mesh", "0.5", "-", "v", "mesh only"), ("one-pass", "step", MOVING_C, "--", "o", "whole step, one pass"),
+              ("two-pass", "step", MOVING_C, "-", "D", "whole step, two passes"))
+    for column, dim in enumerate((1, 2, 3)):
+        ours, luna, memory, failed, _ = dims_log(dim)
+        top, low = axes[0, column], axes[1, column]
+        cells = sorted({k[0] for k in ours})
+        for mode, field, color, ls, marker, label in curves:
+            have = [c for c in cells if (c, mode) in ours and ours[c, mode][field] > 0]
+            if have:
+                top.loglog(have, [ours[c, mode][field] for c in have], color=color, ls=ls, marker=marker, label=label, **style)
+        shown = sorted(luna)
+        top.loglog(shown, [statistics.median(luna[c]) for c in shown], color=LUNA_C, marker="o", label="LUNA (MC, Pallas)", **style)
+        corner(top, f"{dim}D")
+        for mode, color, marker, ls in (("two-pass", MOVING_C, "D", "-"), ("one-pass", MOVING_C, "o", "--")):
+            have = [c for c in cells if (c, mode) in ours and ours[c, mode]["GB"] > 0]
+            if have:
+                low.loglog(have, [ours[c, mode]["GB"] for c in have], color=color, ls=ls, marker=marker, **style)
+                break
+        kept = [c for c in shown if memory[c] >= 0.01]  # LUNA prints two decimals of a GB
+        low.loglog(kept, [memory[c] for c in kept], color=LUNA_C, marker="o", **style)
+        low.axhline(42.4, color="0.6", lw=0.8, ls=":")  # the A100's memory
+        low.set_xlabel("cells")
+        low.set_ylim(1e-4, 400)
+    axes[0, 0].set_ylabel("G cell updates/s")
+    axes[1, 0].set_ylabel("peak GB")
+    axes[0, 0].set_ylim(top=300)
+    axes[0, 1].set_ylim(0.06, 8)
+    axes[0, 2].set_ylim(0.003, 3)
+    axes[0, 0].legend(loc="lower right", fontsize=LABEL - 1)
+    axes[0, 2].legend(loc="lower right", fontsize=LABEL - 1)
+    save(fig, "throughput_dimensions")
+
+
 FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_woodward_colella, "convergence_1d": fig_convergence,
            "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput,
-           "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "kh_2d_evolution": fig_kh_evolution, "sedov3d_mesh": fig_sedov_mesh, "throughput_precision": fig_throughput_precision}
+           "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "kh_2d_evolution": fig_kh_evolution, "sedov3d_mesh": fig_sedov_mesh, "throughput_precision": fig_throughput_precision, "throughput_dimensions": fig_throughput_dims}
 
 
 def main():
