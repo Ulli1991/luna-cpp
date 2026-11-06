@@ -1,15 +1,5 @@
-// The 1D hydro (hydro::FiniteVolume<1>, finite_volume_1d.hpp) on the 1D
-// mesh: a uniform state (with a bulk velocity on a periodic line; at rest
-// between reflective walls) stays uniform, static and moving, to rounding;
-// mass, momentum and energy of a rough state are conserved on a periodic
-// line, and mass and energy between reflective walls (to rounding); two
-// identical moving runs give the same bits; inflow keeps its state; Sod's
-// tube (Toro test 1) against the exact solution's cell averages within
-// LUNA's bounds at 128 and 256 cells (test_hydro_accuracy_shocktube.py:14),
-// on static and moving meshes, uniform and jittered; LUNA's own final states
-// of Sod, Shu-Osher and Woodward-Colella at N = 16 on a static uniform line
-// (values printed by LUNA, walls included), to 1e-12; Shu-Osher on a moving
-// mesh: the regularised points never cross, the unregularised ones do.
+// The 1D hydro on the 1D mesh: uniform states stay uniform, conservation, the same bits twice, inflow, Sod against the exact averages
+// within LUNA's bounds, LUNA's own final states at N = 16, and Shu-Osher on a moving mesh (regularised points never cross).
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -298,9 +288,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // The fused step: static, time_step() + step() to rounding; moving, a
-    // rough state conserved, the same bits twice, close to the separate
-    // kernels (whose time step knows the new drift).
+    // The fused step: static, equal to time_step() + step() to rounding; moving, conserving, the same bits twice, close to the separate kernels.
     for (const Motion motion : motions)
         for (const bool periodic : {true, false}) {
             const std::string name = std::string(motion == Motion::moving ? "moving" : "static") + (periodic ? ", periodic" : ", walls");

@@ -1,19 +1,5 @@
-// The finite-volume hydro on the static Voronoi mesh (src/hydro/):
-//   - HLL and HLLC: on sample states the flux equals LUNA's
-//     hll_flux_primitive / hllc_flux_primitive (src/luna/hydro/fluxes.py;
-//     values printed by LUNA in float64); equal states give the exact flux,
-//     also through a moving face (F(U) - (w.n) U); swapping the states and
-//     the normal flips the flux; rotating states and normal rotates the
-//     flux (solving along n in box axes equals LUNA's rotated frame);
-//   - a uniform state stays uniform to rounding on jittered and uniform
-//     random meshes, first and second order, both update loops;
-//   - mass, momentum and energy are conserved to rounding in the periodic
-//     box (a blast plus random perturbations, second order);
-//   - two runs give the same bits; the two update loops agree to rounding;
-//   - moving mesh: a uniform state with a bulk velocity stays uniform;
-//     mass, momentum and energy are conserved to rounding while the cells
-//     move; a blast moving with the box equals the blast at rest
-//     (Galilean invariance), while on a static mesh it smears.
+// The finite-volume hydro on the static Voronoi mesh: HLL and HLLC against LUNA's values and symmetries, a uniform state stays uniform,
+// conservation, the same bits twice, the update loops agree; moving mesh: uniform bulk flow, conservation, Galilean invariance of a blast.
 
 #include "check.hpp"
 #include "finite_volume.hpp"
@@ -255,9 +241,7 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
     auto same = [&](const HostCells& a, const HostCells& b) { return std::memcmp(a.data(), b.data(), sizeof(double) * 5 * n) == 0; };
     check.expect(same(result[0][0], result[0][1]) && same(result[1][0], result[1][1]),
                  solver + ", " + kind + ": two runs give the same bits (both loops, order 1, 10 steps)");
-    // The loops compile the same face flux into different kernels, where the
-    // compiler may contract multiply-adds differently: equal to rounding,
-    // not necessarily bit for bit.
+    // The loops compile the same face flux into different kernels (multiply-add contraction): equal to rounding, not bit for bit.
     double loops = 0;
     for (int i = 0; i < n; ++i)
         loops = std::max(loops, relative({result[0][0](i, 0), result[0][0](i, 1), result[0][0](i, 2), result[0][0](i, 3), result[0][0](i, 4)},
@@ -269,10 +253,7 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
 }
 
 
-// Moving-mesh tests. Points on the snapping grid (make_points) and steps
-// whose displacement v dt is a multiple of the grid step (2^-30 of the
-// box), so a uniform translation of the points translates the snapped mesh
-// exactly.
+// Moving-mesh tests: points on the snapping grid and v dt a multiple of the grid step (2^-30 of the box), so a translation is exact.
 using Moving = hydro::FiniteVolume<3, Exec>;
 
 // A mesh and a FiniteVolume on it (members in this order: the mesh is built first).
@@ -409,10 +390,8 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
         }
         check.expect(first < 0, "moving mesh: two identical runs give the same bits over 15 steps" +
                                     (first < 0 ? std::string() : " (step " + std::to_string(first) + ":" + what_differs + ")"));
-        // The cause of 918 vs 923 steps at 256^3: a tetrahedron's stored
-        // centre depended on which kernel (screening or created) computed it
-        // and on its corner order, both set by the order of the racy flips.
-        // Every stored centre must equal a fresh computation bit for bit.
+        // The cause of 918 vs 923 steps at 256^3: a tetrahedron's stored centre depended on which kernel computed it and on its corner
+        // order, both set by the racy flips. Every stored centre must equal a fresh computation bit for bit.
         const auto& tets = a.mesh.tetrahedra();
         const auto stored = to_host(tets.centre);
         tet_mesh::circumcentres(Exec{}, a.mesh.positions(), a.mesh.sides(), tets, a.mesh.repair_state().count);

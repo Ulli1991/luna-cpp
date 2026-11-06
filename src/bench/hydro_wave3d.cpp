@@ -1,11 +1,5 @@
-// 3D problems with an exact solution, on the hydro's default paths.
-//
-//   hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--courant=c]
-//                [--jitter=spacings] [--amp=a] [--limiter=face|none] [--t-end=t] [--max-steps=m] [--out=file.npy]
-//
-// The problems: problems_3d.hpp. Prints steps, GPU seconds of the steps and cell updates per second.
-// --out: rows generator xyz, centroid xyz, V, rho, vx, vy, vz, P in box coordinates plus the origin, id order,
-// for scripts/norm3d.py.
+// 3D problems with an exact solution (problems_3d.hpp) on the hydro's default paths; prints steps, GPU seconds and cell updates/s.
+// Usage: hydro_wave3d <sound|simple|vortex|tube> <nx> [flags]; the flags are in docs/design.md.
 
 #include "finite_volume.hpp"
 #include "problems_3d.hpp"

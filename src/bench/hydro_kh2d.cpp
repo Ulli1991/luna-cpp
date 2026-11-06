@@ -1,35 +1,5 @@
-// Smooth Kelvin-Helmholtz after McNally, Lyra & Passy 2012 on the 2D Voronoi
-// mesh, static or moving, timed.
-//
-//   hydro_kh2d <N> [--moving] [--order=0|1] [--dt=luna|arepo|fixed] [--courant=<c>] [--fixed-dt=<dt>]
-//              [--riemann=hllc|hll] [--limiter=face|cell|none] [--update=face|cell] [--jitter=<spacings>]
-//              [--integrator=one-pass|two-pass] [--bulk=<u>] [--t-end=<t>] [--steps=<max>] [--repeats=<r>] [--phases] [--memory] [--out=<prefix>] [--out-times=t,...] [--stop-after=<s>] [--resume]
-//
-// The setup is LUNA's KH-McNally-2D (ic_generation/kh_mcnally.py): the unit
-// box, rho and V_x in two exponential shear layers (eqs. 1, 3; L = 0.025,
-// rho 1 / 2, V_x 0.5 / -0.5), P = 2.5, gamma 5/3, V_y = 0.01 sin 4 pi x, point
-// values at the generators: N^2 points on the cell centres, moved by up to
-// --jitter / 2 spacings. --bulk adds a velocity along x. Particles are numbered
-// along a Morton curve.
-//
-// M(t) (McNally eqs. 6-9) at t = 0.02 k: s, c and d summed over the cells
-// at their centroids, weighted by volume (on a square lattice LUNA's sums,
-// test_hydro_hard_mcnally_kh.py:52-61); K = max rho V_y^2 / 2. Observing is
-// not timed. --dt: LUNA's rule, default Courant 0.8; AREPO's, default 0.3; or a
-// constant. --steps stops after that many steps (throughput; no observations).
-//
-// --integrator: hydro::Integrator, default two-pass on a moving mesh at order 1,
-// else one-pass; two-pass exists only there.
-//
-// Every run is printed, the fastest gives the summary, in M cell updates/s =
-// N^2 * steps / stepping time; the final state hash must agree between runs.
-// --phases fences the phases and prints their rates. --out writes
-// <prefix>.txt (t M K) and <prefix>.bin (doubles per cell: generator x y, centroid
-// x y, V, rho, rho_vy) and <prefix>.grad.bin (doubles per cell: the limited density gradient of the
-// end state, to reconstruct from the centroid). --out-times=t1,t2,... writes the same at those multiples of
-// 0.02, as <prefix>_t<t>_<N>. --stop-after=<s> saves the state in <prefix>.state and stops at the next 0.02 past
-// s seconds, --resume goes on from it: a long run in several jobs, not bit-identical across the restart, the
-// mesh being rebuilt from the generators.
+// Smooth Kelvin-Helmholtz after McNally, Lyra & Passy 2012 on the 2D Voronoi mesh, static or moving, timed.
+// Usage: hydro_kh2d <N> [flags]; the flags, set-up and outputs are in docs/design.md.
 
 #include "device_memory.hpp"
 #include "finite_volume.hpp"
