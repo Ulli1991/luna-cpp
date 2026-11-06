@@ -105,36 +105,46 @@ a whole step, half applied. `--integrator=one-pass` selects the MUSCL-Hancock st
 bits it had before (hash in research_notes/two_pass_2026-11-05.md). The numbers below that a moving run gives are for the
 integrator named in each; costs and accuracy of the two side by side are in that note.
 
+In 3D the default precision, moving and static, is `grad32`: gradients, limiter and face-state change in float, everything
+else double. `--precision=double` selects double throughout, with the bits the default had before (six paths at 128³ hash
+equal to the tree before the change, job 31954615), for reproducing old results; logs of those runs call it `default`.
+2D and 1D stay double: `grad32` has not been measured in 2D, and 1D has no precision options. Figures and numbers below
+name their precision or job; those older than this change are double.
+
 ```text
 hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]
-            [--riemann=hllc|hll] [--precision=default|mixed|low|...] [--moving] [--bulk=km/s] [--out=dir] [--snapshots=10] [--gradients] [--steps=max] [--input-order] [--memory]
-            [--integrator=one-pass|two-pass]
-hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--jitter=spacings] [--out=file.npy]
+            [--riemann=hllc|hll] [--precision=default|double|grad32|mixed|low|...] [--moving] [--bulk=km/s] [--out=dir] [--snapshots=10] [--gradients] [--steps=max] [--input-order] [--memory]
+            [--integrator=one-pass|two-pass] [--cold=f] [--watch]
+hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--jitter=spacings] [--precision=default|double|grad32|grad16] [--out=file.npy]
 sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode> (see the script)
 ```
 
 `hydro_sedov` (needs HDF5; on Raven `module load hdf5-serial`) runs a
 Sedov blast (1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr) and writes HDF5
-snapshots. Measured on one A100, double, jittered points in Morton order,
-median of 40 steps. The 2.1M column is current (static job 31879405, moving jobs 31925156 and
-31925157, HLLC rows; the same code varies by about 10 % between GPU jobs). In the 16.8M
-column the moving rows are current (job 31925157, 1305 MHz), and so are static HLLC and LUNA
-(job 31953468, 1305 MHz); the HLL and first-order rows and the static memory row are the earlier
-code (jobs 31699864, 31699865, 31700852, kept until they are re-measured):
+snapshots. Measured on one A100, jittered points in Morton order, 40 steps, job 31954615 at 1305 MHz, bef77ed, medians of
+three rounds at 128³, one round at 256³; LUNA in the same job, 200 steps, median of the perf lines, so the same clock. LUNA at
+128³ moved between jobs (FP64 0.47 here, 0.67 and 0.76 in jobs 31953960 and 31953468), at 256³ less (0.87 to 0.95). The same code
+varies by about 10 % between GPU jobs:
 
 | G cell updates per second | 2,097,152 cells | 16,777,216 cells |
 |---|---|---|
-| moving mesh, two passes (default), HLLC, per-face loop (mesh update and face lists included) | **0.066** | 0.068 (whole run) |
-| moving mesh, one pass, same | 0.084 | 0.088 (whole run) |
-| static mesh, MUSCL-Hancock HLLC, per-face loop | **0.152** | 0.149 |
-| static mesh, MUSCL-Hancock HLL, per-face loop | 0.116 | 0.114 |
-| static mesh, first order HLLC, per-cell loop | 0.288 | 0.290 |
-| LUNA, MC, HLLC, Pallas, FP64 | 0.76 | 0.954 |
-| LUNA, same, FP32 | 1.37 | 2.133 |
-| device memory, mesh + hydro (static, per-face, second order) | 2434 B/cell | 2371 B/cell (41.2 GB in use) |
-| device memory, moving mesh + hydro, two passes (per-face) | 2319 B/cell | 2319 B/cell (40.5 GB in use, whole run); `--precision=mixed` 2445 B/cell, does not fit at 256³, see Limitations |
-| device memory, moving mesh + hydro, one pass (per-face) | 2298 B/cell | 2298 B/cell (40.1 GB in use, whole run); `--precision=mixed` 2334 B/cell (40.7 GB, job 31925336) |
-| device memory, LUNA, FP64 | 0.22 GB | 1.25 GB, 0.63 GB in FP32 |
+| moving mesh, two passes (default), `grad32` (default), HLLC, per-face loop (mesh update and face lists included) | **0.072** | 0.076 |
+| moving mesh, one pass, same | 0.091 | 0.099 |
+| static mesh, MUSCL-Hancock HLLC, `grad32`, per-face loop | **0.170** | 0.166 |
+| static mesh, MUSCL-Hancock HLL, `grad32`, per-face loop | 0.177 | |
+| static mesh, first order HLLC, per-cell loop | 0.312 | |
+| `--precision=double`: moving, two passes | 0.067 | 0.070 |
+| `--precision=double`: moving, one pass | 0.084 | 0.091 |
+| `--precision=double`: static, HLLC | 0.152 | 0.148 |
+| `--precision=double`: static, HLL | 0.157 | |
+| LUNA, MC, HLLC, Pallas, FP64 | 0.47 | 0.87 |
+| LUNA, same, FP32 | 0.68 | 1.74 |
+| device memory, static, `grad32` | 2185 B/cell | 2185 B/cell (38.2 GB in use) |
+| device memory, moving, two passes, `grad32` | 2255 B/cell | 2255 B/cell (39.4 GB in use) |
+| device memory, moving, one pass, `grad32` | 2233 B/cell | 2233 B/cell (39.0 GB in use) |
+| device memory, `--precision=double`: static; two passes; one pass | 2250; 2319; 2298 B/cell | 2250; 2319; 2298 B/cell (39.3; 40.5; 40.1 GB in use) |
+| device memory, `--precision=mixed`: two passes; one pass | 2445; 2334 B/cell | does not fit, see Limitations; 2334 B/cell (40.7 GB, job 31925336) |
+| device memory, LUNA, FP64 (job 31953468) | 0.22 GB | 1.25 GB, 0.63 GB in FP32 |
 
 Sedov at 128³ (job 31699863; the moving numbers of this paragraph are one pass), HLLC: shock radius 0.978 of the
 Sedov-Taylor value at 1e4 yr, L1 density error 0.075 rho0 (first order:
@@ -246,7 +256,7 @@ Throughput against resolution on one A100, 32³ to 256³, Sedov 3D, 1095 MHz, do
 
 ![Throughput against resolution](docs/figures/throughput_scaling.png)
 
-Precision options against resolution on one A100, 32³ to 256³, the same Sedov, HLLC, 40 steps: hydro static, whole two-pass moving step, GPU memory below. Job 31953468, e90a913, 1305 MHz. LUNA in the same job (MC, Pallas, 200 steps, median of the perf lines), FP64 to compare with double, FP32 throughout; none of our options is FP32 throughout. At 128³ `grad16` gives +15 % hydro, +10 % whole step, `grad32` +11 % and +7 %, `mixed` +10 % and +6 %, `flux32` nothing. `mixed` two-pass does not fit at 256³.
+Precision options against resolution on one A100, 32³ to 256³, the same Sedov, HLLC, 40 steps: hydro static, whole two-pass moving step, GPU memory below. Job 31953468, e90a913, 1305 MHz. LUNA in the same job (MC, Pallas, 200 steps, median of the perf lines), FP64 to compare with double, FP32 throughout; none of our options is FP32 throughout. At 128³ `grad16` gives +15 % hydro, +10 % whole step, `grad32` +12 % and +8 %, `mixed` +10 % and +6 %, `flux32` nothing. `mixed` two-pass does not fit at 256³.
 
 ![Throughput by precision](docs/figures/throughput_precision.png)
 
@@ -256,6 +266,20 @@ Precision options against resolution on one A100, 32³ to 256³, the same Sedov,
 | whole two-pass step, G cell updates/s | 0.070 | 0.076 | 0.077 | | |
 | GPU GB, two passes | 40.5 | 39.4 | 38.9 | 1.25 | 0.63 |
 
+`grad32` against double, final tree, job 31954615: +12 % static at 128³ and 256³, +8 % the whole moving step with two passes,
++8 to +9 % with one, 64 B/cell less moving, 65 static.
+
+| `grad32` against double, A100, jobs 31928264 to 31929256 | moving, two passes | static |
+|---|---|---|
+| vortex, nx = 64-256, change of L1 against the exact averages | at most 3e-4 rho, 1e-3 P at 128³ and 256³; v unchanged in 4 digits | unchanged in 4 digits |
+| sound (amplitude 1e-3, 64-256), simple wave (128-512), tube (256) | unchanged in 4 digits | unchanged in 4 digits |
+| Sedov field L1, 128³ and 256³ | unchanged in 4 digits | unchanged in 4 digits |
+| cells, by id, against the double run | apart by up to 4e-6 L1 rho on the vortex at 256 | below 2e-9 |
+
+No error floor from float gradients down to the smallest L1 measured, 1e-6 (sound at 256). Moving runs differ cell by cell because one rounding
+change moves the mesh; the errors against the exact solution do not. At a pressure contrast of 1e-8 the energy floor was met
+in 5 cell-steps in `grad32`, 35 in double (128³, moving, 200 steps). `hydro_wave` holds `grad32` to double on vortex and sound, moving and static.
+
 Throughput against resolution in 1D, 2D and 3D on one A100, HLLC, FP64, with LUNA (MC, Pallas) and peak memory. A blast in all three: LUNA's Sedov without units in 1D (gamma 1.4) and 2D (gamma 5/3), the Sedov above in 3D. 1D has no two-pass integrator, so its whole step is one pass. At the largest size the static hydro runs 2.66, 0.67 and 0.15 G cell updates/s, LUNA 2.96, 1.46 and 0.95: level in 1D, 2.2 times ahead in 2D, 6.4 times in 3D, in line with the faces per cell, not separated from other causes. Our 1D leads LUNA up to 4M cells, where LUNA's fixed cost per step rules. Two passes take the whole step to 0.29 in 2D and 0.07 in 3D. Jobs 31953276 and 31953278 at 1305 MHz, 31953467 at 1095 MHz; the 1D and 2D blast is not on main yet, runs at voronoi-cpp d077c41.
 
 ![Throughput in 1D, 2D and 3D](docs/figures/throughput_dimensions.png)
@@ -263,17 +287,17 @@ Throughput against resolution in 1D, 2D and 3D on one A100, HLLC, FP64, with LUN
 ## Limitations and open items
 
 - The hydro step is not yet at its target (0.3 G cell updates/s static, 0.15 G the whole two-pass step): on the A100 at 128³
-  double precision runs at 0.152 G cell updates/s static, its hydro part at 0.140 G cell updates/s on a moving mesh (one pass), the
-  whole moving step at 0.084 G cell updates/s with one pass, 0.066 with two. Roofline at 1095 MHz (luna-cpp 28a647d, voronoi-cpp
+  `grad32` runs at 0.170 G cell updates/s static, its hydro part at 0.164 G cell updates/s on a moving mesh (one pass), the
+  whole moving step at 0.091 G cell updates/s with one pass, 0.072 with two (double: 0.152, 0.142, 0.084, 0.067; job 31954615, 1305 MHz). Roofline at 1095 MHz (luna-cpp 28a647d, voronoi-cpp
   0b433f0, older than this tree): the step sits at about 1.9 flop/B, at 45 % of the sustained 1.40 TB/s and 16 % of the FP64 peak;
   only `update` is at the bandwidth roof, the gradient sweep is latency-bound. Bytes alone would allow 0.34 G static and 0.14 G for
   the whole two-pass step, which achieved 0.059 there. Below kernel level (research_notes/profile_2026-11-06.md, 128³, 1095 MHz) the
   hydro kernels spend 61-98 % of their warp slots waiting for memory, not on flops: gradient sweep 0.268, fluxes 0.571, `update`
-  0.805 G cell updates/s static. The sweep is the slowest: 148 registers keep 17 % of its warps active. Compile-time precision options (`--precision=`, default double): mixed +10 %, low +19 % on the
+  0.805 G cell updates/s static. The sweep is the slowest: 148 registers keep 17 % of its warps active. Compile-time precision options (`--precision=`, default `grad32`), against double: mixed +10 %, low +19 % on the
   hydro static, +4 % / +7 % on the whole moving step with one pass (research_notes/hydro_speed_2026-11-04.md).
-- Moving 256³ on a 40 GB A100: two passes in double fit (2319 B/cell, 40484 of 42405 MB in use); with `--precision=mixed`
-  they do not (2445 B/cell, about 42.6 GB needed): use `--integrator=one-pass` there, or `--precision=grad32`
-  (2255 B/cell). The double area and centroid arrays stay beside mixed's float face rows.
+- Moving 256³ on a 40 GB A100: two passes fit, in `grad32` (2255 B/cell, 39410 of 42405 MB in use) and in double (2319 B/cell,
+  40484 MB); with `--precision=mixed` they do not (2445 B/cell, about 42.6 GB needed): use `--integrator=one-pass` there, or the
+  default. The double area and centroid arrays stay beside mixed's float face rows.
 - On the CPU (gcc's default FP contraction) some hydro modes differ from the GPU in the last bits; the A100 runs are
   bit-identical run to run.
 - Periodic boxes only in 3D and 2D; only 1D has walls.
@@ -284,18 +308,17 @@ Throughput against resolution in 1D, 2D and 3D on one A100, HLLC, FP64, with LUN
 ## Roadmap
 
 Done: 3D, 2D and 1D hydro on the exact mesh, two passes as the default on moving meshes, a first round of hydro speed
-(0.107 -> 0.152 G cell updates/s static).
+(0.107 -> 0.152 G cell updates/s static), `grad32` as the 3D default (0.170 G).
 
-1. `grad32` as the default.
-2. Inflow that adds cells ([#3](https://github.com/Ulli1991/luna-cpp/issues/3)), the 1D soft launch of refinement.
-3. Hydro speed: target 0.3 G cell updates/s static, 0.15 G the whole two-pass step. Next: an owner bit in the list entries (estimate +8 % static, +5 % whole step), faces numbered by owner in the mesh (+8 % hydro measured with a copy, +5 % whole step estimated). Sorting cells by list length and reusing the half step between passes were measured and made it slower.
-4. A standing 3D test suite with LUNA coverage ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)), including a test that doesn't favour lattices.
-5. Time integration study ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)), accuracy scorecard.
-6. Local time stepping from AREPO-ng ([#9](https://github.com/Ulli1991/luna-cpp/issues/9)), a CPU path for few active cells ([#10](https://github.com/Ulli1991/luna-cpp/issues/10)).
-7. Multi-GPU.
-8. Refinement.
-9. Multigrid self-gravity.
-10. Autodiff in C++ with Enzyme ([#12](https://github.com/Ulli1991/luna-cpp/issues/12)).
+1. Inflow that adds cells ([#3](https://github.com/Ulli1991/luna-cpp/issues/3)), the 1D soft launch of refinement.
+2. Hydro speed: target 0.3 G cell updates/s static, 0.15 G the whole two-pass step. Next: an owner bit in the list entries (estimate +8 % static, +5 % whole step), faces numbered by owner in the mesh (+8 % hydro measured with a copy, +5 % whole step estimated). Sorting cells by list length and reusing the half step between passes were measured and made it slower.
+3. A standing 3D test suite with LUNA coverage ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)), including a test that doesn't favour lattices.
+4. Time integration study ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)), accuracy scorecard.
+5. Local time stepping from AREPO-ng ([#9](https://github.com/Ulli1991/luna-cpp/issues/9)), a CPU path for few active cells ([#10](https://github.com/Ulli1991/luna-cpp/issues/10)).
+6. Multi-GPU.
+7. Refinement.
+8. Multigrid self-gravity.
+9. Autodiff in C++ with Enzyme ([#12](https://github.com/Ulli1991/luna-cpp/issues/12)).
 
 Open bugs: a forced rebuild beside two passes runs out of memory at 256³ ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)); stuck flips at 256³ ([#8](https://github.com/Ulli1991/luna-cpp/issues/8)); NaN from zero-area faces on an exact lattice ([#6](https://github.com/Ulli1991/luna-cpp/issues/6)). Mesh bugs that reach the hydro are listed in the [voronoi-cpp README](https://github.com/Ulli1991/voronoi-cpp#limitations-and-open-items).
 
