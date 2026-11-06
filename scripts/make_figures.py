@@ -8,6 +8,9 @@ Data paths, each an environment variable, none of them in this repository:
     VORONOI_RUNS               voronoi-cpp checkout with the build-* run directories
     LUNA_REFERENCE_SOLUTIONS   luna-reference-solutions at 99a52d0 (sha256 checked against its MANIFEST.json)
     LUNA_CPP_FIGURES           output directory, default docs/figures next to this script's parent
+
+Every figure is checked before it is written: a legend or panel label on plotted data, or a legend on a zoom box, stops the
+script with a non-zero exit after all figures have been tried.
 """
 import glob
 import hashlib
@@ -15,12 +18,15 @@ import importlib.util
 import json
 import os
 import re
+import statistics
 import sys
+from collections import defaultdict
 
 import h5py
 import matplotlib
 import matplotlib.ticker
 import numpy as np
+from matplotlib.path import Path
 from matplotlib.patches import ConnectionPatch, Rectangle
 from PIL import Image
 
@@ -43,6 +49,7 @@ KH = f"{RUNS}/build-2d/runs/kh_table.md"
 SEDOV = f"{RUNS}/build-limiters/sedov"
 SEDOV_L1 = f"{RUNS}/build-limiters/sedov_l1.json"
 SEDOV_LADDER = f"{RUNS}/build-metric"
+SCALING = f"{RUNS}/build-roofline/logs/roof-31928911.out"  # scripts/roofline_a100.sh on branch roofline, job 31928911
 
 spec = importlib.util.spec_from_file_location("compare_1d", f"{HERE}/compare_1d.py")
 cmp1d = importlib.util.module_from_spec(spec)
@@ -63,6 +70,8 @@ MS = 2.8      # open markers
 LABEL = 10    # letters and labels inside panels, as in LUNA's figures
 EDGE = "0.65"  # connectors
 CONNECTORS = []  # of the figure being drawn, figure coordinates
+TEXTS, BOXES = [], []  # panel labels and box letters, zoom boxes, of the figure being drawn
+FAILED = []  # (figure, what) of every overlap
 WIDTH = FIGSIZE[0] * 2  # every figure
 LEGEND = dict(loc="upper right", fontsize=LABEL)
 
@@ -72,12 +81,33 @@ def save(fig, name):
     path = f"{OUT}/{name}.png"
     for ax in fig.axes:
         decorate(ax)
-        for child in ax.child_axes:
-            decorate(child)
+    overlaps(fig, name)
     fig.savefig(path)
     plt.close(fig)
     Image.open(path).convert("RGB").quantize(256, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE).save(path, optimize=True)
     print(f"{path} {os.path.getsize(path) / 1024:.0f} kB, connectors crossing: {crossings()}")
+
+
+def overlaps(fig, name):
+    """Legends and labels against the plotted lines (targets and floors included), legends also against the zoom boxes."""
+    fig.canvas.draw()
+    legends = [("legend", leg.get_window_extent()) for leg in [ax.get_legend() for ax in fig.axes] + fig.legends if leg]
+    labels = [(t.get_text(), t.get_window_extent()) for t in TEXTS]
+    paths = []
+    for ax in fig.axes:
+        for ln in ax.get_lines():
+            xy = ln.get_transform().transform(np.ma.filled(np.ma.array(ln.get_xydata(), dtype=float), np.nan))
+            xy = xy[np.isfinite(xy).all(axis=1)]
+            if len(xy) > 1 and ln.get_linestyle() != "None":
+                paths.append((ax.get_window_extent(), Path(xy)))
+    for what, box in legends + labels:
+        if any(area.overlaps(box) and path.intersects_bbox(box, filled=False) for area, path in paths):
+            FAILED.append((name, what))
+    for what, box in legends:
+        if any(r.get_window_extent().overlaps(box) for r in BOXES):
+            FAILED.append((name, f"{what} on a zoom box"))
+    TEXTS.clear()
+    BOXES.clear()
 
 
 def line(ax, x, y, s, **over):
@@ -94,7 +124,7 @@ def cells(ax, x, y, s, xlim, most=32):
 
 
 def corner(ax, text, x=0.04, y=0.95, ha="left", va="top"):
-    ax.text(x, y, text, transform=ax.transAxes, va=va, ha=ha, fontsize=LABEL, bbox=dict(fc="white", ec="none", pad=1.0), zorder=6)
+    TEXTS.append(ax.text(x, y, text, transform=ax.transAxes, va=va, ha=ha, fontsize=LABEL, bbox=dict(fc="white", ec="none", pad=1.0), zorder=6))
 
 
 def key(s, label, marker=False):
@@ -259,8 +289,8 @@ def crossings():
 
 def mark(main, xlim, ylim, letter):
     """A thin light box round a zoom's region, with the zoom's letter."""
-    main.add_patch(Rectangle((xlim[0], ylim[0]), xlim[1] - xlim[0], ylim[1] - ylim[0], fill=False, ec="0.5", lw=0.5, zorder=5))
-    main.text(0.5 * (xlim[0] + xlim[1]), ylim[1], letter, ha="center", va="bottom", fontsize=LABEL)
+    BOXES.append(main.add_patch(Rectangle((xlim[0], ylim[0]), xlim[1] - xlim[0], ylim[1] - ylim[0], fill=False, ec="0.5", lw=0.5, zorder=5)))
+    TEXTS.append(main.text(0.5 * (xlim[0] + xlim[1]), ylim[1], letter, ha="center", va="bottom", fontsize=LABEL))
 
 
 def fig_sod():
@@ -373,6 +403,12 @@ PROBLEMS = (("sod", "Sod"), ("shu-osher", "Shu-Osher"), ("woodward-colella", "Wo
 ROWS = ((0, r"$L_1(\rho)$"), (2, r"$L_1(P)$"))
 
 
+def grid_legend(fig, axes, handles):
+    """One legend above a grid of panels."""
+    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, axes[0, 0].get_position().y1), ncol=len(handles), fontsize=LABEL,
+               columnspacing=1.5)
+
+
 def fig_convergence():
     rows = report()
     wide = wide_rule_l1()
@@ -396,9 +432,9 @@ def fig_convergence():
             if i == 1:
                 ax.set_xlabel(r"$N$")
             ax.set_xlim(150, 5e5)
-        corner(axes[0, j], title, 0.05, 0.05, va="bottom")
-    axes[0, 0].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], **LEGEND)
-    axes[0, 1].legend(handles=[key("padded", "moving, [-15, 5], LUNA rule", True), key("padded3", "moving, [-15, 5], default rule", True)], **LEGEND)
+        corner(axes[0, j], title, 0.95, 0.95, "right")
+    grid_legend(fig, axes, [key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True),
+                            key("padded", "moving, [-15, 5], LUNA rule", True), key("padded3", "moving, [-15, 5], default rule", True)])
     save(fig, "convergence_1d")
 
 
@@ -421,8 +457,8 @@ def fig_time():
             if i == 1:
                 ax.set_xlabel(r"GPU time (s)")
             ax.set_xlim(4e-3, 6e2)
-        corner(axes[0, j], title, 0.05, 0.05, va="bottom")
-    axes[0, 0].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], **LEGEND)
+        corner(axes[0, j], title, 0.95, 0.95, "right")
+    grid_legend(fig, axes, [key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)])
     save(fig, "time_to_target_1d")
 
 
@@ -528,13 +564,73 @@ def fig_sedov():
     save(fig, "sedov_3d")
 
 
+def scaling_log():
+    """Medians by side of the scaling job: ours {(side, mesh): dict}, LUNA {side: throughput of each round, peak MB}."""
+    ours, luna = defaultdict(list), defaultdict(list)
+    memory = {}
+    for block in re.split(r"^== ", open(SCALING).read(), flags=re.M)[1:]:
+        head = block.split("\n")[0].split()
+        if head[0] == "ours":
+            mesh = "static" if head[2] == "static" else head[3].split("=")[1]
+            row = lambda start: next(text for text in block.split("\n") if text.startswith(start))  # noqa: E731
+            speed = dict(re.findall(r"(\w+)=([\d.e+-]+)", row("throughput")))
+            phase = dict(re.findall(r"(\w+)=([\d.e+-]+)", row("phases")))
+            n = int(re.search(r"mesh: n=(\d+)", block)[1])
+            mem = re.search(r"peak_MB=([\d.]+).*gpu_used_MB=([\d.]+)", row("memory: phase=steps"))
+            ours[int(head[1]), mesh].append(dict(n=n, faces=int(re.search(r"faces=(\d+)", block)[1]), hydro=float(speed["hydro"]), step=float(speed["step"]),
+                                                 mesh=n / (float(phase["mesh"]) + float(phase["cells"]) + float(phase["drift"]) or 1) * 1e-3 if mesh != "static" else 0,
+                                                 views_MB=float(mem[1]), gpu_MB=float(mem[2])))
+        elif head[0] == "luna":
+            perf = [float(x) for x in re.findall(r"perf = ([\d.]+) Mcells", block)]
+            if perf:
+                luna[int(head[1])].append(statistics.median(perf))
+                memory[int(head[1])] = 1e3 * float(re.findall(r"mem = ([\d.]+) GB", block)[-1])
+    return {k: {f: statistics.median(r[f] for r in rows) for f in rows[0]} for k, rows in ours.items()}, luna, memory
+
+
+def fig_throughput():
+    ours, luna, memory = scaling_log()
+    sides = sorted(k for k in {k[0] for k in ours} if k >= 32)
+    x = [ours[s, "static"]["n"] for s in sides]
+    fig, (top, low) = plt.subplots(2, 1, figsize=(WIDTH, FIGSIZE[1] * 1.45), sharex=True, gridspec_kw=dict(height_ratios=(3, 1.25), hspace=0))
+    style = dict(lw=LW, ms=MS + 1, mew=0.8, mfc="none")
+    curves = (("static", "hydro", STATIC_C, "-", "s", "hydro, static"), ("two-pass", "hydro", MOVING_C, ":", "^", "hydro, two passes"),
+              ("two-pass", "mesh", "0.5", "-", "v", "mesh only"), ("one-pass", "step", MOVING_C, "--", "o", "whole moving step, one pass"),
+              ("two-pass", "step", MOVING_C, "-", "D", "whole moving step, two passes"))
+    for mesh, field, color, ls, marker, label in curves:
+        top.loglog(x, [ours[s, mesh][field] / 1e3 for s in sides], color=color, ls=ls, marker=marker, label=label, **style)
+    shown = [s for s in sorted(luna) if s >= 32]
+    top.loglog([s ** 3 for s in shown], [statistics.median(luna[s]) / 1e3 for s in shown], color=LUNA_C, marker="o", label="LUNA (MC, Pallas), median", **style)
+    top.set_ylabel("G cell updates/s")
+    top.set_ylim(top=3)
+    corner(top, f"1 cell update = {ours[256, 'static']['faces'] / ours[256, 'static']['n']:.2f} face updates", 0.97, 0.95, "right")
+    # From the DRAM bytes per cell by size (research note of branch roofline): all in L2 at 24^3, all in DRAM at 48^3.
+    for ax in (top, low):
+        ax.axvspan(24 ** 3, 48 ** 3, color="0.90", lw=0, zorder=0)
+    TEXTS.append(top.text(32 ** 3, 1.1, "L2 to DRAM", ha="center", fontsize=LABEL))
+    top.legend(loc="lower left", bbox_to_anchor=(0, 1.01), ncol=3, fontsize=LABEL, borderaxespad=0, columnspacing=1.5)
+    low.loglog(x, [ours[s, "two-pass"]["gpu_MB"] / 1e3 for s in sides], color=MOVING_C, marker="D", label="ours, two passes, GPU in use", **style)
+    low.loglog(x, [ours[s, "two-pass"]["views_MB"] / 1e3 for s in sides], color=MOVING_C, ls="--", marker="D", label="ours, Kokkos views", **style)
+    kept = [s for s in shown if memory[s] >= 10]  # LUNA prints two decimals of a GB
+    low.loglog([s ** 3 for s in kept], [memory[s] / 1e3 for s in kept], color=LUNA_C, marker="o", label="LUNA, reported", **style)
+    low.axhline(42.4, color="0.6", lw=0.8, ls=":")  # the A100's memory
+    low.set_ylabel("peak GB")
+    low.set_xlabel("cells")
+    low.set_xticks([s ** 3 for s in sides], [f"${s}^3$" for s in sides])
+    low.set_ylim(0.004, 40000)
+    low.legend(loc="upper left", ncol=3, fontsize=LABEL, columnspacing=1.5)
+    save(fig, "throughput_scaling")
+
+
 FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_woodward_colella, "convergence_1d": fig_convergence,
-           "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "sedov_3d": fig_sedov}
+           "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput}
 
 
 def main():
     for name in sys.argv[1:] or list(FIGURES):
         FIGURES[name]()
+    if FAILED:
+        raise SystemExit("overlaps: " + "; ".join(f"{name}: {what}" for name, what in FAILED))
 
 
 if __name__ == "__main__":
