@@ -71,8 +71,10 @@
 //   for a gradient: the next step computes them from the states.
 //   AREPO-ng has no such wall: its special boundary cells do not take part in
 //   refinement (no CellType in the two files above), which is therefore this
-//   code's reading. Nothing here runs unless a cell is added, and a reflective
-//   wall adds none: gas leaving it is a rarefaction, not inflow.
+//   code's reading. A reflective wall adds none: gas leaving it is a
+//   rarefaction, not inflow. An open wall costs a look at the end cells every
+//   64 steps until gas enters; from then on the time step's kernel watches
+//   them, which costs 6-11 % of a step (a second reducer), only in such runs.
 namespace hydro {
 
 // The boundary of a wall of the 1D line.
@@ -347,7 +349,7 @@ public:
                 smallest = Kokkos::fmin(smallest, courant * step);
         };
         const Kokkos::RangePolicy<ExecSpace> slots(exec_, 0, n_);
-        if (supply_left_ || supply_right_) {
+        if (watching_) {
             Kokkos::parallel_reduce(
                 "hydro1::time_step_ends", slots,
                 KOKKOS_LAMBDA(int s, double& smallest, int& wants) {
@@ -377,7 +379,7 @@ public:
             const voronoi::Report report = mesh_->order(live_points());
             mesh_stats_.updates += 1;
             mesh_stats_.rebuilds += report.rebuilt;
-            if ((supply_left_ || supply_right_) && (!looked_ || wants_ > 0)) supply_cells();
+            if (due()) supply_cells();
             looked_ = false;
             phase_end(timings, &Timings::mesh);
         }
@@ -400,6 +402,7 @@ public:
     bool supply_cells() {
         const Stencil st = stencil();
         const auto ends = ends_;
+        const bool left = supply_left_, right = supply_right_;
         Kokkos::parallel_for(
             "hydro1::ends", Kokkos::RangePolicy<ExecSpace>(exec_, 0, 1), KOKKOS_LAMBDA(int) {
                 const int last = st.line.n - 1;
@@ -407,8 +410,10 @@ public:
                 ends(1) = st.wants_cell(0);
                 ends(2) = static_cast<double>(st.line.period - static_cast<i64>(st.line.key(last))) * st.line.step;
                 ends(3) = st.wants_cell(last);
+                ends(4) = (left && st.primitive_of(0)[1] > 0) || (right && st.primitive_of(last)[1] < 0);
             });
         Kokkos::deep_copy(exec_, ends_host_, ends);
+        watching_ = watching_ || ends_host_(4) > 0;
         int requests = 0;
         const auto points_host = points_host_;
         if (ends_host_(1) > 0) points_host(requests++, 0) = ends_host_(0) - spacing_;
@@ -618,8 +623,8 @@ public:
         double smallest = 0;
         int descents = 0, wants = 0;
         const Kokkos::RangePolicy<ExecSpace> slots(exec_, 0, n_);
-        if constexpr (Moving)
-            Kokkos::parallel_reduce("hydro1::step_fused", slots, kernel, Kokkos::Min<double>(smallest), Kokkos::Sum<int>(descents),
+        if (Moving && watching_)
+            Kokkos::parallel_reduce("hydro1::step_fused_ends", slots, kernel, Kokkos::Min<double>(smallest), Kokkos::Sum<int>(descents),
                                     Kokkos::Sum<int>(wants));
         else
             Kokkos::parallel_reduce("hydro1::step_fused", slots, kernel, Kokkos::Min<double>(smallest), Kokkos::Sum<int>(descents));
@@ -633,7 +638,10 @@ public:
                 mesh_stats_.rebuilds += mesh_->order(live_points()).rebuilt;
                 again = true;
             }
-            if (wants > 0) again = supply_cells() || again;
+            wants_ = wants;
+            looked_ = watching_;
+            if (due()) again = supply_cells() || again;
+            looked_ = false;
             if (again) return time_step(courant, TimeStep::luna);
         }
         return smallest;
@@ -642,6 +650,16 @@ public:
 private:
     Stencil stencil() const {
         return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_};
+    }
+    // Whether to look at the end cells after this step: as the kernels asked
+    // while gas enters, else every 64 steps, or every step if time_step() was
+    // not there to ask.
+    bool due() {
+        if (!supply_left_ && !supply_right_) return false;
+        if (watching_) return !looked_ || wants_ > 0;
+        if (--until_look_ > 0) return false;
+        until_look_ = 64;
+        return true;
     }
     auto live_points() const { return Kokkos::subview(x_, std::make_pair(0, n_), Kokkos::ALL); }
 
@@ -675,12 +693,12 @@ private:
     MeshStats mesh_stats_;
     // Cells from the walls: what the last time_step() saw at the ends, and
     // a request at each wall at most.
-    bool supply_left_ = false, supply_right_ = false, looked_ = false;
+    bool supply_left_ = false, supply_right_ = false, watching_ = false, looked_ = false;
     double spacing_ = 0;
-    int wants_ = 0;
+    int wants_ = 0, until_look_ = 0;
     long long added_ = 0;
-    Kokkos::View<double[4], Memory> ends_{"hydro_ends"};
-    typename Kokkos::View<double[4], Memory>::host_mirror_type ends_host_ = Kokkos::create_mirror_view(ends_);
+    Kokkos::View<double[5], Memory> ends_{"hydro_ends"};
+    typename Kokkos::View<double[5], Memory>::host_mirror_type ends_host_ = Kokkos::create_mirror_view(ends_);
     Points points_{"hydro_new_points", 2};
     typename Points::host_mirror_type points_host_ = Kokkos::create_mirror_view(points_);
     Kokkos::Timer timer_;
