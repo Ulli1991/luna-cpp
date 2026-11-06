@@ -2,13 +2,13 @@
 
 Run with LUNA's environment, LUNA's src on the path, outside LUNA's tree:
     python luna_kh_run.py <N> <out.npz> [LIMITER=1] [CFL=0.8] [ORDER=1] [solver=hllc] [kernel=auto] [bulk=0] [steps=0]
-        [repeats=1] [t_end=1.5] [fixed_dt=0] [check=1]
+        [repeats=1] [t_end=1.5] [fixed_dt=0] [check=1] [full=0]
 
 Setup as tests/test_hydro_hard_mcnally_kh.py:97-100 (cfg_for, MC + HLLC, FP64, CFL 0.8, unit box, periodic),
 mode_amplitude as :52-61, the loop as tests/_helpers.py evolve: one jitted lax.while_loop per output, compiled ahead.
 The stepping is timed, the observations (a host copy of the state) are not. bulk adds a velocity along x to the
 initial state. steps > 0: stop after that many steps (throughput, no outputs). Writes t, M, K, rho and my at t_end
-averaged to min(N, 256)^2, steps, wall_s.
+averaged to min(N, 256)^2 (full=1: rho at N^2), steps, wall_s.
 """
 import sys
 import time
@@ -99,7 +99,7 @@ def main():
     wall = min(walls)
     steps = int(k)
     Uh = np.asarray(U)
-    m = min(n, 256)
+    m = n if int(extra.get("full", 0)) else min(n, 256)
     stats = jax.devices()[0].memory_stats() or {}
     peak = stats.get("peak_bytes_in_use", 0)
     np.savez(out, t=np.array(T), M=np.array(M), K=np.array(K), rho=coarsen(Uh[0], m), my=coarsen(Uh[2], m), steps=steps,

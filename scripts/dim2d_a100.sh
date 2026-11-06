@@ -6,6 +6,7 @@
 #   kh <N> [...]     KH at N = each: LUNA (MC, HLLC, CFL 0.8, Pallas), ours static and moving (LUNA's rule 0.8)
 #   all <targets>    build, the 2D test
 #   khbulk <u> <N>.. KH with a bulk velocity u along x
+#   khfield <t> <N>.. density fields at time t: LUNA (N^2), static, moving (two passes), runs/field_*
 #   run <command...> anything, with our modules, the binaries of $BIN (a copy of the build) on PATH
 # The clock and the node go into the log (nvidia-smi, one line per 5 s, into BUILD/runs/clock-<job>.csv).
 #SBATCH -J dim2d
@@ -79,6 +80,16 @@ kh)
         "$bin/hydro_kh2d" "$n" --memory --out="$build/runs/static_$n" | grep -E "^(ours|memory|phase)"
         "$bin/hydro_kh2d" "$n" --moving --integrator=one-pass --memory --out="$build/runs/moving_$n" | grep -E "^(ours|memory|phase)"
         "$bin/hydro_kh2d" "$n" --moving --integrator=two-pass --memory --out="$build/runs/moving_twoflux_$n" | grep -E "^(ours|memory|phase)"
+    done
+    ;;
+khfield)  # khfield <t> <N> [...]
+    t="$2"
+    for n in "${@:3}"; do
+        use_luna
+        luna "$n" "field_luna_t${t}_$n" full=1 t_end="$t"
+        use_ours
+        "$bin/hydro_kh2d" "$n" --t-end="$t" --out="$build/runs/field_static_t${t}_$n" | grep -E "^ours"
+        "$bin/hydro_kh2d" "$n" --moving --t-end="$t" --out="$build/runs/field_moving_t${t}_$n" | grep -E "^ours"
     done
     ;;
 khbulk)  # khbulk <bulk> <N> [...]: as kh with a bulk velocity along x
