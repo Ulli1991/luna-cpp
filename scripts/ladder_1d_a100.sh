@@ -3,7 +3,7 @@
 #   sbatch --export=ALL,REPO=$PWD,BIN=<cuda build copy>,OUT=<runs dir> -o <logs>/ladder-%j.out scripts/ladder_1d_a100.sh <series,..> <problems,..|all> <b_lo> <b_hi>
 # Runs already written are skipped, so the same line continues where a job stopped. Above the first rung that does not reach
 # t_end a series is not run for that problem; moving runs count as stalled after 200 N steps. LUNA's long runs go on from their
-# state (resume=). moving-wide: a line wide enough that no wave or cell reaches its ends, a different domain, measured on LUNA's box.
+# state (resume=). moving-wide: a periodic line so wide that the seam's waves stay outside LUNA's box, no walls: a different domain, measured on the box.
 #SBATCH -J ladder1d
 #SBATCH -p gpu1,gpudev
 #SBATCH --gres=gpu:a100:1

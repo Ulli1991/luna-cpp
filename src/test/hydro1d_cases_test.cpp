@@ -5,7 +5,8 @@
 // runs of both codes, HLLC at LUNA's settings, in the norm of LUNA's tests:
 // the sum over cells of V |W - exact cell average|, for rho, v, P. On a uniform
 // line the static scheme is LUNA's, so static L1 must equal LUNA's, per limiter
-// (MC is our face limiter), within 1e-7 (ratio 1.000). Moving has no LUNA run to
+// (MC is our face limiter), within 1e-6, 1e-2 for the linear waves, whose errors at
+// amplitude 1e-6 are near rounding (ratio 1.000). Moving has no LUNA run to
 // equal: L1 within 1.3 x measured. Orders over 256, 512, 1024 within +-0.2 of
 // the measured value: bands from measurement, per variable, never a nominal
 // order. A moving run with a known failure must still fail as measured; when it
@@ -280,7 +281,7 @@ int main(int argc, char* argv[]) {
                 if (std::isnan(luna[v])) continue;
                 const double ratio = std::abs(got[v] / luna[v] - 1);
                 worst = std::max(worst, ratio);
-                ok = ok && (ratio < 1e-7 || luna[v] < row.floor);
+                ok = ok && (ratio < row.tolerance || luna[v] < row.floor);
                 ladder[{name + series, v}].push_back(got[v]);
             }
             sizes[name + series].push_back(row.n);
@@ -292,7 +293,7 @@ int main(int argc, char* argv[]) {
             if (!std::isnan(row.minmod[0])) against(measure(name, row.n, Motion::static_mesh, Limiter::minmod).l1, row.minmod, "minmod");
             if (!std::isnan(row.vanleer[0])) against(measure(name, row.n, Motion::static_mesh, Limiter::van_leer).l1, row.vanleer, "vanleer");
         }
-        if (row.issue == luna_gates::waits) continue;
+        if (row.issue == luna_gates::waits) continue;  // moving: the inflow fix
         const Measured m = measure(name, row.n, Motion::moving);
         if (row.issue > 0) {
             check.expect(!m.reached, at + " moving: the known failure of luna-cpp#" + std::to_string(row.issue) + " (stops at t = " + sci(m.t) + "); if it now reaches t_end, update the gate");

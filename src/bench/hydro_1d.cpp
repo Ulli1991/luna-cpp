@@ -8,8 +8,10 @@
 // Problems: the table of problems_1d.hpp, each with its gamma. Every cell
 // starts from the problem's state over its own interval. --amp: the signed
 // amplitude of the linear waves, or the simple wave's. --pad widens the line by
-// at least that length on each side, in whole cells of the same spacing (the
-// states go on, N stays the box's in the .json). N points on a uniform lattice, or moved by up to
+// at least that length on each side, in whole cells of the same spacing, and
+// closes it periodically: no walls, for a moving run the end of a tube cannot
+// handle yet (the states go on, the seam's waves stay outside the box if the
+// pad is long enough; N stays the box's in the .json). N points on a uniform lattice, or moved by up to
 // --jitter / 2 spacings. --dt: LUNA's rule, the default of a static run
 // (--courant default 0.8), AREPO's, the default of a moving run (default
 // 0.4), or a constant --fixed-dt; the last step lands on t_end. --steps stops after that many steps (throughput).
@@ -247,6 +249,7 @@ int main(int argc, char* argv[]) {
     pb.origin -= pad_cells * pb.L / o.n;
     pb.L += 2 * pad_cells * pb.L / o.n;
     o.n += 2 * pad_cells;
+    if (pad_cells > 0) pb.ends = voronoi::Ends::periodic;
     Result best;
     bool same = true;
     for (int run = 0; run < repeats; ++run) {
