@@ -6,7 +6,7 @@
 //               [--limiter=face|cell|none] [--riemann=hllc|hll] [--precision=<name>]
 //               [--moving] [--bulk=<km/s>] [--no-blast] [--box=fx,fy,fz] [--out=<dir>]
 //               [--snapshots=10] [--steps=<max>] [--input-order] [--memory]
-//               [--integrator=one-pass|two-pass]
+//               [--integrator=one-pass|two-pass] [--cold=f] [--watch]
 //
 // side^3 generating points in a 50 pc periodic box (jittered: a lattice
 // moved by up to 0.1 spacings; uniform: uniform random). AREPO units (kpc,
@@ -33,7 +33,9 @@
 // steps with any, most in one step) and what the mesh updates did;
 // --memory adds device memory (Kokkos allocations) per phase. --integrator:
 // hydro::Integrator, default two-pass on a moving mesh at order 1, else one-pass;
-// two-pass exists only there.
+// two-pass exists only there. For the precision check: --cold multiplies the
+// background pressure by f (a larger contrast at the blast); --watch prints a
+// line per step: fallbacks, cells at the floors, smallest rho and P, cells not finite.
 
 
 #include "finite_volume.hpp"
@@ -204,7 +206,8 @@ struct Options {
     std::string kind, loop, limit, riemann, out, precision;
     hydro::Update update = hydro::Update::per_face;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
-    bool moving = false, input_order = false, blast = true;
+    bool moving = false, input_order = false, blast = true, watch = false;
+    double cold = 1;
     hydro::Integrator integrator = hydro::Integrator::one_pass;
     double bulk = 0;
     long long max_steps = 0;
@@ -278,7 +281,7 @@ void run(const Options& o, Points points) {
     {  // Q = U V: the background moving with the bulk velocity, the blast's pressure on top
         auto Q = Kokkos::create_mirror_view(fv.state());
         for (long long i = 0; i < n; ++i) {
-            const hydro::State<3> W{sedov.rho(), o.bulk, 0, 0, sedov.pressure()};
+            const hydro::State<3> W{sedov.rho(), o.bulk, 0, 0, o.cold * sedov.pressure()};
             const hydro::State<3> u = hydro::conserved(W, gas);
             for (int v = 0; v < 5; ++v) Q(i, v) = u[v] * volume(i);
         }
@@ -362,6 +365,29 @@ void run(const Options& o, Points points) {
         fallbacks = fv.fallbacks() < 0 ? -1 : fallbacks + fv.fallbacks();  // -1: not counted (per-cell loop)
         most_fallbacks = std::max(most_fallbacks, fv.fallbacks());
         steps_with_fallbacks += fv.fallbacks() > 0;
+        if (o.watch) {
+            const auto q = fv.state();
+            const auto V = mesh.volume();
+            const double smalle = gas.smallc * gas.smallc / gas.gamma / (gas.gamma - 1.0);
+            long long at_floor_rho = 0, at_floor_e = 0, bad = 0;
+            double rho_min = 0, P_min = 0, P_max = 0;
+            Kokkos::parallel_reduce(
+                "watch", Kokkos::RangePolicy<Exec>(exec, 0, n),
+                KOKKOS_LAMBDA(int i, long long& a, long long& b, long long& c, double& r, double& p, double& h) {
+                    const double rho = q(i, 0) / V(i), e = q(i, 4) / V(i);
+                    const double kinetic = 0.5 * (q(i, 1) * q(i, 1) + q(i, 2) * q(i, 2) + q(i, 3) * q(i, 3)) / (V(i) * q(i, 0));
+                    const double u = e - kinetic;
+                    a += rho < gas.smallr;
+                    b += u < smalle * rho;
+                    c += !Kokkos::isfinite(rho) || !Kokkos::isfinite(e);
+                    r = Kokkos::fmin(r, rho);
+                    p = Kokkos::fmin(p, (gas.gamma - 1.0) * u);
+                    h = Kokkos::fmax(h, (gas.gamma - 1.0) * u);
+                },
+                at_floor_rho, at_floor_e, bad, Kokkos::Min<double>(rho_min), Kokkos::Min<double>(P_min), Kokkos::Max<double>(P_max));
+            std::cout << "watch: step=" << steps << " t=" << t << " dt=" << dt << " fallbacks=" << fv.fallbacks() << " floor_rho=" << at_floor_rho
+                      << " floor_e=" << at_floor_e << " not_finite=" << bad << " rho_min=" << rho_min << " P_min=" << P_min << " P_max=" << P_max << "\n";
+        }
         t = snapshot ? t_next : t + dt;
         ++steps;
         if (snapshot) {
@@ -466,6 +492,8 @@ int main(int argc, char** argv) {
                    : integrator == "two-pass" ? hydro::Integrator::two_pass
                                               : hydro::Integrator::one_pass;
     o.blast = flag(argc, argv, "--no-blast", "") != "1";
+    o.watch = flag(argc, argv, "--watch", "") == "1";
+    o.cold = std::stod(flag(argc, argv, "--cold", "1"));
     o.bulk = std::stod(flag(argc, argv, "--bulk", "0"));  // km/s along x
     o.out = flag(argc, argv, "--out", "");
     o.snapshots = std::stoi(flag(argc, argv, "--snapshots", "10"));

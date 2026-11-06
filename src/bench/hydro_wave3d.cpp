@@ -2,6 +2,7 @@
 //
 //   hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--courant=c]
 //                [--jitter=spacings] [--amp=a] [--limiter=face|none] [--t-end=t] [--max-steps=m] [--out=file.npy]
+//                [--precision=default|grad32|grad16]
 //
 // The problems: problems_3d.hpp. Prints steps, GPU seconds of the steps and cell updates per second.
 // --out: rows generator xyz, centroid xyz, V, rho, vx, vy, vz, P in box coordinates plus the origin, id order,
@@ -21,7 +22,6 @@
 namespace {
 
 using namespace support;
-using FV = hydro::FiniteVolume<3, Exec, hydro::HLLC>;
 using State = hydro::State<3>;
 
 std::string flag(int argc, char** argv, const char* name, const char* fallback) {
@@ -36,10 +36,10 @@ bool has(int argc, char** argv, const char* name) {
     return false;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    Kokkos::ScopeGuard kokkos(argc, argv);
+// One run with the gradient policy P (--precision, as in hydro_sedov).
+template <class P>
+int run(int argc, char** argv) {
+    using FV = hydro::FiniteVolume<3, Exec, hydro::HLLC, P>;
     const std::string problem = argv[1];
     const int nx = std::stoi(argv[2]);
     const double courant = std::stod(flag(argc, argv, "--courant", "0.3")), jitter = std::stod(flag(argc, argv, "--jitter", "0.1"));
@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
     for (const auto& q : hydro::jittered_points(p, jitter)) points.push_back(Point{q[0], q[1], q[2]});
     const long long n = static_cast<long long>(points.size());
     const Exec exec;
-    FV::Mesh mesh(exec, box);
+    typename FV::Mesh mesh(exec, box);
     mesh.update(to_device(points));
     mesh.update_cells();
     const std::string integrator = flag(argc, argv, "--integrator", moving ? "two-pass" : "one-pass");
@@ -78,10 +78,11 @@ int main(int argc, char** argv) {
     }
     Kokkos::Timer timer;
     double t = 0;
-    long long steps = 0;
+    long long steps = 0, fallbacks = 0;
     while (t < t_end * (1 - 1e-12) && (max_steps == 0 || steps < max_steps)) {
         const double dt = std::min(fv.time_step(courant), t_end - t);
         fv.step(dt);
+        fallbacks += fv.fallbacks();
         t += dt;
         ++steps;
     }
@@ -89,7 +90,7 @@ int main(int argc, char** argv) {
     const double wall = timer.seconds();
     const hydro::MeshStats& ms = fv.mesh_stats();
     std::cout << "ours3d: problem=" << problem << " nx=" << nx << " n=" << n << " moving=" << moving << " integrator=" << integrator << " courant=" << courant << " jitter=" << jitter
-              << " steps=" << steps << " t=" << t << " rebuilds=" << ms.rebuilds << " wall_s=" << wall << " M_cell_updates_per_s=" << n * steps / wall / 1e6 << "\n";
+              << " steps=" << steps << " t=" << t << " rebuilds=" << ms.rebuilds << " fallbacks=" << fallbacks << " precision=" << flag(argc, argv, "--precision", "default") << " wall_s=" << wall << " M_cell_updates_per_s=" << n * steps / wall / 1e6 << "\n";
     if (!out.empty()) {
         mesh.update_cells();
         const auto x = to_host(mesh.positions());
@@ -119,4 +120,15 @@ int main(int argc, char** argv) {
         file.write(reinterpret_cast<const char*>(rows.data()), static_cast<std::streamsize>(rows.size() * sizeof rows[0]));
     }
     return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    Kokkos::ScopeGuard kokkos(argc, argv);
+    const std::string precision = flag(argc, argv, "--precision", "default");
+    if (precision == "default") return run<hydro::Precision<>>(argc, argv);
+    if (precision == "grad32") return run<hydro::Precision<double, void, float>>(argc, argv);
+    if (precision == "grad16") return run<hydro::Precision<double, void, hydro::Half>>(argc, argv);
+    throw std::invalid_argument("hydro_wave3d: --precision=default|grad32|grad16");
 }
