@@ -87,7 +87,6 @@ LEGEND = dict(loc="upper right", fontsize=LABEL)
 KH_MESH_WINDOWS = (((0, 1), (0, 1)), ((0.2, 0.5), (0.1, 0.4)), ((0.28, 0.36), (0.2, 0.28)), ((0.328, 0.354), (0.249, 0.275)))  # kh_2d_mesh, nested
 KH_VMIN, KH_VMAX = 0.9, 2.1  # LUNA's KH figures, magma (its scripts/validation/plots/kh_grid.py)
 KH_WINDOW = ((0.27, 0.57), (0.11, 0.41))  # the roll-up of the zoom panels
-DIFF = {}
 
 
 def save(fig, name, dpi=None):
@@ -542,23 +541,23 @@ def fig_kh_density():
     n = fine = 2048
     window = KH_WINDOW
     times = ("1.0", "1.5", "2.5", "3.0")
-    last = len(times)
-    fig, axes = plt.subplots(last + 1, 4, figsize=(WIDTH, WIDTH * 0.76 * (last + 1) / 3), gridspec_kw=dict(wspace=0.05, hspace=0.07))
+    last = 2  # the zoom sits directly under its t = 1.5 row
+    rows = (0, 1, 3, 4)
+    fig, axes = plt.subplots(5, 4, figsize=(WIDTH, WIDTH * 0.76 * 5 / 3), gridspec_kw=dict(wspace=0.05, hspace=0.07))
     names = (("luna", "LUNA MC"), ("static", "static"), ("moving", "moving"))
-    limit = 0.0
-    panels = "abcdefghijklmnopqrst"
-    for r, t in enumerate(times):
+    norm = matplotlib.colors.SymLogNorm(linthresh=1e-3, vmin=-1, vmax=1, base=10)
+    for r, t in zip(rows, times):
         ref = kh_field("luna", t, fine, fine)
         for c, (kind, name) in enumerate(names):
             ax = axes[r, c]
             rho = kh_field(kind, t, n, n)
             image = ax.imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
-            corner(ax, f"({panels[4 * r + c]}) {name}, $N = {n}$, $t = {t}$", y=0.97)
+            corner(ax, f"{name}, $N = {n}$, $t = {t}$", y=0.97)
             if t == "1.5":
                 axes[last, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
                 axes[last, c].set_xlim(*window[0])
                 axes[last, c].set_ylim(*window[1])
-                corner(axes[last, c], f"({panels[4 * last + c]}) {name}, $t = 1.5$", y=0.97)
+                corner(axes[last, c], f"{name}, $t = 1.5$, zoom", y=0.97)
                 mark(ax, window[0], window[1], "")
                 to_fig = fig.transFigure.inverted()
                 for x, side in ((window[0][0], 0), (window[0][1], 1)):
@@ -566,25 +565,21 @@ def fig_kh_density():
                                                    color=EDGE, lw=0.6, clip_on=False, zorder=10))
                     CONNECTORS.append((to_fig.transform(ax.transData.transform((x, window[1][0]))),
                                        to_fig.transform(axes[last, c].transAxes.transform((side, 1)))))
-        moving = kh_field("moving", t, n, fine)
-        difference = moving - ref
-        limit = max(limit, float(np.percentile(np.abs(difference), 99.9)))
-        DIFF[t] = difference
-    for r, t in enumerate(times):
-        ax = axes[r, 3]
-        delta = ax.imshow(DIFF[t].T, origin="lower", extent=(0, 1, 0, 1), cmap="RdBu_r", vmin=-limit, vmax=limit, interpolation="nearest")
-        corner(ax, f"({panels[4 * r + 3]}) moving $-$ LUNA {fine}, sampled", y=0.97)
+        difference = kh_field("moving", t, n, fine) - ref
+        delta = axes[r, 3].imshow(difference.T, origin="lower", extent=(0, 1, 0, 1), cmap="RdBu_r", norm=norm, interpolation="nearest")
+        corner(axes[r, 3], "moving $-$ LUNA, sampled", y=0.97)
     bottom = axes[last, 3]
     static = kh_field("static", "1.5", n, fine) - kh_field("luna", "1.5", fine, fine)
-    bottom.imshow(static.T, origin="lower", extent=(0, 1, 0, 1), cmap="RdBu_r", vmin=-limit, vmax=limit, interpolation="nearest")
-    corner(bottom, f"({panels[4 * last + 3]}) static $-$ LUNA {fine}, $t = 1.5$", y=0.97)
+    bottom.imshow(static.T, origin="lower", extent=(0, 1, 0, 1), cmap="RdBu_r", norm=norm, interpolation="nearest")
+    corner(bottom, "static $-$ LUNA, $t = 1.5$", y=0.97)
     for ax in axes.flat:
         ax.grid(False)
         ax.set_xticks([])
         ax.set_yticks([])
         ax.minorticks_off()
     fig.colorbar(image, ax=axes[:, :3].ravel().tolist(), location="bottom", fraction=0.03, pad=0.02, aspect=50, label=r"$\rho$")
-    fig.colorbar(delta, ax=axes[:, 3].ravel().tolist(), location="bottom", fraction=0.03, pad=0.02, aspect=16, label=r"$\Delta\rho$")
+    fig.colorbar(delta, ax=axes[:, 3].ravel().tolist(), location="bottom", fraction=0.03, pad=0.02, aspect=16, label=r"$\Delta\rho$",
+                 ticks=(-1, -0.01, 0, 0.01, 1), format="%g")
     save(fig, "kh_2d_density")
 
 

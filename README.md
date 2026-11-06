@@ -107,7 +107,7 @@ integrator named in each; costs and accuracy of the two side by side are in that
 
 ```text
 hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]
-            [--riemann=hllc|hll] [--precision=default|mixed|low|...] [--moving] [--bulk=km/s] [--out=dir] [--snapshots=10] [--steps=max] [--input-order] [--memory]
+            [--riemann=hllc|hll] [--precision=default|mixed|low|...] [--moving] [--bulk=km/s] [--out=dir] [--snapshots=10] [--gradients] [--steps=max] [--input-order] [--memory]
             [--integrator=one-pass|two-pass]
 hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--jitter=spacings] [--out=file.npy]
 sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode> (see the script)
@@ -147,18 +147,19 @@ passes): 128³ 0.0629, 0.0648; 256³ 0.0369, 0.0377 (research_notes/two_pass_202
 
 ### 2D (`hydro_kh2d`, `hydro::FiniteVolume<2>`)
 
-![Kelvin-Helmholtz density](docs/figures/kh_2d_density.png)
+![Kelvin-Helmholtz, moving against LUNA](docs/figures/kh_2d_evolution.png)
+
+Kelvin-Helmholtz of McNally, Lyra & Passy (2012), t = 0, 1, 2.5, 4, 5, moving (two passes) against LUNA MC, both N = 2048 and FP64, magma with LUNA's 0.9 to 2.1. Moving: nearest cell plus the run's limited gradient from the centroid, linear reconstruction in cells as in AREPO; LUNA: its cell values. HLLC, LUNA Pallas, CFL 0.8; ours face limiter, per-face, LUNA's rule 0.8. Moving to t = 5 in two legs, the restart not bit-identical: 69535 steps, 0 mesh rebuilds, 0 stuck; mass, x momentum and energy kept to 2e-12 or better, relative. Past t = 2.5 secondary instabilities on the moving billows set in earlier than in LUNA; this is not a converged solution in either code. Jobs 31953688, 31953871; LUNA 31953667, 31954283.
 
 ![Kelvin-Helmholtz Voronoi mesh](docs/figures/kh_2d_mesh.png)
 
 The moving mesh in Kelvin-Helmholtz, N = 512, two passes, t = 4, the whole box and three nested zooms into a billow, each box marked on the panel before; magma with LUNA's 0.9 to 2.1. The map is the scheme's own field, linear reconstruction in cells as in AREPO: each pixel takes its nearest cell plus the run's limited gradient from the centroid. Over it the exact Voronoi edges (`scipy.spatial.Voronoi`, periodic images), thin and fading where a cell is shorter than a few pixels. Job 31953904; 0 mesh rebuilds, 0 stuck.
 
-Density of the smooth Kelvin-Helmholtz test of McNally, Lyra & Passy (2012), N = 1024, at t = 1.0 and 1.5, one colour scale:
-LUNA MC, static, moving (two passes, the Voronoi cells drawn as exact polygons), with a zoom on one roll-up, and
-the differences from LUNA MC at N = 2048. All HLLC, FP64; LUNA Pallas, CFL 0.8; ours face limiter, per-face, LUNA's rule 0.8.
-One A100 at 1305 MHz, jobs 31952222 (t = 1.0), 31952223 (t = 1.5).
+![Kelvin-Helmholtz density](docs/figures/kh_2d_density.png)
 
-`hydro_kh2d <N> [--moving] [--integrator=one-pass|two-pass] [--bulk=<u>] ...` runs this test.
+Density at t = 1.0, 1.5, 2.5, 3.0, one colour scale, LUNA MC, static, moving (two passes), all N = 2048, with a zoom on one roll-up at t = 1.5 and the differences from LUNA, sampled at LUNA's cell centres, symmetric log scale. Static and moving shown as linear reconstruction in cells as in AREPO. Mean |Δρ| against LUNA, t = 1.0, 1.5, 2.5, 3.0: static 4e-8, 5e-7, 5e-5, 6e-4 (its panel at t = 1.5 is white: largest difference 2e-4); moving 5e-5, 1e-4, 0.012, 0.073, the billows no longer match past t = 1.5. Static job 31953690: 62390 steps.
+
+`hydro_kh2d <N> [--moving] [--integrator=one-pass|two-pass] [--bulk=<u>] [--out-times=t,...] [--stop-after=<s>] [--resume] ...` runs this test; the last two split a long run across jobs.
 G cell updates/s at N = 2048 (job 31952221): LUNA 1.78, static 0.756, moving one pass 0.414, two passes 0.322; peak 693, 735 and
 749 B/cell for ours. GPU seconds to max |e| = 0.001: LUNA 0.55, static 1.1, moving 15. Details and the comparison with LUNA at the
 same N: research_notes/stage2_2d_2026-11-05.md; `scripts/dim2d_a100.sh` runs the ladders, `scripts/compare_kh.py` makes the tables.
@@ -225,6 +226,18 @@ Kelvin-Helmholtz after McNally, Lyra & Passy (2012), N² cells, one A100 at 1305
 ![Sedov 3D](docs/figures/sedov_3d.png)
 
 Sedov 3D, 1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr: a shock test that cannot rank schemes, order below 1 for every code (0.66 LUNA minmod, 0.78 moving, n = 128 to 256). Left: volume-weighted shells at 128³ with zooms on the shell and the shock front, markers are shells, not cells, branch dim-limiters, jobs 31918879 (moving), 31918880 (static), 31918732 (LUNA). Right: field L1 over r < 1.5 R_s of the piecewise-constant field, not sampled at generators; older code, jobs 31879294, 31879807 (LUNA minmod 128-448, moving 64-256, 256 with the per-cell loop, static 64-192), LUNA MC 128 and 256 from dim-limiters. Ours: HLLC, jittered, Courant 0.3, face limiter; moving is one pass in all these runs, older than the two-pass default.
+
+![Sedov 3D at 256, shock](docs/figures/sedov3d_shock.png)
+
+The same Sedov at 256³, as in LUNA's own 3D figures, snapshots every 1000 yr, two passes, against LUNA MC (HLLC, Pallas, CFL 0.8) and Sedov-Taylor. Top: shock radius as the location of the density peak in the shells, and n(r) at five times, numbers in 10³ yr above each shock. Below: column density at 1e4 yr, one scale, and the difference. Moving: 512² rays along z with 1024 midpoint samples, each in its nearest cell with the run's limited gradient from the centroid, linear reconstruction in cells as in AREPO. LUNA: cell values summed along z. Difference up to 9 % of the peak at the shock, mean 0.2 %; the cross is LUNA's grid. LUNA's published figure is at 1024³: all runs here are 256³, four times coarser, so the peak falls below Sedov-Taylor by resolution, and the two are not to be read as equal. Job 31953353 (moving 925 steps, 1.49 M fallbacks; LUNA 4035 steps).
+
+![Sedov 3D at 256, radial profiles](docs/figures/sedov3d_radial.png)
+
+Volume-weighted shells at 1e4 yr, n_x / 2 bins, density, radial velocity, pressure and temperature against Sedov-Taylor; static job 31953728, 5834 steps, the others as above. The moving curves start at 1.2 pc: inside it the expanded cells are so few that the shells hold no generator, and the curve is left open. The moving mesh follows Sedov-Taylor down to n of 10⁻³, where the fixed grids hold a floor near 10⁻².
+
+![Sedov 3D at 256, mesh at the shell](docs/figures/sedov3d_mesh.png)
+
+Slice z = 25 pc at 1e4 yr, exact plane section of the 3D Voronoi cells, n in each cell, thin edges, generators near the plane in black: (a) moving, the cells gather in the shell and open behind it; zooms into the same window, (b) moving, (c) static.
 
 Throughput against resolution on one A100, 32³ to 256³, Sedov 3D, 1095 MHz, double, HLLC, 40 steps, with LUNA (MC, Pallas, FP64; median of the perf lines of three rounds) and peak memory. Hydro is flat from 96³ to 256³; below 64³ the fixed cost per step dominates. Job 31928911, mesh pin 0b433f0.
 
