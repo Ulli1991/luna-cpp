@@ -230,6 +230,10 @@ Throughput against resolution on one A100, 32³ to 256³, Sedov 3D, 1095 MHz, do
 
 ![Throughput against resolution](docs/figures/throughput_scaling.png)
 
+Precision options against resolution on one A100, 32³ to 256³, the same Sedov, HLLC, 40 steps: hydro static, whole two-pass moving step, GPU memory below. Job 31953468, e90a913, 1305 MHz. LUNA in the same job (MC, Pallas, 200 steps, median of the perf lines), FP64 to compare with double, FP32 throughout; none of our options is FP32 throughout. At 128³ `grad16` gives +15 % hydro, +10 % whole step, `grad32` +11 % and +7 %, `mixed` +10 % and +6 %, `flux32` nothing. `mixed` two-pass does not fit at 256³.
+
+![Throughput by precision](docs/figures/throughput_precision.png)
+
 ## Limitations and open items
 
 - The hydro step is not yet at its target (0.3 G cell updates/s static, 0.15 G the whole two-pass step): on the A100 at 128³

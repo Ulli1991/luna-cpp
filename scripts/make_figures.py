@@ -52,6 +52,7 @@ KH_FIELDS = os.environ.get("KH_FIELDS", f"{RUNS}/build-2d/runs")  # field_* of d
 SEDOV = f"{RUNS}/build-limiters/sedov"
 SEDOV_L1 = f"{RUNS}/build-limiters/sedov_l1.json"
 SEDOV_LADDER = f"{RUNS}/build-metric"
+PRECISION = f"{RUNS}/build-roofline/logs/ladder-31953468.out"  # scripts/profile_a100.sh ladder on branch roofline, e90a913, 1305 MHz
 SCALING = f"{RUNS}/build-roofline/logs/roof-31928911.out"  # scripts/roofline_a100.sh on branch roofline, job 31928911
 
 spec = importlib.util.spec_from_file_location("compare_1d", f"{HERE}/compare_1d.py")
@@ -687,8 +688,65 @@ def fig_throughput():
     save(fig, "throughput_scaling")
 
 
+def precision_log():
+    """The ladder of scripts/profile_a100.sh (branch roofline): ours {(side, mesh, preset): rates and GB}, what did not fit, LUNA {(side, FP): throughput of each round}, its peak GB."""
+    ours, failed, luna, memory = {}, [], defaultdict(list), {}
+    for block in re.split(r"^== ", open(PRECISION).read(), flags=re.M)[1:]:
+        head = block.split("\n")[0].split()
+        if head[0] == "luna":
+            perf = [float(x) for x in re.findall(r"perf = ([\d.]+) Mcells", block)]
+            if perf:
+                key = int(head[1]), "FP64" if head[2] == "x64=1" else "FP32"
+                luna[key].append(statistics.median(perf) * 1e-3)
+                memory[key] = float(re.findall(r"mem = ([\d.]+) GB", block)[-1])
+        elif head[0] == "ours":
+            side, mesh, preset = int(head[1]), head[2], head[3].split("=")[1]
+            speed = re.search(r"^throughput_M_per_s: (.*)$", block, re.M)
+            if not speed:
+                failed.append((side, mesh, preset))
+                continue
+            rates = dict(re.findall(r"(\w+)=([\d.e+-]+)", speed[1]))
+            mem = re.search(r"^memory: phase=steps.*?gpu_used_MB=([\d.]+)", block, re.M)
+            ours[side, mesh, preset] = dict(hydro=float(rates["hydro"]) * 1e-3, step=float(rates["step"]) * 1e-3, GB=float(mem[1]) * 1e-3)
+    return ours, failed, luna, memory
+
+
+def fig_throughput_precision():
+    ours, failed, luna, memory = precision_log()
+    presets = (("default", "double", "k", "-", "o"), ("grad32", "grad32", "C1", "-", "s"), ("grad16", "grad16", "C2", "--", "^"), ("flux32", "flux32", "C3", ":", "D"), ("mixed", "mixed", "C4", "-.", "v"))
+    sides = sorted({k[0] for k in ours})
+    cells = [s ** 3 for s in sides]
+    fig, axes = plt.subplots(2, 2, figsize=(WIDTH, FIGSIZE[1] * 1.45), sharex=True, sharey="row", gridspec_kw=dict(height_ratios=(3, 1.25), hspace=0, wspace=0))
+    style = dict(lw=LW, ms=MS + 1, mew=0.8, mfc="none")
+    for column, (mesh, field, title) in enumerate((("static", "hydro", "hydro, static"), ("two", "step", "whole moving step, two passes"))):
+        top, low = axes[0, column], axes[1, column]
+        for preset, label, color, ls, marker in presets:
+            have = [s for s in sides if (s, mesh, preset) in ours]
+            top.loglog([s ** 3 for s in have], [ours[s, mesh, preset][field] for s in have], color=color, ls=ls, marker=marker, label=label, **style)
+            low.loglog([s ** 3 for s in have], [ours[s, mesh, preset]["GB"] for s in have], color=color, ls=ls, marker=marker, **style)
+        for fp, ls in (("FP64", "-"), ("FP32", "--")):
+            have = [s for s in sides if (s, fp) in luna]
+            top.loglog([s ** 3 for s in have], [statistics.median(luna[s, fp]) for s in have], color=LUNA_C, ls=ls, marker="x", label=f"LUNA {fp}", **style)
+            kept = [s for s in have if memory[s, fp] >= 0.01]  # LUNA prints two decimals of a GB
+            low.loglog([s ** 3 for s in kept], [memory[s, fp] for s in kept], color=LUNA_C, ls=ls, marker="x", **style)
+        low.axhline(42.4, color="0.6", lw=0.8, ls=":")  # the A100's memory
+        corner(top, title, 0.03, 0.95)
+        low.set_xlabel("cells")
+        low.set_xticks(cells, [f"${s}^3$" for s in sides])
+        low.minorticks_off()
+    for side, mesh, preset in failed:
+        if mesh == "two":
+            TEXTS.append(axes[1, 1].text(side ** 3, 0.02, f"{preset}: does not fit at ${side}^3$", ha="right", va="bottom", fontsize=LABEL))
+    axes[0, 0].set_ylim(0.006, 3)
+    axes[1, 0].set_ylim(0.005, 200)
+    axes[0, 0].set_ylabel("G cell updates/s")
+    axes[1, 0].set_ylabel("GPU GB")
+    axes[0, 0].legend(loc="lower left", bbox_to_anchor=(0, 1.01), ncol=7, fontsize=LABEL, borderaxespad=0, columnspacing=1.2, handlelength=2)
+    save(fig, "throughput_precision")
+
+
 FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_woodward_colella, "convergence_1d": fig_convergence,
-           "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput}
+           "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput, "throughput_precision": fig_throughput_precision}
 
 
 def main():
