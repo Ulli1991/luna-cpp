@@ -32,9 +32,9 @@ import numpy as np
 from matplotlib.path import Path
 from matplotlib.patches import ConnectionPatch, Rectangle
 from PIL import Image
-from matplotlib.collections import PolyCollection
+from matplotlib.collections import LineCollection, PolyCollection
 from scipy.spatial import Voronoi, cKDTree
-from matplotlib.collections import PolyCollection
+from matplotlib.collections import LineCollection, PolyCollection
 from scipy.spatial import Voronoi, cKDTree
 
 matplotlib.use("Agg")
@@ -84,7 +84,6 @@ TEXTS, BOXES = [], []  # panel labels and box letters, zoom boxes, of the figure
 FAILED = []  # (figure, what) of every overlap
 WIDTH = FIGSIZE[0] * 2  # every figure
 LEGEND = dict(loc="upper right", fontsize=LABEL)
-KH_MESH_N = 128  # of kh_2d_mesh
 KH_VMIN, KH_VMAX = 0.9, 2.1  # LUNA's KH figures, magma (its scripts/validation/plots/kh_grid.py)
 KH_WINDOW = ((0.27, 0.57), (0.11, 0.41))  # the roll-up of the zoom panels
 DIFF = {}
@@ -851,29 +850,76 @@ def kh_voronoi(ax, rows, window, edge=None, lw=0.0):
     ax.set_aspect("equal")
 
 
+def smooth_map(rows, gradient, window, m):
+    """Nearest cell plus the run's limited gradient from the centroid, periodic, on m^2 pixels of a window: the field the scheme has."""
+    (x0, x1), (y0, y1) = window
+    x, y = np.meshgrid(x0 + (np.arange(m) + 0.5) * (x1 - x0) / m, y0 + (np.arange(m) + 0.5) * (y1 - y0) / m, indexing="ij")
+    pixels = np.c_[x.ravel(), y.ravel()]
+    near = cKDTree(rows[:, :2] % 1.0, boxsize=1.0).query(pixels % 1.0, workers=-1)[1]
+    d = (pixels - rows[near, 2:4] + 0.5) % 1.0 - 0.5
+    return (rows[near, 5] + (gradient[near] * d).sum(1)).reshape(m, m)
+
+
+def fading_edges(ax, rows, window, pixels, full=8.0):
+    """The Voronoi edges of a window, exact, thin and semi-transparent, fading out below `full` pixels of length."""
+    (x0, x1), (y0, y1) = window
+    near, _, _ = voronoi_polygons(rows[:, :2], rows[:, 5], window)
+    v = Voronoi(near)
+    ridges = np.array([r for r in v.ridge_vertices if min(r) >= 0])
+    segments = v.vertices[ridges]
+    keep = (segments[:, :, 0].max(1) > x0) & (segments[:, :, 0].min(1) < x1) & (segments[:, :, 1].max(1) > y0) & (segments[:, :, 1].min(1) < y1)
+    segments = segments[keep]
+    length = np.hypot(*(segments[:, 1] - segments[:, 0]).T) / (x1 - x0) * pixels
+    colours = np.ones((len(segments), 4))
+    colours[:, 3] = 0.55 * np.clip(length / full, 0, 1)
+    ax.add_collection(LineCollection(segments, colors=colours, linewidths=0.2))
+
+
 def fig_kh_mesh():
-    """Top row the moving mesh, exact Voronoi cells with their edges; bottom row LUNA MC on its grid, same N, one colour scale."""
-    n = KH_MESH_N
-    times = ("0", "1.0", "2.5", "4.0", "5.0")
-    fig, axes = plt.subplots(2, 5, figsize=(WIDTH, WIDTH * 0.385), gridspec_kw=dict(wspace=0.04, hspace=0.04, left=0.01, right=0.92, top=0.99, bottom=0.01))
-    norm = matplotlib.colors.Normalize(KH_VMIN, KH_VMAX)
-    for c, t in enumerate(times):
-        rows = np.fromfile(f"{SEDOV_256}/kh5_{n}_t{t}.bin").reshape(-1, 7)
-        _, polygons, colours = voronoi_polygons(rows[:, :2], rows[:, 5], ((0, 1), (0, 1)))
-        image = cell_collection(axes[0, c], polygons, colours, (1, 1, 1, 0.4), 0.1, cmap="magma", norm=norm)
-        axes[0, c].set_xlim(0, 1)
-        axes[0, c].set_ylim(0, 1)
-        axes[0, c].set_aspect("equal")
-        rho = np.load(f"{SEDOV_256}/kh5_luna_{n}_t{t}.npz")["rho"]
-        axes[1, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", norm=norm, interpolation="nearest")
-        corner(axes[0, c], f"moving, $t = {float(t):g}$", y=0.97)
-        corner(axes[1, c], f"LUNA MC, $t = {float(t):g}$", y=0.97)
-    for ax in axes.flat:
+    """The moving mesh as AREPO's figures show it: the reconstructed field, the Voronoi edges over it, fading where cells are unresolved."""
+    t, n = "2.5", 512
+    rows = np.fromfile(f"{SEDOV_256}/kh_mesh512_t{t}.bin").reshape(-1, 7)
+    gradient = np.fromfile(f"{SEDOV_256}/kh_mesh512_t{t}.grad.bin").reshape(-1, 2)
+    whole, inner = ((0, 1), (0, 1)), ((0.17, 0.37), (0.13, 0.33))
+    fig, axes = plt.subplots(1, 2, figsize=(WIDTH, WIDTH * 0.47), gridspec_kw=dict(wspace=0.05, left=0.01, right=0.93, top=0.99, bottom=0.01))
+    dpi, pixels = 300, 1800
+    for ax, window, label in ((axes[0], whole, f"moving, two passes, $N = {n}$, $t = {t}$"), (axes[1], inner, "zoom into a roll-up")):
+        image = ax.imshow(smooth_map(rows, gradient, window, pixels).T, origin="lower", extent=(*window[0], *window[1]), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX,
+                          interpolation="bilinear")
+        fading_edges(ax, rows, window, pixels)
+        ax.set_xlim(*window[0])
+        ax.set_ylim(*window[1])
         ax.set_xticks([])
         ax.set_yticks([])
+        ax.grid(False)
         ax.minorticks_off()
+        corner(ax, label, y=0.97)
+    mark(axes[0], inner[0], inner[1], "")
+    to_fig = fig.transFigure.inverted()
+    for y, side in ((inner[1][0], 0), (inner[1][1], 1)):
+        fig.add_artist(ConnectionPatch(xyA=(inner[0][1], y), coordsA=axes[0].transData, xyB=(0, side), coordsB=axes[1].transAxes, color=EDGE, lw=0.6, clip_on=False, zorder=10))
+        CONNECTORS.append((to_fig.transform(axes[0].transData.transform((inner[0][1], y))), to_fig.transform(axes[1].transAxes.transform((0, side)))))
+    fig.colorbar(image, ax=axes.ravel().tolist(), location="right", fraction=0.02, pad=0.01, label=r"$\rho$")
+    save(fig, "kh_2d_mesh", dpi=dpi)
+
+
+def fig_kh_evolution():
+    """Moving and LUNA MC at one N, LUNA MC at the finest N as the reference; moving: nearest cell plus the run's limited gradient."""
+    n, fine = 1024, 2048
+    times = ("0", "1.0", "2.5", "4.0", "5.0")
+    fig, axes = plt.subplots(3, 5, figsize=(WIDTH, WIDTH * 0.575), gridspec_kw=dict(wspace=0.04, hspace=0.04, left=0.01, right=0.92, top=0.99, bottom=0.01))
+    rows = (("moving", n, 2 * n, f"moving, $N = {n}$"), ("luna", n, n, f"LUNA MC, $N = {n}$"), ("luna", fine, fine, f"LUNA MC, $N = {fine}$"))
+    for r, (kind, size, pixels, name) in enumerate(rows):
+        for c, t in enumerate(times):
+            ax = axes[r, c]
+            image = ax.imshow(kh_field(kind, t, size, pixels).T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
+            corner(ax, f"{name}, $t = {float(t):g}$", y=0.97)
+            ax.grid(False)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.minorticks_off()
     fig.colorbar(image, ax=axes.ravel().tolist(), location="right", fraction=0.012, pad=0.01, label=r"$\rho$")
-    save(fig, "kh_2d_mesh", dpi=400)
+    save(fig, "kh_2d_evolution", dpi=300)
 
 
 def plane_cells(run, window, pad=3.0):
@@ -1003,7 +1049,7 @@ def fig_throughput():
 
 FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_woodward_colella, "convergence_1d": fig_convergence,
            "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput,
-           "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "sedov3d_mesh": fig_sedov_mesh}
+           "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "kh_2d_evolution": fig_kh_evolution, "sedov3d_mesh": fig_sedov_mesh}
 
 
 def main():

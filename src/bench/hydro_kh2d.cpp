@@ -3,7 +3,7 @@
 //
 //   hydro_kh2d <N> [--moving] [--order=0|1] [--dt=luna|arepo|fixed] [--courant=<c>] [--fixed-dt=<dt>]
 //              [--riemann=hllc|hll] [--limiter=face|cell|none] [--update=face|cell] [--jitter=<spacings>]
-//              [--integrator=one-pass|two-pass] [--bulk=<u>] [--t-end=<t>] [--steps=<max>] [--repeats=<r>] [--phases] [--memory] [--out=<prefix>]
+//              [--integrator=one-pass|two-pass] [--bulk=<u>] [--t-end=<t>] [--steps=<max>] [--repeats=<r>] [--phases] [--memory] [--out=<prefix>] [--out-times=t,...] [--stop-after=<s>] [--resume]
 //
 // The setup is LUNA's KH-McNally-2D (ic_generation/kh_mcnally.py): the unit
 // box, rho and V_x in two exponential shear layers (eqs. 1, 3; L = 0.025,
@@ -26,7 +26,10 @@
 // --phases fences the phases and prints their rates. --out writes
 // <prefix>.txt (t M K) and <prefix>.bin (doubles per cell: generator x y, centroid
 // x y, V, rho, rho_vy) and <prefix>.grad.bin (doubles per cell: the limited density gradient of the
-// end state, to reconstruct from the centroid).
+// end state, to reconstruct from the centroid). --out-times=t1,t2,... writes the same at those multiples of
+// 0.02, as <prefix>_t<t>_<N>. --stop-after=<s> saves the state in <prefix>.state and stops at the next 0.02 past
+// s seconds, --resume goes on from it: a long run in several jobs, not bit-identical across the restart, the
+// mesh being rebuilt from the generators.
 
 #include "device_memory.hpp"
 #include "finite_volume.hpp"
@@ -39,6 +42,8 @@
 #include <fstream>
 #include <iostream>
 #include <numeric>
+#include <stdexcept>
+#include <sstream>
 #include <random>
 #include <string>
 #include <vector>
@@ -64,8 +69,9 @@ bool has(int argc, char** argv, const char* name) {
 
 struct Options {
     int n = 0, order = 1, steps = 0, repeats = 1;
-    double jitter = 0, bulk = 0, courant = 0.8, fixed_dt = 0, t_end = 1.5;
-    bool moving = false, phases = false, memory = false, fixed = false;
+    double jitter = 0, bulk = 0, courant = 0.8, fixed_dt = 0, t_end = 1.5, stop_after = 0;
+    bool moving = false, phases = false, memory = false, fixed = false, resume = false;
+    std::vector<double> out_times;
     hydro::StepRule rule = hydro::StepRule::luna;
     hydro::Integrator integrator = hydro::Integrator::one_pass;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
@@ -146,8 +152,19 @@ int run(const Options& o) {
         x0h(m, 0) = px - std::floor(px);
         x0h(m, 1) = py - std::floor(py);
     }
+    const auto state_file = [&] { return o.out + ".state"; };
+    std::vector<double> saved;  // t, k, steps, wall, then the generators and the conserved state
+    if (o.resume) {
+        saved.resize(4 + 6 * static_cast<std::size_t>(n));
+        std::ifstream state(state_file(), std::ios::binary);
+        state.read(reinterpret_cast<char*>(saved.data()), static_cast<std::streamsize>(saved.size() * sizeof(double)));
+        if (!state) throw std::runtime_error("hydro_kh2d: cannot read " + state_file());
+        for (int i = 0; i < n; ++i)
+            for (int a = 0; a < 2; ++a) x0h(i, a) = saved[4 + 6 * static_cast<std::size_t>(i) + a];
+    }
     Kokkos::deep_copy(x0, x0h);
 
+    Kokkos::Timer since_start;
     double best = 1e300;
     std::uint64_t first_hash = 0;
     bool same = true;
@@ -185,18 +202,47 @@ int run(const Options& o) {
                 q(i, 2) = rho * vy * V;
                 q(i, 3) = E * V;
             }
+            if (o.resume)
+                for (int i = 0; i < n; ++i)
+                    for (int v = 0; v < 4; ++v) q(i, v) = saved[4 + 6 * static_cast<std::size_t>(i) + 2 + v];
             Kokkos::deep_copy(fv.state(), q);
         }
+        const auto write = [&](const std::string& prefix) {
+            fv.time_step(o.courant);  // the gradients of this state; time_step() changes nothing else
+            const auto gradient = fv.density_gradients();
+            std::ofstream gradients(prefix + ".grad.bin", std::ios::binary);
+            for (int i = 0; i < n; ++i) {
+                const double row[2] = {gradient(i, 0), gradient(i, 1)};
+                gradients.write(reinterpret_cast<const char*>(row), sizeof(row));
+            }
+            std::ofstream text(prefix + ".txt");
+            text.precision(17);
+            for (const auto& row : series) text << row[0] << " " << row[1] << " " << row[2] << "\n";
+            auto state = Kokkos::create_mirror_view(fv.state());
+            Kokkos::deep_copy(state, fv.state());
+            auto volume = Kokkos::create_mirror_view(mesh.volume());
+            Kokkos::deep_copy(volume, mesh.volume());
+            auto centroid = Kokkos::create_mirror_view(mesh.centroid());
+            Kokkos::deep_copy(centroid, mesh.centroid());
+            auto positions = Kokkos::create_mirror_view(mesh.positions());
+            Kokkos::deep_copy(positions, mesh.positions());
+            std::ofstream binary(prefix + ".bin", std::ios::binary);
+            for (int i = 0; i < n; ++i) {
+                const double row[7] = {positions(i, 0), positions(i, 1), positions(i, 0) + centroid(i, 0), positions(i, 1) + centroid(i, 1),
+                                       volume(i), state(i, 0) / volume(i), state(i, 2) / volume(i)};
+                binary.write(reinterpret_cast<const char*>(row), sizeof(row));
+            }
+        };
         series.clear();
         const Mode start = mode_amplitude(exec, fv, mesh, o.moving);
         series.push_back({0.0, start.M, start.K});
-        double t = 0, wall = 0;
-        long long steps = 0;
+        double t = o.resume ? saved[0] : 0, wall = o.resume ? saved[3] : 0;
+        long long steps = o.resume ? static_cast<long long>(saved[2]) : 0;
         hydro::Timings phases;
         hydro::Timings* timing = o.phases ? &phases : nullptr;
         const int outputs = o.steps > 0 ? 1 : static_cast<int>(std::lround(o.t_end / 0.02));
         Kokkos::Timer timer;
-        for (int k = 1; k <= outputs; ++k) {
+        for (int k = o.resume ? static_cast<int>(saved[1]) + 1 : 1; k <= outputs; ++k) {
             const double target = o.steps > 0 ? 1e300 : k * 0.02;
             timer.reset();
             while (t < target * (1 - 1e-13) && (o.steps == 0 || steps < o.steps)) {
@@ -217,6 +263,30 @@ int run(const Options& o) {
             if (o.steps == 0) {
                 const Mode m = mode_amplitude(exec, fv, mesh, o.moving);
                 series.push_back({t, m.M, m.K});
+                for (const double when : o.out_times)
+                    if (std::abs(when - t) < 1e-9) {
+                        char suffix[64];
+                        std::snprintf(suffix, sizeof(suffix), "_t%.1f_%d", when, o.n);
+                        write(o.out + suffix);
+                    }
+                if (o.stop_after > 0 && since_start.seconds() > o.stop_after && k < outputs) {
+                    auto state = Kokkos::create_mirror_view(fv.state());
+                    Kokkos::deep_copy(state, fv.state());
+                    auto positions = Kokkos::create_mirror_view(mesh.positions());
+                    Kokkos::deep_copy(positions, mesh.positions());
+                    std::vector<double> rows{t, double(k), double(steps), wall};
+                    for (int i = 0; i < n; ++i) {
+                        rows.push_back(positions(i, 0));
+                        rows.push_back(positions(i, 1));
+                        for (int v = 0; v < 4; ++v) rows.push_back(state(i, v));
+                    }
+                    std::ofstream file(state_file(), std::ios::binary);
+                    file.write(reinterpret_cast<const char*>(rows.data()), static_cast<std::streamsize>(rows.size() * sizeof(double)));
+                    const auto stats = fv.mesh_stats();
+                    std::printf("stopped: t=%.6g steps=%lld wall_s=%.1f mesh_rebuilds=%lld stuck=%lld host_flips=%lld device_flips=%lld\n", t, steps, wall,
+                                stats.rebuilds, stats.stuck, stats.host_flips, stats.device_flips);
+                    return 0;
+                }
             }
         }
         auto q = Kokkos::create_mirror_view(fv.state());
@@ -244,28 +314,7 @@ int run(const Options& o) {
             stats_best = fv.mesh_stats();
         }
         if (r + 1 == o.repeats && !o.out.empty()) {
-            fv.time_step(o.courant);  // the gradients of the end state; the run is over
-            const auto gradient = fv.density_gradients();
-            std::ofstream gradients(o.out + ".grad.bin", std::ios::binary);
-            for (int i = 0; i < n; ++i) {
-                const double row[2] = {gradient(i, 0), gradient(i, 1)};
-                gradients.write(reinterpret_cast<const char*>(row), sizeof(row));
-            }
-            std::ofstream text(o.out + ".txt");
-            text.precision(17);
-            for (const auto& row : series) text << row[0] << " " << row[1] << " " << row[2] << "\n";
-            auto volume = Kokkos::create_mirror_view(mesh.volume());
-            Kokkos::deep_copy(volume, mesh.volume());
-            auto centroid = Kokkos::create_mirror_view(mesh.centroid());
-            Kokkos::deep_copy(centroid, mesh.centroid());
-            auto positions = Kokkos::create_mirror_view(mesh.positions());
-            Kokkos::deep_copy(positions, mesh.positions());
-            std::ofstream binary(o.out + ".bin", std::ios::binary);
-            for (int i = 0; i < n; ++i) {
-                const double row[7] = {positions(i, 0), positions(i, 1), positions(i, 0) + centroid(i, 0), positions(i, 1) + centroid(i, 1),
-                                       volume(i), q(i, 0) / volume(i), q(i, 2) / volume(i)};
-                binary.write(reinterpret_cast<const char*>(row), sizeof(row));
-            }
+            write(o.out);
         }
     }
     const std::string mesh_kind = o.moving ? "moving" : "static";
@@ -326,6 +375,12 @@ int main(int argc, char** argv) {
     o.steps = std::stoi(flag(argc, argv, "--steps", "0"));
     o.repeats = std::stoi(flag(argc, argv, "--repeats", "1"));
     o.out = flag(argc, argv, "--out", "");
+    o.stop_after = std::stod(flag(argc, argv, "--stop-after", "0"));
+    o.resume = has(argc, argv, "--resume");
+    {
+        std::stringstream times(flag(argc, argv, "--out-times", ""));
+        for (std::string when; std::getline(times, when, ',');) o.out_times.push_back(std::stod(when));
+    }
     if (o.memory) DeviceMemory<Memory>::start();
     return o.riemann == "hll" ? run<hydro::HLL>(o) : run<hydro::HLLC>(o);
 }
