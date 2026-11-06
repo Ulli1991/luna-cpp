@@ -23,7 +23,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import problems_1d as pr  # noqa: E402
 
-SERIES = ("luna-mc", "static", "moving", "luna-minmod", "static-minmod", "moving-minmod", "luna-vanleer", "static-vanleer",
+SERIES = ("luna-mc", "static", "moving", "moving-wide", "luna-minmod", "static-minmod", "moving-minmod", "luna-vanleer", "static-vanleer",
           "moving-vanleer", "static-none", "moving-none")
 ALL = (*[f"toro-{k}" for k in range(1, 6)], "einfeldt-strong", "einfeldt-shear", "la-peak", "la-rcvcr", "la-stationary", "la-slow",
        "la-streams", "la-near-vacuum", "la-vacuum", "leblanc", "noh", "shu-osher", "woodward-colella", "titarev-toro",
@@ -36,13 +36,20 @@ REFERENCES = {"shu-osher": "ref_shu-osher.npz", "woodward-colella": "ref_woodwar
 ATHENAK = "athenak/titarev_toro/tt_ppmx_rk4_65536.npz"
 
 
+def pad(p):
+    """The length no wave of a tube reaches by t_end (twice the fastest speed: gas and the head of a fan)."""
+    pb = pr.problem(p)
+    fastest = max(abs(W[1]) + np.sqrt(pb["gamma"] * W[2] / W[0]) for W in (pb["WL"], pb["WR"]) if W[0] > 0)
+    return f"{2 * fastest * pb['t']:.6g}"
+
+
 def plan(series, problems, lo, hi):
     tasks = []
     for b in range(lo, hi + 1):
         for p in problems:
             for s in series:
                 for sign in (("+", "-") if p in pr.LINEAR else ("+",)):
-                    tasks.append(f"{s} {p} {1 << b} {sign}")
+                    tasks.append(f"{s} {p} {1 << b} {sign} {pad(p) if s == 'moving-wide' else 0}")
     return tasks
 
 
@@ -59,6 +66,9 @@ def cells(file, p):
         e = np.linspace(lo, hi, W.shape[1] + 1)
         return e[:-1], e[1:], W
     d = np.load(file)
+    lo, hi = pr.problem(p)["box"]
+    if d.shape[0] > 0 and (d[0, 1] < lo or d[-1, 1] > hi) and pr.problem(p)["boundary"] != pr.PERIODIC:  # moving-wide: LUNA's box
+        d = d[(d[:, 1] >= lo) & (d[:, 1] <= hi)]
     return d[:, 1] - 0.5 * d[:, 2], d[:, 1] + 0.5 * d[:, 2], d[:, 3:6].T
 
 

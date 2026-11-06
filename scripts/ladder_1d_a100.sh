@@ -2,7 +2,8 @@
 # The 1D convergence ladder on A100s, a queue of runs (scripts/ladder_1d.py plan), one worker per GPU. From the repository root:
 #   sbatch --export=ALL,REPO=$PWD,BIN=<cuda build copy>,OUT=<runs dir> -o <logs>/ladder-%j.out scripts/ladder_1d_a100.sh <series,..> <problems,..|all> <b_lo> <b_hi>
 # Runs already written are skipped, so the same line continues where a job stopped. Above the first rung that does not reach
-# t_end a series is not run for that problem. LUNA's long runs go on from their state (resume=).
+# t_end a series is not run for that problem; moving runs count as stalled after 200 N steps. LUNA's long runs go on from their
+# state (resume=). moving-wide: a line wide enough that no wave or cell reaches its ends, a different domain, measured on LUNA's box.
 #SBATCH -J ladder1d
 #SBATCH -p gpu1,gpudev
 #SBATCH --gres=gpu:a100:1
@@ -41,8 +42,9 @@ flags_of() {  # the hydro_1d flags of a series
     case "$1" in
     static) ;;
     static-*) echo "--limiter=${1#static-}" ;;
-    moving) echo "--moving" ;;
-    moving-*) echo "--moving --limiter=${1#moving-}" ;;
+    moving) echo "--moving --steps=$((200 * $2))" ;;
+    moving-wide) echo "--moving --steps=$((200 * $2)) --pad=$3" ;;
+    moving-*) echo "--moving --steps=$((200 * $2)) --limiter=${1#moving-}" ;;
     esac
 }
 limiter_of() {
@@ -56,7 +58,7 @@ limiter_of() {
 worker() {
     local id="$1" s p n sign tag amp file left
     export CUDA_VISIBLE_DEVICES="$id"
-    awk -v i="$id" -v g="$gpus" 'NR % g == i' "$tasks" | while read -r s p n sign; do
+    awk -v i="$id" -v g="$gpus" 'NR % g == i' "$tasks" | while read -r s p n sign pad; do
         left=$((limit - SECONDS))
         ((left > 20)) || break
         tag=""
@@ -76,7 +78,7 @@ worker() {
         else
             local amp_flag=()
             [[ ${#eps[@]} -gt 0 ]] && amp_flag=(--amp="$amp")
-            LD_LIBRARY_PATH="$ours_ld" timeout $((left + 15)) "$bin/hydro_1d" "$p" "$n" --repeats=1 --max-wall="$left" --series="$s" --out="$file" "${amp_flag[@]}" $(flags_of "$s") | grep -E "^ours|rror" | cut -c1-200
+            LD_LIBRARY_PATH="$ours_ld" timeout $((left + 15)) "$bin/hydro_1d" "$p" "$n" --repeats=1 --max-wall="$left" --series="$s" --out="$file" "${amp_flag[@]}" $(flags_of "$s" "$n" "$pad") | grep -E "^ours|rror" | cut -c1-200
             # A step that is not positive: that rung is the answer. The wall limit: not a result, the file goes.
             if [[ -f "$file.json" ]] && grep -q '"reached": 0' "$file.json"; then
                 if (($(awk "BEGIN{print ($(sed -E 's/.*"wall_s": ([^,]*),.*/\1/' "$file.json") >= $left - 1)}"))); then

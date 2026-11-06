@@ -69,7 +69,7 @@ if(BUILD_TESTING)
     if(VORONOI_SANITIZERS)
         set(hydro_test_timeout 3000)  # about 11x slower: `hydro` and `hydro_wave` passed 600 s on CI's 2 cores with two passes
     endif()
-    foreach(test hydro hydro1d hydro_wave hydro2d)
+    foreach(test hydro hydro1d hydro1d_cases hydro_wave hydro2d)
         hydro_program(${test}_test ${test}_test src/test/${test}_test.cpp)
         add_test(NAME ${test} COMMAND ${test}_test)
         set_tests_properties(${test} PROPERTIES TIMEOUT ${hydro_test_timeout})

@@ -2,12 +2,14 @@
 //
 //   hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]
 //            [--dt=luna|arepo|fixed] [--courant=<c>] [--fixed-dt=<dt>] [--jitter=<spacings>]
-//            [--limiter=face|cell|none|minmod|vanleer] [--amp=<a>] [--steps=<max>] [--max-wall=<s>]
+//            [--limiter=face|cell|none|minmod|vanleer] [--amp=<a>] [--pad=<length>] [--steps=<max>] [--max-wall=<s>]
 //            [--repeats=<r>] [--phases] [--memory] [--no-regularise] [--unfused] [--out=<file.npy>] [--series=<name>]
 //
 // Problems: the table of problems_1d.hpp, each with its gamma. Every cell
 // starts from the problem's state over its own interval. --amp: the signed
-// amplitude of the linear waves, or the simple wave's. N points on a uniform lattice, or moved by up to
+// amplitude of the linear waves, or the simple wave's. --pad widens the line by
+// at least that length on each side, in whole cells of the same spacing (the
+// states go on, N stays the box's in the .json). N points on a uniform lattice, or moved by up to
 // --jitter / 2 spacings. --dt: LUNA's rule, the default of a static run
 // (--courant default 0.8), AREPO's, the default of a moving run (default
 // 0.4), or a constant --fixed-dt; the last step lands on t_end. --steps stops after that many steps (throughput).
@@ -208,7 +210,7 @@ int main(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|cell|none|minmod|vanleer]"
-                     " [--amp=a] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused]"
+                     " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused]"
                      " [--out=file.npy] [--series=name]\n";
         return 1;
     }
@@ -240,7 +242,11 @@ int main(int argc, char* argv[]) {
                 : limit == "vanleer" ? hydro::Limiter::van_leer
                                      : hydro::Limiter::face_centroid;
     if (has(argc, argv, "--memory")) DeviceMemory::start();
-    const Problem pb = problem(name, std::stod(flag(argc, argv, "--amp", "0")));
+    Problem pb = problem(name, std::stod(flag(argc, argv, "--amp", "0")));
+    const int box_cells = o.n, pad_cells = static_cast<int>(std::ceil(std::stod(flag(argc, argv, "--pad", "0")) * o.n / pb.L));
+    pb.origin -= pad_cells * pb.L / o.n;
+    pb.L += 2 * pad_cells * pb.L / o.n;
+    o.n += 2 * pad_cells;
     Result best;
     bool same = true;
     for (int run = 0; run < repeats; ++run) {
@@ -270,7 +276,7 @@ int main(int argc, char* argv[]) {
     const std::string series = flag(argc, argv, "--series", "");
     if (!series.empty() && !out.empty()) {
         std::ofstream json(out + ".json");
-        json << "{\"series\": \"" << series << "\", \"problem\": \"" << name << "\", \"N\": " << o.n << ", \"steps\": " << best.steps
+        json << "{\"series\": \"" << series << "\", \"problem\": \"" << name << "\", \"N\": " << box_cells << ", \"steps\": " << best.steps
              << ", \"wall_s\": " << best.wall_s << ", \"peak_MB\": " << DeviceMemory::peak / 1e6 << ", \"sorts\": " << best.sorts
              << ", \"t\": " << best.t << ", \"reached\": " << (best.reached ? 1 : 0)
              << ", \"file\": \"" << out.substr(out.find_last_of('/') + 1) << "\"}\n";
