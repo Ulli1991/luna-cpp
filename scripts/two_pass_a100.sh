@@ -36,15 +36,16 @@ bits)
     for build in "$BASE" "$NEW"; do
         for flags in "" "--moving" "--order=0" "--update=cell --moving" "--riemann=hll --moving"; do
             echo "== $(basename "$build") 128^3 ${flags:-static}"
-            # Before the option the moving default was one pass; here it is asked for by name.
+            # Before the option the moving default was one pass and the precision double; here both are asked for by name.
             extra=""
-            [[ "$build" == "$NEW" && "$flags" == *--moving* ]] && extra="--integrator=one-pass"
+            [[ "$build" == "$NEW" ]] && extra="--precision=double"
+            [[ "$build" == "$NEW" && "$flags" == *--moving* ]] && extra+=" --integrator=one-pass"
             "$build/hydro_sedov" 128 jittered $flags $extra --steps=50 | grep '^checksum'
         done
     done
     for round in 1 2; do
         echo "== two-pass moving, run $round"
-        "$NEW/hydro_sedov" 128 jittered --moving --integrator=two-pass --steps=50 | grep '^checksum'
+        "$NEW/hydro_sedov" 128 jittered --moving --integrator=two-pass --precision=double --steps=50 | grep '^checksum'
     done
     ;;
 speed)
@@ -53,21 +54,22 @@ speed)
             for build in "$BASE" "$NEW"; do
                 echo "== $(basename "$build") 128^3 ${mesh:-static} one-pass round $round"
                 extra=""
-                [[ "$build" == "$NEW" && -n "$mesh" ]] && extra="--integrator=one-pass"
+                [[ "$build" == "$NEW" ]] && extra="--precision=double"
+                [[ "$build" == "$NEW" && -n "$mesh" ]] && extra+=" --integrator=one-pass"
                 "$build/hydro_sedov" 128 jittered --steps=40 --memory $mesh $extra | grep -E "$keep"
             done
         done
         echo "== two-pass 128^3 moving round $round"
-        "$NEW/hydro_sedov" 128 jittered --steps=40 --memory --moving --integrator=two-pass | grep -E "$keep"
+        "$NEW/hydro_sedov" 128 jittered --steps=40 --memory --moving --integrator=two-pass --precision=double | grep -E "$keep"
     done
     for build in "$BASE" "$NEW"; do
         echo "== $(basename "$build") 256^3 moving one-pass"
         extra=""
-        [[ "$build" == "$NEW" ]] && extra="--integrator=one-pass"
+        [[ "$build" == "$NEW" ]] && extra="--precision=double --integrator=one-pass"
         "$build/hydro_sedov" 256 jittered --steps=40 --memory --moving $extra | grep -E "$keep"
     done
     echo "== two-pass 256^3 moving"
-    "$NEW/hydro_sedov" 256 jittered --steps=40 --memory --moving --integrator=two-pass | grep -E "$keep"
+    "$NEW/hydro_sedov" 256 jittered --steps=40 --memory --moving --integrator=two-pass --precision=double | grep -E "$keep"
     ;;
 sedov | mixed)
     sides="$*"

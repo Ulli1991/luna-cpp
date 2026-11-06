@@ -35,7 +35,7 @@ out="$(realpath -m "${1:-speed-runs}")"
 mode="${2:-speed128}"
 mkdir -p "$out"
 nvidia-smi -L
-all="default weight32 weight64 flux32 grad32 grad16 geo32 riemann32 mixed mixed16 low lowweights"
+all="default double weight32 weight64 flux32 grad32 grad16 geo32 riemann32 mixed mixed16 low lowweights"
 
 speed() {  # speed <build> <side> [flags]: the phase lines of a 40-step run
     local build="$1" side="$2"
@@ -124,10 +124,13 @@ repro)
 bits)
     # MAIN and FIX, the paths of scripts/dim_gate_a100.sh, 50 steps at
     # 128^3: hashes of the final U, x and volume (scripts/snapshot_hash.sh).
+    # Each build's default; a tree from before grad32 became the default takes
+    # MAIN_FLAGS empty, FIX_FLAGS=--precision=double.
     for variant in MAIN FIX; do
+        extra="${variant}_FLAGS"
         for flags in "" "--moving" "--order=0" "--update=cell --moving" "--riemann=hll --moving"; do
             tag="$(echo "$flags" | tr -d ' -=')"
-            "${!variant}/hydro_sedov" 128 jittered $flags --snapshots=1 --steps=50 --out="$out/bits_${tag:-static}_$variant" > /dev/null
+            "${!variant}/hydro_sedov" 128 jittered $flags ${!extra:-} --snapshots=1 --steps=50 --out="$out/bits_${tag:-static}_$variant" > /dev/null
         done
     done
     bash scripts/snapshot_hash.sh "$out"/bits_* | sort

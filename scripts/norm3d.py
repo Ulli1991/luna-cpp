@@ -20,7 +20,6 @@ from scipy.spatial import cKDTree
 
 G = 1.4
 a = dict(s[2:].split("=") for s in sys.argv[1:] if s.startswith("--") and "=" in s)
-a = {k[2:]: v for k, v in a.items()}
 pos = [s for s in sys.argv[1:] if not s.startswith("--")]
 problem, path, nx = pos[0], pos[1], int(pos[2])
 sub = int(pos[3]) if len(pos) > 3 else 4
@@ -144,5 +143,5 @@ for x0 in np.array_split(g_axes[0], max(1, g_axes[0].size // 16)):
     _, ids = tree.query(p.T, workers=-1)
     f0x += scalars(avg[:, ids] - exact(p)).sum(axis=1)
 fmt = lambda v: " ".join(f"{e:.3e}" for e in v)
-print(f"gen {fmt(line(W - exact(gen.T)))} | cen {fmt(line(W - exact(cen.T)))} | avg {fmt(line(W - avg))} | field0 {fmt(f0 / total)} | exact0 {fmt(f0x / total)} | field1 {fmt(f1 / total)}"
+print(f"gen {fmt(line(W - exact(gen.T)))} | cen {fmt(line(W - exact(cen.T)))} | avg {fmt(line(W - avg))} | linf_avg {fmt(scalars(W - avg).max(axis=1))} | field0 {fmt(f0 / total)} | exact0 {fmt(f0x / total)} | field1 {fmt(f1 / total)}"
       f" | offset/h {np.sqrt(((cen - gen + side / 2) % side - side / 2) ** 2).sum(axis=1).mean() / (side[0] / cells[0]):.3f}")
