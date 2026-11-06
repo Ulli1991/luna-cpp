@@ -151,7 +151,7 @@ passes): 128³ 0.0629, 0.0648; 256³ 0.0369, 0.0377 (research_notes/two_pass_202
 
 ![Kelvin-Helmholtz Voronoi mesh](docs/figures/kh_2d_mesh.png)
 
-Kelvin-Helmholtz to t = 5, N = 128, one colour scale (magma, LUNA's 0.9 to 2.1). Top: moving, two passes, the Voronoi cells drawn as exact polygons with their edges, coloured by cell density. Bottom: LUNA MC on its grid, cell values, Pallas, CFL 0.8. Past t = 1.5 there is no reference curve. Job 31953523: 0 mesh rebuilds, 0 stuck, mass, momentum and energy conserved to rounding from t = 0 to 5.
+The moving mesh in Kelvin-Helmholtz, N = 512, two passes, t = 2.5, magma with LUNA's 0.9 to 2.1. The map is the scheme's own field, linear reconstruction in cells as in AREPO: each pixel takes its nearest cell plus the run's limited gradient from the centroid. Over it the exact Voronoi edges (`scipy.spatial.Voronoi`, periodic images), thin and fading where a cell is shorter than a few pixels. Zoom into one roll-up. 0 mesh rebuilds, 0 stuck; to t = 5 at N = 256 mass, momentum and energy hold to rounding (job 31953523).
 
 Density of the smooth Kelvin-Helmholtz test of McNally, Lyra & Passy (2012), N = 1024, at t = 1.0 and 1.5, one colour scale:
 LUNA MC, static, moving (two passes, the Voronoi cells drawn as exact polygons), with a zoom on one roll-up, and
@@ -196,7 +196,7 @@ From `scripts/make_figures.py`, in LUNA's figure style (`scripts/figstyle.py`).
 
 ![Sod density](docs/figures/sod.png)
 
-Sod, t = 0.25, N = 512, cell means at centroids against the exact solution; the boxes mark the zooms, filled markers are cells (static lies on LUNA, drawn dashed). Moving has the sharper contact and 2.5 times LUNA's error at the tail of the rarefaction (x = 0.48); the strip clips the contact and shock spikes. HLLC, MUSCL-Hancock, FP64; LUNA: MC, Pallas, CFL 0.8; static: uniform points, face limiter, LUNA's time step rule at 0.8; moving: face limiter, the default rule at 0.4, regularised. Job 31917206, voronoi-cpp 947946a.
+Sod, t = 0.25, N = 512, cell means at centroids against the exact solution; the boxes mark the zooms, filled markers are cells, a regular subset where they would touch (static lies on LUNA, drawn dashed). Moving has the sharper contact and 2.5 times LUNA's error at the tail of the rarefaction (x = 0.48); the strip clips the contact and shock spikes. HLLC, MUSCL-Hancock, FP64; LUNA: MC, Pallas, CFL 0.8; static: uniform points, face limiter, LUNA's time step rule at 0.8; moving: face limiter, the default rule at 0.4, regularised. Job 31917206, voronoi-cpp 947946a.
 
 ![Shu-Osher density](docs/figures/shu_osher.png)
 
@@ -229,6 +229,10 @@ Sedov 3D, 1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr: a shock test that cannot r
 Throughput against resolution on one A100, 32³ to 256³, Sedov 3D, 1095 MHz, double, HLLC, 40 steps, with LUNA (MC, Pallas, FP64; median of the perf lines of three rounds) and peak memory. Hydro is flat from 96³ to 256³; below 64³ the fixed cost per step dominates. Job 31928911, mesh pin 0b433f0.
 
 ![Throughput against resolution](docs/figures/throughput_scaling.png)
+
+Precision options against resolution on one A100, 32³ to 256³, the same Sedov, HLLC, 40 steps: hydro static, whole two-pass moving step, GPU memory below. Job 31953468, e90a913, 1305 MHz. LUNA in the same job (MC, Pallas, 200 steps, median of the perf lines), FP64 to compare with double, FP32 throughout; none of our options is FP32 throughout. At 128³ `grad16` gives +15 % hydro, +10 % whole step, `grad32` +11 % and +7 %, `mixed` +10 % and +6 %, `flux32` nothing. `mixed` two-pass does not fit at 256³.
+
+![Throughput by precision](docs/figures/throughput_precision.png)
 
 ## Limitations and open items
 
