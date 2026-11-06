@@ -298,7 +298,7 @@ void sod(Check& check) {
 // Noh's implosion in 2D, gamma 5/3: at time t the shock stands at r = t / 3, rho = 16
 // inside, 1 + t / r outside (Noh 1987). The periodic box is large enough for its seam
 // and the gas leaving the seam (rarefied from r > 1 - t) to stay out of r < 0.38.
-void noh(Check& check) {
+[[maybe_unused]] void noh(Check& check) {
     const hydro::Gas gas{5.0 / 3.0};
     const Box box(2.0);
     const double t = 0.6;
