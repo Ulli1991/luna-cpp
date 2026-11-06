@@ -714,6 +714,7 @@ def precision_log():
 
 def fig_throughput_precision():
     ours, failed, luna, memory = precision_log()
+    # Job 31953468 predates grad32 as the default: its `default` is double throughout.
     presets = (("default", "double", "k", "-", "o"), ("grad32", "grad32", "C1", "-", "s"), ("grad16", "grad16", "C2", "--", "^"), ("flux32", "flux32", "C3", ":", "D"), ("mixed", "mixed", "C4", "-.", "v"))
     sides = sorted({k[0] for k in ours})
     cells = [s ** 3 for s in sides]

@@ -2,7 +2,7 @@
 //
 //   hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--courant=c]
 //                [--jitter=spacings] [--amp=a] [--limiter=face|none] [--t-end=t] [--max-steps=m] [--out=file.npy]
-//                [--precision=default|grad32|grad16]
+//                [--precision=default|double|grad32|grad16]
 //
 // The problems: problems_3d.hpp. Prints steps, GPU seconds of the steps and cell updates per second.
 // --out: rows generator xyz, centroid xyz, V, rho, vx, vy, vz, P in box coordinates plus the origin, id order,
@@ -127,8 +127,9 @@ int run(int argc, char** argv) {
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     const std::string precision = flag(argc, argv, "--precision", "default");
-    if (precision == "default") return run<hydro::Precision<>>(argc, argv);
-    if (precision == "grad32") return run<hydro::Precision<double, void, float>>(argc, argv);
+    if (precision == "default") return run<hydro::DefaultPrecision<3>>(argc, argv);
+    if (precision == "double") return run<hydro::Precision<>>(argc, argv);
+    if (precision == "grad32") return run<hydro::Grad32>(argc, argv);
     if (precision == "grad16") return run<hydro::Precision<double, void, hydro::Half>>(argc, argv);
-    throw std::invalid_argument("hydro_wave3d: --precision=default|grad32|grad16");
+    throw std::invalid_argument("hydro_wave3d: --precision=default|double|grad32|grad16");
 }

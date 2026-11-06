@@ -67,10 +67,11 @@
 // primitive and gradient rows after the mesh update, so there they live in an
 // array of their own, allocated only then, and the scratch holds the fluxes.
 //
-// Precision (precision.hpp): the default is double throughout, the
-// least-squares fit solved in the sweep (main's bits); reduced precision and
-// stored weights are compile-time options of the weights, gradients, stored
-// face fluxes, Riemann solve and face geometry rows.
+// Precision (precision.hpp): the default, DefaultPrecision<D>, is grad32 in 3D
+// (float gradients) and double in 2D; Precision<> is double throughout, the
+// least-squares fit solved in the sweep. Reduced precision and stored weights
+// are compile-time options of the weights, gradients, stored face fluxes,
+// Riemann solve and face geometry rows.
 namespace hydro {
 
 enum class Update { per_cell, per_face };
@@ -114,7 +115,7 @@ struct MeshStats {
 };
 
 template <int D, class ExecSpace = Kokkos::DefaultExecutionSpace, class Riemann = HLLC,
-          class Precision = hydro::Precision<>>
+          class Precision = hydro::DefaultPrecision<D>>
 class FiniteVolume {
 public:
     static_assert(D == 2 || D == 3, "hydro::FiniteVolume: D = 1 is finite_volume_1d.hpp");

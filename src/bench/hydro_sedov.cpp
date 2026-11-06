@@ -25,7 +25,7 @@
 // cell at order 0. --limiter: the gradient limiter (hydro::Limiter: face or
 // cell centroids, or none; default face). --riemann: HLLC (default, as
 // LUNA) or HLL. --precision: the hydro's precision policy (run_precision
-// below; default double). --no-blast: no blast, a uniform stream (with
+// below; default grad32, double selects double throughout). --no-blast: no blast, a uniform stream (with
 // --bulk), printing its largest deviation from uniform. Prints per step
 // phase medians and cell updates per second and a checksum of the final
 // state, positions and volumes (bits),
@@ -433,19 +433,22 @@ void run(const Options& o, Points points) {
 }
 
 // The precision policies of --precision (hydro/precision.hpp): <name>
-// geometry / gradient weights / gradients / face fluxes / Riemann; default:
-// double, the fit solved in the sweep (weights void).
+// geometry / gradient weights / gradients / face fluxes / Riemann. default: the
+// hydro's default, grad32 in 3D; double: double throughout, the fit solved in
+// the sweep (weights void), the bits of the runs from before grad32 was the
+// default, whose logs call it `default`.
 template <class R>
 void run_precision(const Options& o, const Points& points) {
     using hydro::Half;
     using hydro::Precision;
     const std::string& p = o.precision;
-    if (p == "default") return run<Precision<>, R>(o, points);
+    if (p == "default") return run<hydro::DefaultPrecision<3>, R>(o, points);
+    if (p == "double") return run<Precision<>, R>(o, points);
     if constexpr (std::is_same_v<R, hydro::HLLC>) {
         if (p == "weight32") return run<Precision<double, float>, R>(o, points);
         if (p == "weight64") return run<Precision<double, double>, R>(o, points);
         if (p == "flux32") return run<Precision<double, void, double, float>, R>(o, points);
-        if (p == "grad32") return run<Precision<double, void, float>, R>(o, points);
+        if (p == "grad32") return run<hydro::Grad32, R>(o, points);
         if (p == "grad16") return run<Precision<double, void, Half>, R>(o, points);
         if (p == "geo32") return run<Precision<float>, R>(o, points);
         if (p == "riemann32") return run<Precision<double, void, double, double, float>, R>(o, points);
@@ -454,7 +457,7 @@ void run_precision(const Options& o, const Points& points) {
         if (p == "low") return run<Precision<float, void, Half, float, float>, R>(o, points);
         if (p == "lowweights") return run<Precision<float, float, Half, float, float>, R>(o, points);
     }
-    throw std::invalid_argument("hydro_sedov: unknown --precision " + p + " (HLL: double only)");
+    throw std::invalid_argument("hydro_sedov: unknown --precision " + p + " (HLL: default or double only)");
 }
 
 }  // namespace
@@ -466,9 +469,9 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);
     if (args.size() < 2) {
         std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]"
-                     " [--riemann=hllc|hll] [--precision=default|weight32|weight64|flux32|grad32|grad16|geo32|riemann32|mixed|mixed16|low|lowweights]"
+                     " [--riemann=hllc|hll] [--precision=default|double|weight32|weight64|flux32|grad32|grad16|geo32|riemann32|mixed|mixed16|low|lowweights]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
-                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--integrator=one-pass|two-pass]\n";
+                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--integrator=one-pass|two-pass] [--cold=f] [--watch]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();

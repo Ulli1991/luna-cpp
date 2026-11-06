@@ -10,9 +10,11 @@
 
 // The hydro's compile-time precision policy (research_notes/hydro_speed_2026-11-04.md).
 // The conserved state Q, the volumes and cell centroids, W = primitive(Q / V)
-// and the sums of the face fluxes are double in every policy. The default,
-// Precision<>, is double throughout, with the least-squares fit solved in
-// the gradient sweep (main's arithmetic and bits). The settings:
+// and the sums of the face fluxes are double in every policy. Precision<> is
+// double throughout, with the least-squares fit solved in the gradient sweep
+// (`--precision=double`, the bits of the code before grad32 became the
+// default). What a FiniteVolume takes unless told otherwise is
+// DefaultPrecision<D>, below. The settings:
 //   Geometry  the face rows the hydro reads (area vector, centroid, owner,
 //             neighbour): double (the mesh's double arrays) or float (the
 //             mesh's float rows, voronoi::Mesh<D, Exec, float>); converted to
@@ -60,6 +62,17 @@ struct Precision {
     using flux = Flux;
     using riemann = Riemann;
 };
+
+// The gradients, the limiter and the face-state change in float, everything
+// else double (`--precision=grad32`).
+using Grad32 = Precision<double, void, float>;
+
+// The default: Grad32 in 3D, moving and static (L1 of the smooth 3D tests
+// unchanged to about 1e-3 relative, no error floor, +8 to +12 % throughput,
+// 64 B/cell less; README). Double in 2D, where grad32 has not been measured,
+// and in 1D, which has no policies (finite_volume_1d.hpp).
+template <int D>
+using DefaultPrecision = std::conditional_t<D == 3, Grad32, Precision<>>;
 
 namespace half {
 
