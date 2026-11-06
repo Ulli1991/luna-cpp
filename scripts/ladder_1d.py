@@ -23,7 +23,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import problems_1d as pr  # noqa: E402
 
-SERIES = ("luna-mc", "static", "moving", "moving-wide", "luna-minmod", "static-minmod", "moving-minmod", "luna-vanleer", "static-vanleer",
+SERIES = ("luna-mc", "static", "moving", "moving-wide", "moving-fixed", "luna-minmod", "static-minmod", "moving-minmod", "luna-vanleer", "static-vanleer",
           "moving-vanleer", "static-none", "moving-none")
 ALL = (*[f"toro-{k}" for k in range(1, 6)], "einfeldt-strong", "einfeldt-shear", "la-peak", "la-rcvcr", "la-stationary", "la-slow",
        "la-streams", "la-near-vacuum", "la-vacuum", "leblanc", "noh", "shu-osher", "woodward-colella", "titarev-toro",

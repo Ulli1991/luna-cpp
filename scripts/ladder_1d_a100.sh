@@ -4,6 +4,7 @@
 # Runs already written are skipped, so the same line continues where a job stopped. Above the first rung that does not reach
 # t_end a series is not run for that problem; moving runs count as stalled after 200 N steps. LUNA's long runs go on from their
 # state (resume=). moving-wide: a periodic line so wide that the seam's waves stay outside LUNA's box, no walls: a different domain, measured on the box.
+# moving-fixed: a constant step, for the wall's missing term in the time step.
 #SBATCH -J ladder1d
 #SBATCH -p gpu1,gpudev
 #SBATCH --gres=gpu:a100:1
@@ -43,6 +44,7 @@ flags_of() {  # the hydro_1d flags of a series
     static) ;;
     static-*) echo "--limiter=${1#static-}" ;;
     moving) echo "--moving --steps=$((200 * $2))" ;;
+    moving-fixed) echo "--moving --steps=$((200 * $2)) --dt=fixed --fixed-dt=$(awk "BEGIN{print 0.4 / $2}")" ;;  # Noh: dt = 0.2 h, h = 2 / N
     moving-wide) echo "--moving --steps=$((200 * $2)) --pad=$3" ;;
     moving-*) echo "--moving --steps=$((200 * $2)) --limiter=${1#moving-}" ;;
     esac

@@ -1220,7 +1220,7 @@ def fig_ladder():
         log_axes(ax)
         labels = []
         tops = []
-        for series, style, tag in (("static", "static", "S"), ("luna-mc", "luna", "L"), ("moving", "moving", "M"), ("moving-wide", "padded", "W")):
+        for series, style, tag in (("static", "static", "S"), ("luna-mc", "luna", "L"), ("moving", "moving", "M"), ("moving-wide", "padded", "W"), ("moving-fixed", "padded", "W")):
             o = res.get((p, series, 0))
             if o is None:
                 continue
@@ -1236,12 +1236,12 @@ def fig_ladder():
         corner(ax, LADDER_NAMES.get(p, p), 0.95, 0.95, "right")
         corner(ax, "  ".join(labels), 0.04, 0.05, va="bottom")
     for ax in axes[:, 0]:
-        ax.set_ylabel(r"$L_1(\\rho)$", fontsize=LABEL + 1)
+        ax.set_ylabel(r"$L_1(\rho)$", fontsize=LABEL + 1)
     for j, ax in enumerate(axes.ravel()):
         if ax.get_visible() and j + cols >= len(LADDER_PANELS):
             ax.set_xlabel(r"$N$")
             ax.tick_params(labelbottom=True)
-    axes[0, 0].legend(handles=[key("luna", "LUNA MC (L)", True), key("static", "static (S)", True), key("moving", "moving (M)", True), key("padded", "moving, wide line (W)", True)],
+    axes[0, 0].legend(handles=[key("luna", "LUNA MC (L)", True), key("static", "static (S)", True), key("moving", "moving (M)", True), key("padded", "moving, wide line or fixed dt (W)", True)],
                       loc="center right", fontsize=LABEL - 1, bbox_to_anchor=(1.0, 0.62))
     save(fig, "ladder_1d")
 
@@ -1250,7 +1250,7 @@ def fig_hard():
     """Density of the hard cases at one N: LUNA, static, moving, exact; a zoom under each."""
     cases = (("leblanc", "LeBlanc", "moving", True, (0.72, 0.8), [0.73, 0.75, 0.77, 0.79], "contact"),
              ("einfeldt-strong", "Einfeldt strong", "moving-wide", False, (0.42, 0.58), [0.45, 0.50, 0.55], "near vacuum"),
-             ("noh", "Noh", None, False, (0.0, 0.03), [0.0, 0.01, 0.02], "wall heating"),
+             ("noh", "Noh", "moving-fixed", False, (0.0, 0.03), [0.0, 0.01, 0.02], "wall heating"),
              ("toro-3", "Toro 3", "moving", False, (0.76, 0.82), [0.77, 0.79, 0.81], "contact and shock"))
     n = 1024
     fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.15))
@@ -1281,8 +1281,8 @@ def fig_hard():
         zoom(ax, low, xlim, ticks, runs, [(fine, exact, REF)], "abcd"[j], label)
         low.set_xlabel(r"$x$")
         if j == 0:
-            ax.set_ylabel(r"$\\rho$")
-            low.set_ylabel(r"$\\rho$")
+            ax.set_ylabel(r"$\rho$")
+            low.set_ylabel(r"$\rho$")
     fig.axes[0].legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"), rkey("exact", REF)], loc="lower left", fontsize=LABEL)
     save(fig, "hard_1d")
 
