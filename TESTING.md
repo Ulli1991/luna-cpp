@@ -28,7 +28,7 @@ CPU times: OpenMP build (gcc 15), one thread of a Raven login node (Xeon Platinu
 
 ## Bit hashes
 
-`scripts/hydro_speed_a100.sh` mode `bits` (MAIN and FIX: two CUDA build directories) runs five paths at 128^3, 50
+`scripts/hydro_speed_a100.sh` mode `bits` (MAIN and FIX: two CUDA build directories) runs five paths at 128³, 50
 steps: static, moving, order 0, per-cell moving, HLL moving. `scripts/two_pass_a100.sh` mode `bits` does the same with the
 one-pass runs of a tree from before two passes against `--integrator=one-pass`, and runs two passes twice. `scripts/snapshot_hash.sh` prints hashes of the final U, x
 and volume. Two builds of the same hydro and mesh must give equal hashes. `hydro_1d` prints a hash of its final state
@@ -40,7 +40,7 @@ and positions, the same in every run.
 sound-wave order in cell averages over the actual polygons, a Galilean blast; Sod and Noh with the default integrator.
 
 KH: `scripts/dim2d_a100.sh kh <N...>` and `khbulk <u> <N...>`, one job per ladder, then
-`scripts/compare_kh.py <runs> <logs...>`: M(t) against the Pencil 4096^2 curve, field L1 on block averages of the actual
+`scripts/compare_kh.py <runs> <logs...>`: M(t) against the Pencil 4096² curve, field L1 on block averages of the actual
 cells, GPU time to a target error. Moving-mesh M is summed at cell centroids, where a cell's state belongs.
 
 ## The 1D tests against LUNA (not in CTest)

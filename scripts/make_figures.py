@@ -6,6 +6,7 @@ Run with LUNA's environment: LUNA's src on PYTHONPATH (exact Riemann and Sedov-T
 Data paths, each an environment variable, none of them in this repository:
 
     VORONOI_RUNS               voronoi-cpp checkout with the build-* run directories
+    KH_TABLE, KH_FIELDS        the KH table and the density fields, default under VORONOI_RUNS
     LUNA_REFERENCE_SOLUTIONS   luna-reference-solutions at 99a52d0 (sha256 checked against its MANIFEST.json)
     LUNA_CPP_FIGURES           output directory, default docs/figures next to this script's parent
 
@@ -29,6 +30,7 @@ import numpy as np
 from matplotlib.path import Path
 from matplotlib.patches import ConnectionPatch, Rectangle
 from PIL import Image
+from scipy.spatial import cKDTree
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -45,7 +47,8 @@ FINE = f"{RUNS}/build-1d/runs/refs"          # the references of the L1 table: L
 MATRIX = f"{RUNS}/build-1ddiag/runs_m/matrix.json"
 WIDE_CPU = f"{RUNS}/build-1ddiag/runs_mc"
 VORTEX_LOGS = f"{RUNS}/build-1ddiag/logs"
-KH = f"{RUNS}/build-2d/runs/kh_table.md"
+KH = os.environ.get("KH_TABLE", f"{RUNS}/build-2d/runs/kh_table.md")
+KH_FIELDS = os.environ.get("KH_FIELDS", f"{RUNS}/build-2d/runs")  # field_* of dim2d_a100.sh khfield
 SEDOV = f"{RUNS}/build-limiters/sedov"
 SEDOV_L1 = f"{RUNS}/build-limiters/sedov_l1.json"
 SEDOV_LADDER = f"{RUNS}/build-metric"
@@ -74,6 +77,8 @@ TEXTS, BOXES = [], []  # panel labels and box letters, zoom boxes, of the figure
 FAILED = []  # (figure, what) of every overlap
 WIDTH = FIGSIZE[0] * 2  # every figure
 LEGEND = dict(loc="upper right", fontsize=LABEL)
+KH_WINDOW = ((0.27, 0.57), (0.11, 0.41))  # the roll-up of the zoom panels
+DIFF = {}
 
 
 def save(fig, name):
@@ -506,8 +511,68 @@ def fig_kh():
     a.set_xlabel(r"$N$")
     a.set_ylabel(r"$\max\,|e|$")
     b.set_xlabel("GPU time (s)")
-    a.legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving, one flux", True), key("two", "moving, two fluxes", True)], **LEGEND)
+    a.legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving, one pass", True), key("two", "moving, two passes", True)], **LEGEND)
     save(fig, "kh_2d")
+
+
+def kh_field(kind, t, n, m):
+    """Density on an m x m lattice, [x, y]: LUNA's cells, or the Voronoi cells of a run by nearest generator (periodic)."""
+    if kind == "luna":
+        rho = np.load(f"{KH_FIELDS}/field_luna_t{t}_{n}.npz")["rho"]
+        return rho if rho.shape[0] == m else rho.repeat(m // rho.shape[0], 0).repeat(m // rho.shape[0], 1)
+    rows = np.fromfile(f"{KH_FIELDS}/field_{kind}_t{t}_{n}.bin").reshape(-1, 7)
+    at = (np.arange(m) + 0.5) / m
+    x, y = np.meshgrid(at, at, indexing="ij")
+    return rows[cKDTree(rows[:, :2] % 1.0, boxsize=1.0).query(np.c_[x.ravel(), y.ravel()])[1], 5].reshape(m, m)
+
+
+def fig_kh_density():
+    """Density maps at two times, one colour scale; a zoom on a roll-up; the difference from LUNA at the finest N."""
+    n, fine = 1024, 2048
+    window = KH_WINDOW
+    fig, axes = plt.subplots(3, 4, figsize=(WIDTH, WIDTH * 0.76), gridspec_kw=dict(wspace=0.05, hspace=0.07))
+    names = (("luna", "LUNA MC"), ("static", "static"), ("moving", "moving"))
+    limit = 0.0
+    panels = "abcdefghijkl"
+    for r, t in enumerate(("1.0", "1.5")):
+        ref = kh_field("luna", t, fine, fine)
+        for c, (kind, name) in enumerate(names):
+            ax = axes[r, c]
+            rho = kh_field(kind, t, n, 2 * n if kind != "luna" else n)
+            image = ax.imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="viridis", vmin=1, vmax=2, interpolation="nearest")
+            corner(ax, f"({panels[4 * r + c]}) {name}, $t = {t}$", y=0.97)
+            if r == 1:
+                axes[2, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="viridis", vmin=1, vmax=2, interpolation="nearest")
+                axes[2, c].set_xlim(*window[0])
+                axes[2, c].set_ylim(*window[1])
+                corner(axes[2, c], f"({panels[8 + c]}) {name}", y=0.97)
+                mark(ax, window[0], window[1], "")
+                to_fig = fig.transFigure.inverted()
+                for x, side in ((window[0][0], 0), (window[0][1], 1)):
+                    fig.add_artist(ConnectionPatch(xyA=(x, window[1][0]), coordsA=ax.transData, xyB=(side, 1), coordsB=axes[2, c].transAxes,
+                                                   color=EDGE, lw=0.6, clip_on=False, zorder=10))
+                    CONNECTORS.append((to_fig.transform(ax.transData.transform((x, window[1][0]))),
+                                       to_fig.transform(axes[2, c].transAxes.transform((side, 1)))))
+        moving = kh_field("moving", t, n, fine)
+        difference = moving - ref
+        limit = max(limit, float(np.percentile(np.abs(difference), 99.9)))
+        DIFF[t] = difference
+    for r, t in enumerate(("1.0", "1.5")):
+        ax = axes[r, 3]
+        delta = ax.imshow(DIFF[t].T, origin="lower", extent=(0, 1, 0, 1), cmap="RdBu_r", vmin=-limit, vmax=limit, interpolation="nearest")
+        corner(ax, f"({panels[4 * r + 3]}) moving $-$ LUNA {fine}", y=0.97)
+    bottom = axes[2, 3]
+    static = kh_field("static", "1.5", n, fine) - kh_field("luna", "1.5", fine, fine)
+    bottom.imshow(static.T, origin="lower", extent=(0, 1, 0, 1), cmap="RdBu_r", vmin=-limit, vmax=limit, interpolation="nearest")
+    corner(bottom, f"(l) static $-$ LUNA {fine}", y=0.97)
+    for ax in axes.flat:
+        ax.grid(False)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.minorticks_off()
+    fig.colorbar(image, ax=axes[:, :3].ravel().tolist(), location="bottom", fraction=0.03, pad=0.02, aspect=50, label=r"$\rho$")
+    fig.colorbar(delta, ax=axes[:, 3].ravel().tolist(), location="bottom", fraction=0.03, pad=0.02, aspect=16, label=r"$\Delta\rho$")
+    save(fig, "kh_2d_density")
 
 
 def fig_sedov():
@@ -623,7 +688,7 @@ def fig_throughput():
 
 
 FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_woodward_colella, "convergence_1d": fig_convergence,
-           "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput}
+           "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput}
 
 
 def main():
