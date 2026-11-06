@@ -304,7 +304,6 @@ def fig_sod():
 
 def fig_shu_osher():
     n, p = 1024, "shu-osher"
-    x, r, *_ = ours("moving-a04", p, n)
     xs, rs, *_ = ours("static", p, n)
     xl, rl, *_ = luna(p, n)
     w = np.load(f"{WIDE_CPU}/aro_shu-osher-wide_{2 * n}.npy")
@@ -312,35 +311,26 @@ def fig_shu_osher():
     lr = reference_file("luna/shu_osher/shu_osher_mc.npz")["rho"]
     ar = reference_file("athenak/shu_osher/so_ppmx_rk4_16384.npz")["ref_rho"]
     refs = [(centres(-5, 5, lr.size), lr, REF), (centres(-5, 5, ar.size), ar, AK)]
-    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 2.6))
-    outer = fig.add_gridspec(2, 1, height_ratios=[2.5, 1.1], hspace=0.11)
-    top = outer[0].subgridspec(2, 1, hspace=0)
-    a = fig.add_subplot(top[0])
-    b = fig.add_subplot(top[1], sharex=a)
-    for ax in (a, b):
-        for rx, ry, kw in refs:
-            ax.plot(rx, ry, **kw)
-        ax.set_xlim(-5, 5)
-        ax.set_ylim(0.4, 5.9)
-        ax.set_ylabel(r"$\rho$")
-    line(a, xl, rl, "luna")
-    line(a, xs, rs, "static")
-    line(a, x, r, "moving")
-    line(b, xl, rl, "luna")
-    line(b, xw, rw, "padded")
-    a.tick_params(labelbottom=False)
-    corner(a, "LUNA's domain", 0.02)
-    corner(b, "padded domain", 0.02)
-    a.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"), key("padded", "moving, padded"),
-                      rkey("LUNA, high resolution", REF), rkey("AthenaK PPMX", AK)], **LEGEND)
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.8))
+    outer = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.16)
+    ax = fig.add_subplot(outer[0])
+    for rx, ry, kw in refs:
+        ax.plot(rx, ry, **kw)
+    line(ax, xl, rl, "luna")
+    line(ax, xs, rs, "static")
+    line(ax, xw, rw, "padded")
+    ax.set_xlim(-5, 5)
+    ax.set_ylim(0.4, 5.9)
+    ax.set_ylabel(r"$\rho$")
+    ax.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("padded", "moving, domain [-15, 5]"),
+                       rkey("LUNA, high resolution", REF), rkey("AthenaK PPMX", AK)], **LEGEND)
     z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
-    runs = [(xl, rl, "luna"), (xs, rs, "static"), (x, r, "moving"), (xw, rw, "padded")]
-    views = (((-3.2, 0.2), [-3, -2, -1, 0], "a", "left-going waves"), ((0.6, 1.4), [0.8, 1.0, 1.2], "b", "wave train"),
+    runs = [(xl, rl, "luna"), (xs, rs, "static"), (xw, rw, "padded")]
+    views = (((-3.2, 0.2), [-3, -2, -1, 0], "a", "left-going waves"), ((0.6, 1.25), [0.7, 0.9, 1.1], "b", "wave train"),
              ((1.76, 1.92), [1.8, 1.85, 1.9], "c", "post-shock peak"), ((2.33, 2.45), [2.36, 2.40, 2.44], "d", "main shock"))
-    for ax, (xlim, ticks, letter, label) in zip(z, views):
-        zoom(b, ax, xlim, ticks, runs, refs, letter, label)
-        mark(a, xlim, ax.get_ylim(), letter)
-        ax.set_xlabel(r"$x$")
+    for a, (xlim, ticks, letter, label) in zip(z, views):
+        zoom(ax, a, xlim, ticks, runs, refs, letter, label)
+        a.set_xlabel(r"$x$")
     z[0].set_ylabel(r"$\rho$")
     save(fig, "shu_osher")
 
@@ -393,6 +383,8 @@ def fig_convergence():
             ax = axes[i, j]
             log_axes(ax)
             for s, k in (("static", "static"), ("luna", "luna"), ("moving", "moving-a04")):
+                if (s, p) == ("moving", "shu-osher"):  # issue #3: on the padded domain until inflow adds cells
+                    continue
                 r = rows[k, p]
                 loglog(ax, [x["N"] for x in r], [x["L1"][var] for x in r], s)
             if p == "shu-osher":
@@ -406,7 +398,7 @@ def fig_convergence():
             ax.set_xlim(150, 5e5)
         corner(axes[0, j], title, 0.05, 0.05, va="bottom")
     axes[0, 0].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], **LEGEND)
-    axes[1, 1].legend(handles=[key("padded", "padded, LUNA rule", True), key("padded3", "padded, default rule", True)], fontsize=LABEL, loc="upper right", bbox_to_anchor=(1, 0.87))
+    axes[0, 1].legend(handles=[key("padded", "moving, [-15, 5], LUNA rule", True), key("padded3", "moving, [-15, 5], default rule", True)], **LEGEND)
     save(fig, "convergence_1d")
 
 
@@ -420,6 +412,8 @@ def fig_time():
             for eps in cmp1d.TARGETS[p][cmp1d.VARS[var]]:
                 ax.axhline(eps, color="0.6", lw=0.8, ls=":", zorder=1)
             for s, k in (("static", "static"), ("luna", "luna"), ("moving", "moving-a04")):
+                if (s, p) == ("moving", "shu-osher"):  # issue #3: on the padded domain until inflow adds cells
+                    continue
                 r = rows[k, p]
                 loglog(ax, [x["wall_s"] for x in r], [x["L1"][var] for x in r], s)
             if j == 0:
