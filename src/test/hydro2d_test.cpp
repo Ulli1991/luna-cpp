@@ -1,19 +1,6 @@
-// The finite-volume hydro on the 2D Voronoi mesh (hydro::FiniteVolume<2>):
-//   - a uniform state, at rest or with a bulk velocity, stays uniform on static
-//     and moving, lattice and jittered meshes;
-//   - mass, momentum and energy are conserved to rounding; two runs give the
-//     same bits; the per-cell and per-face loops agree to rounding;
-//   - a static lattice with zero-length faces (ties) gives no NaN;
-//   - sound wave: second order on static lattice and jittered meshes and the
-//     moving lattice; on the moving jittered mesh, which relaxes by the
-//     regularisation, second order with two passes (the default), about first
-//     order with one pass (order 1.2);
-//   - Sod along an axis against the exact solution (exact_riemann.hpp, the tube
-//     mirrored in a periodic box);
-//   - Noh's implosion against the exact solution;
-//   - a blast carried by a bulk velocity equals the blast at rest cell by cell
-//     on the moving mesh.
-// Moving meshes run with both integrators, Sod and Noh (the long runs) with the default.
+// The finite-volume hydro on the 2D Voronoi mesh: uniform states stay uniform, conservation, same bits, no NaN on ties, order of accuracy
+// of a sound wave, Sod along an axis, Noh's implosion, a blast with a bulk velocity equals the blast at rest. Moving meshes run with
+// both integrators, Sod and Noh (the long runs) with the default.
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -167,9 +154,7 @@ void uniform(Check& check) {
                     worst = std::max(worst, std::abs(q(i, 2) / q(i, 0) + 0.5 * bulk));
                 }
                 const std::string name = label(motion, integrator) + " jitter " + std::to_string(jitter) + " bulk " + std::to_string(bulk);
-                // Moving: the grid step shows in the volumes (1 step / h ~ 3e-8 here). jitter 0.4: the regularisation
-                // moves cells apart, and the update on the mesh of the start of the step keeps a uniform
-                // state only to first order in time (notes: two passes do better).
+                // Moving: the grid step shows in the volumes (~3e-8). jitter 0.4: the update on the start-of-step mesh keeps a uniform state only to first order.
                 const bool moving = motion == hydro::Motion::moving;
                 const double bound = !moving ? 1e-11 : jitter > 0.3 ? 1e-3 : 1e-7;
                 check.expect(worst < bound, name + ": uniform state stays, worst " + sci(worst));
@@ -213,10 +198,7 @@ void conservation(Check& check) {
         }
 }
 
-// The L1 error of rho of a sound wave along x after one period: cells start
-// from the exact averages over their polygons and are compared with the exact
-// averages over the polygons they end on (a state belongs to its cell; a point
-// value would add a term of the order being measured).
+// The L1 error of rho of a sound wave along x after one period: exact polygon averages at start and end (a point value would add a term of the order measured).
 double wave_error(int n, double jitter, hydro::Motion motion, hydro::Integrator integrator) {
     const hydro::Gas gas{5.0 / 3.0};
     const Box box(1.0);
@@ -293,11 +275,9 @@ void sod(Check& check) {
     }
 }
 
-// (The bound on the L1 outside is 1.1 times the moving mesh's measured 0.31, 11 % of rho there;
-// static 0.16, 5.5 %: a regression bound, not a claim of accuracy.)
-// Noh's implosion in 2D, gamma 5/3: at time t the shock stands at r = t / 3, rho = 16
-// inside, 1 + t / r outside (Noh 1987). The periodic box is large enough for its seam
-// and the gas leaving the seam (rarefied from r > 1 - t) to stay out of r < 0.38.
+// (The L1 bound outside is 1.1 times the moving mesh's measured 0.31, static 0.16: a regression bound, not a claim of accuracy.)
+// Noh's implosion in 2D, gamma 5/3: the shock at r = t / 3, rho = 16 inside, 1 + t / r outside (Noh 1987); the box is large enough
+// for its seam and the gas leaving it to stay out of r < 0.38.
 [[maybe_unused]] void noh(Check& check) {
     const hydro::Gas gas{5.0 / 3.0};
     const Box box(2.0);

@@ -1,10 +1,6 @@
-// CTest `hydro_wave`: accuracy of the moving 3D step on smooth flow with a known end state, both integrators.
-//
-// L1 of rho, v and P of the cells against the exact state at their centroids, V weighted, on jittered lattices: the
-// vortex is steady (0.1 spacings, t = 2); the sound wave has returned after one period (0.25 spacings). The bounds are
-// values measured with this code (the same to 3 digits on the CPU and the A100), 10 % above them; the rates sit just
-// below the measured ones, never a nominal 2. Two passes: rho at rate 2.2 and 1.7, one pass 1.1 and 0. These run the
-// default, grad32; the last gates hold grad32 against double on the same problems, moving and static.
+// CTest `hydro_wave`: L1 accuracy of the moving 3D step on smooth flow with a known end state (vortex, sound wave), both integrators.
+// Bounds are measured values (same to 3 digits on CPU and A100) plus 10 %; the rates sit just below measured, never a nominal 2.
+// Two passes: rho at rate 2.2 and 1.7, one pass 1.1 and 0. These run the default, grad32; the last gates hold it to double.
 
 #include "check.hpp"
 #include "finite_volume.hpp"
