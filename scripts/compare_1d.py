@@ -3,21 +3,7 @@
     python compare_1d.py <runs dir> <out dir> [reference dir]
     python compare_1d.py ref <problem> <fine luna .npz> <reference dir>     # make ref_<problem>.npz, check it
 
-Run with LUNA's environment. The norm is the one of research_notes/stage1_1d_2026-11-04.md: the integral of
-|f_h - f_ref| dx / L of the code's reconstructed field, for rho, v and P:
-
-- f_h is what the code reconstructs at t_end: ours, W_i + g_i (x - c_i) on [x_{i-1/2}, x_{i+1/2}] with the least-squares
-  slope and AREPO's face limiter (finite_volume_1d.hpp, redone here on the output); LUNA's, W_i + s_i (x - x_i)
-  with its MC slope (slopes.py:22-24; moncen). Both with the ghosts of their boundaries. "mean" is the piecewise
-  constant field of the same run, the second line.
-- f_ref: Sod, the exact solution (luna.hydro.exact_riemann.sample, the integral split at its waves); Shu-Osher and
-  Woodward-Colella, the finest run of <reference dir> (ref_<problem>.npz, keys edges, rho, u, p: piecewise constant on
-  its cells, the reference is ~8x finer than anything compared to it).
-- The integral is by Gauss-Legendre on the union of the cell edges of both fields (and the waves), so nothing is
-  sampled at generators or at a common grid.
-
-T(eps) is the GPU-seconds to the target error, log-log interpolated between two of a code's own runs bracketing eps
-(no extrapolation; "-" if the runs do not bracket it). W(eps) the same for cell updates.
+Run with LUNA's environment. Norm and T(eps), W(eps): research_notes/stage1_1d_2026-11-04.md.
 """
 import glob
 import json

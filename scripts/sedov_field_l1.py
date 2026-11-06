@@ -2,8 +2,7 @@
 
     python scripts/sedov_field_l1.py <run dir> [lattice points per R_s, default 200]
 
-The piecewise-constant field of the Voronoi cells (nearest generator), never sampled at generators, on a fixed lattice of
-the ball r < 1.5 R_s around the blast: mean |f_h - f| of rho / rho0, v_r / max v_r, P / max P. Needs LUNA on PYTHONPATH.
+Needs LUNA on PYTHONPATH.
 """
 import glob
 import sys

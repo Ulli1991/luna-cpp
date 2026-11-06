@@ -2,17 +2,8 @@
 
     python scripts/make_figures.py [names ...]     # default: all; names as in FIGURES below
 
-Run with LUNA's environment: LUNA's src on PYTHONPATH (exact Riemann and Sedov-Taylor solutions), numpy, matplotlib, h5py, Pillow.
-Data paths, each an environment variable, none of them in this repository:
-
-    VORONOI_RUNS               voronoi-cpp checkout with the build-* run directories
-    KH_TABLE, KH_FIELDS        the KH table and the density fields, default under VORONOI_RUNS
-    LUNA_REFERENCE_SOLUTIONS   luna-reference-solutions at 99a52d0 (sha256 checked against its MANIFEST.json)
-    LUNA_SEDOV_RUNS            snapshots of the 256^3 Sedov runs; profiles and column densities are cached there
-    LUNA_CPP_FIGURES           output directory, default docs/figures next to this script's parent
-
-Every figure is checked before it is written: a legend or panel label on plotted data, or a legend on a zoom box, stops the
-script with a non-zero exit after all figures have been tried.
+Run with LUNA's environment. Data paths are environment variables: VORONOI_RUNS, KH_TABLE, KH_FIELDS, LUNA_REFERENCE_SOLUTIONS,
+LUNA_SEDOV_RUNS, LUNA_CPP_FIGURES (output, default docs/figures).
 """
 import glob
 import hashlib

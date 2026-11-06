@@ -12,8 +12,7 @@ namespace hydro::problems_1d {
 
 constexpr double gamma_gas = 1.4;
 
-// One of LUNA's problems: the line, its walls, t_end, and the exact average
-// of the conserved initial state over [a, b] (in the problem's coordinates).
+// One of LUNA's problems: the line, walls, t_end, and the exact average of the initial state over [a, b].
 struct Problem {
     double L, origin, t_end;
     Walls walls;
@@ -24,15 +23,13 @@ struct Problem {
 inline State<1> conserved(double rho, double u, double p) { return {rho, rho * u, p / (gamma_gas - 1) + 0.5 * rho * u * u}; }
 inline double fraction_below(double x, double a, double b) { return std::clamp((x - a) / (b - a), 0.0, 1.0); }
 
-// Sod: exact cell averages of the jump at t -> 0 (LUNA:
-// er.cell_average(..., t=1e-12)); at t = 0 that is the volume fraction.
+// Sod: exact cell averages of the jump at t -> 0 (LUNA: er.cell_average(..., t=1e-12)); at t = 0 the volume fraction.
 inline State<1> sod(double a, double b) {
     const double f = fraction_below(0.5, a, b);
     const State<1> l = conserved(1.0, 0.0, 1.0), r = conserved(0.125, 0.0, 0.1);
     return {f * l[0] + (1 - f) * r[0], f * l[1] + (1 - f) * r[1], f * l[2] + (1 - f) * r[2]};
 }
-// A shock at x0 into 1 + amp sin(k x), LUNA's exact cell averages on [a, b]
-// (shu_osher.py:26-46).
+// A shock at x0 into 1 + amp sin(k x), LUNA's exact cell averages on [a, b] (shu_osher.py:26-46).
 inline State<1> shock_into_wave(double a, double b, double rhoL, double uL, double pL, double x0, double amp, double k) {
     const double h = b - a, f = fraction_below(x0, a, b), lo = std::max(a, x0);
     double rho = f * rhoL + (1 - f);

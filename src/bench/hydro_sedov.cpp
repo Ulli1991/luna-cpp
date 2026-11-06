@@ -80,8 +80,7 @@ std::string flag(int argc, char** argv, const std::string& name, const std::stri
     return fallback;
 }
 
-// The points in Morton order (21 bits per coordinate): particle ids follow
-// space, so neighbouring cells sit close in memory.
+// The points in Morton order (21 bits per coordinate), so neighbouring cells sit close in memory.
 Points morton_order(Points points, const Box& box) {
     auto spread = [](std::uint64_t v) {  // the 21 bits of v to every third bit
         v &= 0x1fffff;
@@ -181,7 +180,7 @@ struct Options {
 template <class P, class R>
 void run(const Options& o, Points points) {
     using FV = hydro::FiniteVolume<3, Exec, R, P>;
-    using Mesh = typename FV::Mesh;  // with the float face rows and gradient weights P asks for
+    using Mesh = typename FV::Mesh;
     // CourantFac of AREPO next generation's Sedov examples.
     const double courant = 0.3;
     const Sedov sedov;
@@ -190,7 +189,6 @@ void run(const Options& o, Points points) {
     const hydro::Gas gas{sedov.gamma};
     const Exec exec;
 
-    // Mesh.
     Kokkos::Timer timer;
     Mesh mesh(exec, box);
     {
@@ -204,7 +202,6 @@ void run(const Options& o, Points points) {
               << " faces_per_cell=" << double(mesh.faces()) / n << " build_s=" << timer.seconds() << "\n";
     DeviceMemory::phase("mesh", n);
 
-    // Initial state on the host: the deposit cells by distance to the centre.
     const auto positions = to_host(mesh.positions());
     const auto volume = to_host(mesh.volume());
     // LUNA's 8 central cells: 8 mean cell volumes.
@@ -232,7 +229,7 @@ void run(const Options& o, Points points) {
         deposited = next;
         ++deposit;
     }
-    if (!o.blast) deposit = 0;  // a uniform (free) stream
+    if (!o.blast) deposit = 0;
     const double p_inject = (gas.gamma - 1.0) * sedov.energy() / deposited;
     std::cout << "sedov: rho=" << sedov.rho() << " P=" << sedov.pressure() << " E=" << sedov.energy() << " t_end=" << sedov.t_end()
               << " deposit_cells=" << deposit << " deposit_volume=" << deposited << " luna_volume=" << target
@@ -256,8 +253,8 @@ void run(const Options& o, Points points) {
     snap.order = o.order;
     snap.gas = gas;
     snap.units = sedov.units;
-    // The radius of the disturbed region: the farthest cell from the blast centre (moving with the bulk velocity) whose rho or P
-    // differs from the background by more than 1e-6; a uniform stream: the largest relative deviation of rho, P, v.
+    // The radius of the disturbed region: the farthest cell from the blast centre whose rho or P differs from the background by > 1e-6;
+    // a uniform stream: the largest relative deviation of rho, P, v.
     auto write = [&](int index, double t) {
         const auto Q = to_host(fv.state());
         const auto x = to_host(mesh.positions());
@@ -365,7 +362,7 @@ void run(const Options& o, Points points) {
     }
     exec.fence();
     const double wall_s = wall.seconds();
-    if (t < sedov.t_end()) write(next, t);  // stopped by --steps: the last state
+    if (t < sedov.t_end()) write(next, t);
     DeviceMemory::phase("steps", n);
     const Totals after = totals(fv);
     const double hydro_ms = median(prim_ms) + median(sweep_ms) + median(flux_ms) + median(update_ms);
@@ -401,7 +398,7 @@ void run(const Options& o, Points points) {
 }
 
 // The precision policies of --precision, as <name>: geometry / gradient weights / gradients / face fluxes / Riemann.
-// default: the hydro's default, grad32 in 3D; double: double throughout, what logs of older runs call `default`.
+// default: the hydro's default; double: double throughout, what older logs call `default`.
 template <class R>
 void run_precision(const Options& o, const Points& points) {
     using hydro::Half;

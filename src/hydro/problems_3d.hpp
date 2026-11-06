@@ -9,8 +9,7 @@
 #include <string>
 #include <vector>
 
-// 3D problems with an exact solution, gamma 1.4, shared by hydro_wave3d and the test `hydro_wave`: sound, simple, vortex, tube.
-// Boxes, cell counts and end times of each: docs/design.md.
+// 3D problems with an exact solution, gamma 1.4: sound, simple, vortex, tube; boxes and end times: docs/design.md.
 namespace hydro {
 
 constexpr double wave_gamma = 1.4;

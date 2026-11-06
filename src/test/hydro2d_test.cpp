@@ -1,6 +1,5 @@
-// The finite-volume hydro on the 2D Voronoi mesh: uniform states stay uniform, conservation, same bits, no NaN on ties, order of accuracy
-// of a sound wave, Sod along an axis, Noh's implosion, a blast with a bulk velocity equals the blast at rest. Moving meshes run with
-// both integrators, Sod and Noh (the long runs) with the default.
+// The finite-volume hydro on the 2D Voronoi mesh: uniform states, conservation, same bits, no NaN on ties, sound-wave order,
+// Sod along an axis, Noh, a blast with a bulk velocity equals the blast at rest; moving meshes run both integrators.
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -62,8 +61,7 @@ void fill(Fv& fv, const Mesh& mesh, const hydro::Gas& gas, const std::function<S
     Kokkos::deep_copy(fv.state(), q);
 }
 
-// The average of f(x, y) over each cell, the actual polygon: the triangles from the
-// generator to each face, midpoint rule on their edges (exact for quadratics).
+// The average of f(x, y) over each cell's actual polygon: triangles from the generator to each face, midpoint rule (exact for quadratics).
 std::vector<double> cell_averages(const Mesh& mesh, const std::function<double(double, double)>& f) {
     const auto start = host(mesh.cell_face_start()), list = host(mesh.cell_face());
     const auto owner = host(mesh.owner()), neighbour = host(mesh.neighbour());
@@ -253,7 +251,7 @@ void sod(Check& check) {
         mesh.update(lattice(256, 16, box, 0));
         mesh.update_cells();
         Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion, integrator);
-        fill(fv, mesh, gas, [&](double x, double) {  // left state in [0.5, 1.5)
+        fill(fv, mesh, gas, [&](double x, double) {
             const bool left = x >= 0.5 && x < 1.5;
             return left ? State{L.rho, 0.0, 0.0, L.p} : State{R.rho, 0.0, 0.0, R.p};
         });
@@ -266,7 +264,7 @@ void sod(Check& check) {
         double error = 0, mass = 0;
         for (int i = 0; i < mesh.particles(); ++i) {
             const double x = positions(i, 0) + centroid(i, 0), V = volume(i);
-            if (x < 1.0 || x >= 2.0) continue;  // one of the two tubes: left | right at 1.5
+            if (x < 1.0 || x >= 2.0) continue;
             error += std::abs(q(i, 0) / V - exact.sample((x - 1.5) / t).rho) * V;
             mass += V;
         }
@@ -275,9 +273,8 @@ void sod(Check& check) {
     }
 }
 
-// (The L1 bound outside is 1.1 times the moving mesh's measured 0.31, static 0.16: a regression bound, not a claim of accuracy.)
-// Noh's implosion in 2D, gamma 5/3: the shock at r = t / 3, rho = 16 inside, 1 + t / r outside (Noh 1987); the box is large enough
-// for its seam and the gas leaving it to stay out of r < 0.38.
+// Noh's implosion in 2D, gamma 5/3: shock at r = t / 3, rho = 16 inside, 1 + t / r outside (Noh 1987); the box keeps the seam out of r < 0.38.
+// The L1 bound is 1.1 times the moving mesh's measured 0.31, static 0.16: a regression bound, not a claim of accuracy.
 [[maybe_unused]] void noh(Check& check) {
     const hydro::Gas gas{5.0 / 3.0};
     const Box box(2.0);

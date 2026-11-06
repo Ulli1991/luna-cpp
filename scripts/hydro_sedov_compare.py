@@ -2,18 +2,7 @@
 
     python scripts/hydro_sedov_compare.py [--bulk=<km/s>] <out.png> <label>=<run dir> [<label>=<run dir> ...]
 
-A run dir holds snapdir_NNN/ (one .hdf5 each: ours, or a one-GPU LUNA run).
-Needs numpy, h5py, matplotlib and LUNA (luna.hydro.exact_sedov for the analytic
-solution): run with LUNA's environment. Per run and snapshot it prints the
-shock radius (peak of the radial density profile, as LUNA's
-scripts/validation/plots/sedov3d_plot.py:shock_radius_from_snap, with its
-binning: N/2 bins from 0 to the farthest cell), the analytic radius, the
-largest cell density, the radius beyond which every cell is within 1e-6 of the
-background, and at the last snapshot the volume-weighted L1 errors of density,
-radial velocity and pressure against the analytic solution over r < 1.5 R_s
-(not a LUNA metric: LUNA's l1_error is a per-cell mean on its grid), the same
-for density over r < R_s / 2 and the smallest cell density. Plots the
-final radial profiles and R_s(t).
+A run dir holds snapdir_NNN/. Needs numpy, h5py, matplotlib and LUNA (luna.hydro.exact_sedov): run with LUNA's environment.
 """
 import glob
 import os

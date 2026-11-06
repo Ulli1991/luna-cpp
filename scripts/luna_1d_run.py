@@ -4,24 +4,8 @@ Run with LUNA's environment, LUNA's src on the path, outside LUNA's tree:
     python luna_1d_run.py <sod|shu-osher|titarev-toro|woodward-colella> <N> <hllc|hll> <out.npz> [LIMITER=1] [CFL=0.8] [steps=0]
         [kernel=auto] [repeats=2] [series=luna] [max_s=0] [resume=<state.npz>]
 
-Setups as LUNA's tests: Sod = Toro test 1 from the exact cell averages
-(tests/test_hydro_accuracy_shocktube.py:96-99, exact_riemann.py:9, 105-113),
-BOUNDARY 1, t = 0.25; Shu-Osher = initial_conditions (shu_osher.py:26-46,
-exact cell averages), Lx = 10, BOUNDARY 1, t = 1.8 (test_hydro_hard_shu_osher.py:29, 62);
-Woodward-Colella = initial_conditions (woodward_colella.py:14-27), BOUNDARY 2,
-t = 0.038 (test_hydro_hard_woodward_colella.py:28, 63). gamma 1.4, ORDER 1,
-FP64, CFL 0.8 (template_config.py:32), the last step shortened to t_end
-(as tests/_helpers.py:186). steps > 0: stop after that many steps (throughput).
-
-The loop is one jitted lax.while_loop around LUNA's compute_dt and step
-(create_solver_distributed, setup/hydro.py:140-202, as tests/_helpers.py
-evolve): compiled ahead, then timed `repeats` times from the same initial
-state; the fastest counts, each is printed. kernel: LUNA's hydro_kernel
-(auto: Pallas on a GPU, setup/hydro.py hydro_kernel_name). Peak memory:
-peak_bytes_in_use of the device. Writes rho, u, p (cell order), steps, wall_s,
-and <out>.json for scripts/compare_1d.py. max_s > 0: stop after about that long
-(in chunks of steps) and write the state, for a very long reference run;
-resume continues one.
+steps > 0: stop after that many steps; max_s > 0: stop after about that long and write the state, resume=<state.npz> continues.
+Writes rho, u, p, steps, wall_s and <out>.json for scripts/compare_1d.py.
 """
 import json
 import os

@@ -2,13 +2,7 @@
 
     python compare_kh.py <runs dir> <log file> [...] [--eps=0.01,0.001] [--series=static,moving,...]
 
-Reference: the Pencil Code 4096^2 M(t) of McNally, Lyra & Passy 2012, fig. 4 (digitised to the PDF's path coordinates,
-luna-reference-solutions/pencil/mcnally_kh/mcnally2012_fig4_Mref.txt; GCI <= 1.9e-6 relative), and as a check LUNA's
-own MC 4096^2 run from the same repository (luna/mcnally_kh/mcnally2012_luna_mc_ref.npz). Error e(t) = M / M_ref - 1,
-quoted as max over t <= 1.5 and the time mean of |e|, as tests/test_hydro_hard_mcnally_kh.py:m_errors.
-
-Times come from the lines the runs printed: `luna: N=.. wall_s=..` and `ours: N=.. wall_s=..` in the given logs, the
-last line per series and N. T(eps): log-log interpolation between the two runs bracketing eps in the same series.
+Reference: the Pencil Code 4096^2 M(t) of McNally, Lyra & Passy 2012, fig. 4; times from the `luna:` and `ours:` lines of the logs.
 """
 import glob
 import math

@@ -1,4 +1,4 @@
-// LUNA's 1D tests (Sod, Shu-Osher, Titarev-Toro, Woodward-Colella) on the 1D Voronoi mesh (hydro::FiniteVolume<1>), timed.
+// LUNA's 1D tests on the 1D Voronoi mesh (hydro::FiniteVolume<1>), timed.
 // Usage: hydro_1d <sod|shu-osher|titarev-toro|woodward-colella> <N> [flags]; the flags and set-ups are in docs/design.md.
 
 #include "finite_volume_1d.hpp"

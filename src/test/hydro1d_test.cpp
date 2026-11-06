@@ -1,5 +1,5 @@
-// The 1D hydro on the 1D mesh: uniform states stay uniform, conservation, the same bits twice, inflow, Sod against the exact averages
-// within LUNA's bounds, LUNA's own final states at N = 16, and Shu-Osher on a moving mesh (regularised points never cross); cells from a wall: details in docs/design.md.
+// The 1D hydro on the 1D mesh: uniform states, conservation, same bits twice, inflow, Sod against exact averages within LUNA's bounds,
+// LUNA's final states at N = 16, Shu-Osher on a moving mesh; cells from a wall: docs/design.md.
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -23,7 +23,7 @@ using Mesh = voronoi::Mesh<1, Exec>;
 using State = hydro::State<1>;
 template <class Riemann = hydro::HLLC>
 using FV = hydro::FiniteVolume<1, Exec, Riemann>;
-using Primitives = std::function<State(double)>;  // W(x)
+using Primitives = std::function<State(double)>;
 
 std::vector<double> points(int n, double L, double jitter, unsigned seed) {
     std::mt19937_64 rng(seed);
@@ -232,7 +232,7 @@ int main(int argc, char* argv[]) {
                 Mesh mesh(exec, 1.0, voronoi::Ends::walls);
                 build(mesh, points(n, 1.0, jitter, 6));
                 FV<> fv(exec, mesh, gas, 1, hydro::Limiter::face_centroid, motion, hydro::Walls{});
-                set(fv, mesh, [&](double a, double b) {  // exact averages of the initial jump
+                set(fv, mesh, [&](double a, double b) {
                     const exact_riemann::Primitive w = sod.average(a, b, 0.5, 1e-12);
                     const State U = hydro::conserved(State{w.rho, w.u, w.p}, gas);
                     return State{U[0] * (b - a), U[1] * (b - a), U[2] * (b - a)};
@@ -334,8 +334,7 @@ int main(int argc, char* argv[]) {
                              ", energy " + sci(energy) + ", the same bits twice");
         }
 
-    // Shu-Osher on a moving mesh with no supply of cells: without the regularisation the end cell,
-    // grown by the inflow, runs into its neighbour; with it no points cross.
+    // Shu-Osher on a moving mesh without a cell supply: unregularised, the grown end cell runs into its neighbour; regularised, no points cross.
     {
         namespace pr = hydro::problems_1d;
         const pr::Problem problem = pr::problem("shu-osher");
@@ -361,7 +360,7 @@ int main(int argc, char* argv[]) {
     {
         Mesh mesh(exec, 1.0, voronoi::Ends::walls);
         std::vector<double> x;
-        for (int i = 0; i < 16; ++i) x.push_back(0.4 + 0.02 * i);  // both walls far from the end points
+        for (int i = 0; i < 16; ++i) x.push_back(0.4 + 0.02 * i);
         build(mesh, x);
         FV<> fv(exec, mesh, gas, 1, hydro::Limiter::face_centroid, Motion::moving, hydro::Walls{});
         fv.set_inflow_spacing(0.04);
@@ -376,17 +375,16 @@ int main(int argc, char* argv[]) {
         for (int v = 0; v < 3; ++v) moved = std::max(moved, static_cast<double>(std::abs(totals_after[v] - totals_before[v]) / std::abs(totals_before[v])));
         const std::size_t last_before = before.size() - 1, last_after = after.size() - 1;
         for (int v = 0; v < 3; ++v) {
-            state = std::max(state, std::abs(after[before.size() + 0].W[v] / before[0].W[v] - 1));   // the new cell at the left wall
-            state = std::max(state, std::abs(after[0].W[v] / before[0].W[v] - 1));                   // and the old one
-            state = std::max(state, std::abs(after[last_after].W[v] / before[last_before].W[v] - 1));  // at the right wall
+            state = std::max(state, std::abs(after[before.size() + 0].W[v] / before[0].W[v] - 1));
+            state = std::max(state, std::abs(after[0].W[v] / before[0].W[v] - 1));
+            state = std::max(state, std::abs(after[last_after].W[v] / before[last_before].W[v] - 1));
             state = std::max(state, std::abs(after[last_before].W[v] / before[last_before].W[v] - 1));
         }
         check.expect(added && fv.cells() == 18 && moved < 1e-15 && state < 1e-14,
                      "a split at each wall: " + std::to_string(fv.cells()) + " cells, totals move by " + sci(moved) + ", both cells keep the old state to " + sci(state));
     }
 
-    // Supersonic inflow from either wall into gas at rest: the cells come out
-    // as a lattice of the set spacing and the gas behind the shock stays itself.
+    // Supersonic inflow from either wall into gas at rest: cells come out as a lattice of the set spacing, the gas behind the shock stays itself.
     for (const bool from_left : {true, false}) {
         const int n = 128;
         Mesh mesh(exec, 1.0, voronoi::Ends::walls);
@@ -415,9 +413,7 @@ int main(int argc, char* argv[]) {
                          ", the state within " + sci(worst) + ", spacing within " + sci(uneven));
     }
 
-    // Shu-Osher, moving: conservation with the known budget through the walls
-    // (supersonic in, at rest out), the same bits twice, both step paths, and a
-    // run mirrored in x gives the mirrored result: the two walls do the same.
+    // Shu-Osher, moving: conservation with the known wall budget, same bits twice, both step paths, a mirrored run gives the mirrored result.
     {
         namespace pr = hydro::problems_1d;
         const pr::Problem problem = pr::problem("shu-osher");

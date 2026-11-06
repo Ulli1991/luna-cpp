@@ -2,15 +2,7 @@
 
     python norm3d.py <vortex|simple|tube> <file.npy> <nx> [subdivision] [--t=t] [--amp=a]
 
-A regular grid of `subdivision` points per lattice spacing is assigned to the nearest generator (the Voronoi cell, periodic).
-Columns, L1 of rho, |v - v_exact|, P, V or sample weighted:
-  gen     cell value against the exact value at the generator (the wrong place; first order on a moving mesh)
-  cen     against the exact value at the centroid (what l1_3d.py prints)
-  avg     against the exact average over the cell (LUNA's cell-average table): exact(centroid) + mean over the cell's samples of exact
-          minus exact at the samples' mean, so that the samples' error in the centroid cancels
-  field0  piecewise constant field against the exact field, sample mean (O(h) even for exact averages)
-  exact0  the same with the exact averages as the field: the floor of field0
-  field1  W_i + g_i (x - c_i), g_i unlimited least squares over the 12 nearest centroids
+Columns, L1 of rho, |v - v_exact|, P: gen, cen, avg, field0, exact0, field1 (cell value or field against the exact one).
 tube needs LUNA's exact Riemann solver on PYTHONPATH (luna.hydro.exact_riemann).
 """
 import sys

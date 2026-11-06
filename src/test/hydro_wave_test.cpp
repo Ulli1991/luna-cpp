@@ -1,6 +1,5 @@
-// CTest `hydro_wave`: L1 accuracy of the moving 3D step on smooth flow with a known end state (vortex, sound wave), both integrators.
-// Bounds are measured values (same to 3 digits on CPU and A100) plus 10 %; the rates sit just below measured, never a nominal 2.
-// Two passes: rho at rate 2.2 and 1.7, one pass 1.1 and 0. These run the default, grad32; the last gates hold it to double.
+// CTest `hydro_wave`: L1 accuracy of the moving 3D step on smooth flow with a known end state, both integrators.
+// Bounds are measured plus 10 %; rates sit just below measured: two passes rho 2.2 and 1.7, one pass 1.1 and 0.
 
 #include "check.hpp"
 #include "finite_volume.hpp"
@@ -100,8 +99,7 @@ void gate(Check& check, const std::string& problem, const Gate& g, int nx, doubl
     check.expect(rate > g.rate, head + " rate of rho " + std::to_string(rate) + " > " + std::to_string(g.rate));
 }
 
-// grad32 against double, same problem, mesh and steps: the relative change of each L1 against the exact state, and
-// the L1 of the two end states cell by cell (by id, V weighted), each below its bound.
+// grad32 against double, same problem, mesh and steps: relative change of each L1 vs exact, and L1 of the two end states, each below its bound.
 void against_double(Check& check, const std::string& problem, hydro::Motion motion, int nx, double amp, double jitter, double t_end, double l1_within, double cells_within) {
     const bool moving = motion == hydro::Motion::moving;
     const auto integrator = hydro::default_integrator(motion, 1);
@@ -141,8 +139,7 @@ int main(int argc, char** argv) {
     gate(check, "sound", {"two-pass", two, {2.7e-5, 2.7e-5, 2.7e-5}, {8.2e-6, 7.4e-6, 7.3e-6}, 1.6}, 24, 1e-3, 0.25, 1);
     constexpr auto moving = hydro::Motion::moving;
     constexpr auto fixed = hydro::Motion::static_mesh;
-    // nx = 24: the sanitizer run in CI pays for every step. Bounds 3 to 4 times the largest value measured on the CPU and
-    // the A100: rounding, which no two compilers share.
+    // nx = 24: the sanitizer run in CI pays for every step; bounds 3 to 4 times the largest value measured on CPU and A100.
     against_double(check, "vortex", moving, 24, 0, 0.1, 2, 6e-8, 1e-8);      // measured 1.8e-8, 2.8e-9
     against_double(check, "vortex", fixed, 24, 0, 0.1, 2, 1e-7, 6e-9);       // 2.8e-8, 1.9e-9
     against_double(check, "sound", moving, 24, 1e-3, 0.25, 1, 1e-4, 2e-8);   // 2.9e-5, 5e-9

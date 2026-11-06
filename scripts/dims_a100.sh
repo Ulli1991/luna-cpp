@@ -1,8 +1,6 @@
 #!/bin/bash
-# Throughput against resolution on Sedov in one dimension, one A100, one job: hydro static, hydro two passes where they exist, mesh only, whole moving step, LUNA at the same problem.
-#   sbatch --export=ALL,BIN=<build of branch roofline-dims>,OUT=<runs> -o <logs>/dims-%j.out scripts/dims_a100.sh <1|2|3>
-# 1D: hydro_1d sedov, one pass only (no two-pass integrator in 1D), N = 2^12 .. 2^24. 2D: hydro_kh2d --problem=sedov, N^2 = 256^2 .. 8192^2 or as far as it fits. 3D: hydro_sedov, 32^3 .. 256^3.
-# Jitter 0.1, HLLC, FP64, 40 steps. LUNA: scripts/luna_sedov_dims.py (1D, 2D), sedov3d_run (3D); MC, Pallas, 200 steps, three rounds.
+# Throughput against resolution on Sedov in 1D, 2D or 3D on one A100: hydro static and two-pass, mesh only, whole moving step, LUNA.
+#   sbatch --export=ALL,BIN=<build>,OUT=<runs> -o <logs>/dims-%j.out scripts/dims_a100.sh <1|2|3>
 #SBATCH -J dims
 #SBATCH -p gpudev,gpu1
 #SBATCH --gres=gpu:a100:1

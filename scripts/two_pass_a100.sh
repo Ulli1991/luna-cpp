@@ -1,15 +1,7 @@
 #!/bin/bash
-# One-pass against two-pass on one A100, each mode one job on one node. From the repository root:
+# One-pass against two-pass on one A100, each mode one job. BASE and NEW hold hydro_sedov (NEW also hydro_wave3d, ctest build):
 #   sbatch --export=ALL,BASE=<dir>,NEW=<dir>,OUT=<runs> -o <logs>/twopass-%j.out scripts/two_pass_a100.sh <mode> [args]
-# BASE and NEW hold hydro_sedov (and NEW hydro_wave3d, ctest build): the tree before two passes and this one.
-# Modes:
-#   bits           hashes of the paths of TESTING.md, BASE and NEW; two-pass moving, twice
-#   speed          one-pass, BASE and NEW interleaved, 128^3 static and moving, 256^3 moving, 40 steps, --memory; two-pass
-#   sedov <side ...>   moving Sedov to t_end, one-pass and two-pass, final snapshot in OUT
-#   mixed          the same at 256^3, --precision=mixed
-#   wave <problem> <nx ...>   hydro_wave3d, moving, jitter 0.1, both integrators; end states in OUT
-#   ctest          ctest of NEW
-# The clock goes into OUT/clock-<job>.csv, one line per 5 s.
+# The modes are the cases below; the clock goes into OUT/clock-<job>.csv.
 #SBATCH -J twopass
 #SBATCH -p gpudev,gpu1
 #SBATCH --gres=gpu:a100:1

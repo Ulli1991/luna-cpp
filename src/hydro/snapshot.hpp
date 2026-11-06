@@ -10,8 +10,7 @@
 #include <string>
 #include <vector>
 
-// HDF5 snapshots in LUNA's layout: <dir>/snapdir_NNN/snapshot_NNN.0.hdf5, group `cells` (LUNA's datasets plus mesh = "voronoi",
-// N_cells, x, y, z, volume) and group `units`.
+// HDF5 snapshots in LUNA's layout: <dir>/snapdir_NNN/snapshot_NNN.0.hdf5, groups `cells` and `units`.
 namespace hydro {
 
 struct Units {
@@ -19,8 +18,7 @@ struct Units {
     bool enabled() const { return !(length_cm == 1 && mass_g == 1 && velocity_cm_s == 1); }
 };
 
-// What a snapshot holds, on the host: per cell the generator x[3], the
-// volume and the conserved state U[5].
+// What a snapshot holds, on the host: per cell the generator x[3], the volume and the conserved state U[5].
 struct SnapshotData {
     int index = 0;
     double time = 0;

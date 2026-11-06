@@ -4,11 +4,7 @@ Run with LUNA's environment, LUNA's src on the path, outside LUNA's tree:
     python luna_kh_run.py <N> <out.npz> [LIMITER=1] [CFL=0.8] [ORDER=1] [solver=hllc] [kernel=auto] [bulk=0] [steps=0]
         [repeats=1] [t_end=1.5] [fixed_dt=0] [check=1] [full=0]
 
-Setup as tests/test_hydro_hard_mcnally_kh.py:97-100 (cfg_for, MC + HLLC, FP64, CFL 0.8, unit box, periodic),
-mode_amplitude as :52-61, the loop as tests/_helpers.py evolve: one jitted lax.while_loop per output, compiled ahead.
-The stepping is timed, the observations (a host copy of the state) are not. bulk adds a velocity along x to the
-initial state. steps > 0: stop after that many steps (throughput, no outputs). Writes t, M, K, rho and my at t_end
-averaged to min(N, 256)^2 (full=1: rho at N^2), steps, wall_s.
+bulk adds a velocity along x; steps > 0 stops after that many steps (throughput). Writes t, M, K, rho, my, steps, wall_s.
 """
 import sys
 import time

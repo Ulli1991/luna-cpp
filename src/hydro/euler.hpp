@@ -5,8 +5,8 @@
 #include <cstddef>
 #include <utility>
 
-// The Euler equations of an ideal gas in D = 1, 2, 3, per cell and per face: conversions, the MUSCL-Hancock half step, HLL and HLLC.
-// Primitives W = (rho, v_1 .. v_D, P), conserved U = (rho, rho v_1 .. rho v_D, E) per unit volume, as LUNA. Bit-identity notes: docs/design.md.
+// The Euler equations of an ideal gas in D = 1, 2, 3: conversions, MUSCL-Hancock half step, HLL and HLLC; bit-identity: docs/design.md.
+// Primitives W = (rho, v_1 .. v_D, P), conserved U = (rho, rho v_1 .. rho v_D, E) per unit volume, as LUNA.
 namespace hydro {
 
 template <int D, class T = double>
@@ -73,8 +73,7 @@ KOKKOS_INLINE_FUNCTION Vec<D, T> velocity(const Kokkos::Array<T, N>& W) {
     return make_vec<D, T>([&](int k) { return W[1 + k]; });
 }
 
-// Ideal gas with LUNA's RAMSES floors: density at least smallr, specific internal energy at least smallc^2 / (gamma (gamma - 1));
-// applied to primitives, never to the conserved state.
+// Ideal gas with LUNA's RAMSES floors (density >= smallr, internal energy >= smallc^2 / (gamma (gamma - 1))), on primitives only.
 struct Gas {
     double gamma = 5.0 / 3.0;
     double smallr = 1e-10, smallc = 1e-10;
@@ -92,7 +91,6 @@ KOKKOS_INLINE_FUNCTION State<D> primitive(const Kokkos::Array<double, N>& U, con
     return make_state<D>([&](int k) { return k == 0 ? rho : k == D + 1 ? (gas.gamma - 1.0) * e : v[k - 1]; });
 }
 
-// W -> U.
 template <std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION State<D> conserved(const Kokkos::Array<double, N>& W, const Gas& gas) {
     const double rho = W[0];
@@ -142,14 +140,13 @@ KOKKOS_INLINE_FUNCTION State<D> half_step(const Kokkos::Array<double, N>& W, con
     return half;
 }
 
-// Riemann solvers along the unit normal n of a face moving with velocity w (0 on a static mesh): the states' velocities are taken
-// relative to w, the problem is solved along n, and the lab-frame flux through the moving face is returned, per unit area, from L to R.
-// The vectors stay in box axes instead of LUNA's rotation to (normal, tangents); equivalent up to rounding (docs/design.md).
+// Riemann solvers along the unit normal n of a face moving with velocity w: states are taken relative to w, the lab-frame flux is per area, L to R.
+// Vectors stay in box axes, not LUNA's (normal, tangents) rotation; equal up to rounding (docs/design.md).
 namespace detail {
 
 template <int D, class T>
 struct Side {
-    Vec<D, T> v;        // velocity relative to the face
+    Vec<D, T> v;
     T vn, c, E;         // normal velocity, sound speed (0 if c^2 <= 0), energy
     StateT<D, T> F, U;  // flux along n and conserved state
 };

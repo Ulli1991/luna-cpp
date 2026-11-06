@@ -2,12 +2,7 @@
 
     python3 scripts/hydro_speed_table.py <log> [<log> ...]
 
-Per run label (the "== " line without the round), the mean over rounds of
-each phase in M cells/s (n / phase median); "sweep" includes the primitives
-pass (main: time step + point velocities + gradients); "hydro" = sweep +
-fluxes + update (per-cell loop: fluxes includes the update), also in G face
-updates/s (faces stored once / hydro time); the whole step in M cell
-updates/s; the peak device memory over the steps in bytes per cell.
+Per run label, the mean over rounds of each phase in M cells/s, the whole step in M cell updates/s, the peak memory in bytes per cell.
 """
 import re
 import sys

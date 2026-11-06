@@ -12,8 +12,7 @@
 #include <type_traits>
 #include <utility>
 
-// Finite volumes on a voronoi::Mesh<D> (D = 2, 3), static or moving: MUSCL-Hancock (order 1) or Godunov (order 0), HLLC or HLL,
-// one global time step; the state is the extensive Q = (mass, momentum, energy) per cell. Design: docs/design.md.
+// Finite volumes on a voronoi::Mesh<D> (D = 2, 3), static or moving; the state is the extensive Q per cell. Design: docs/design.md.
 namespace hydro {
 
 enum class Update { per_cell, per_face };
@@ -21,7 +20,6 @@ enum class Update { per_cell, per_face };
 // Where the gradient limiter keeps the extrapolated values within the neighbours' range: face centroids, cell centroids, or nowhere.
 enum class Limiter { face_centroid, cell_centroid, none };
 
-// A static mesh, or one whose points move with the flow.
 enum class Motion { static_mesh, moving };
 
 // One flux computation per step at the half step, or two on the meshes of both ends (moving, order 1; see step_two_pass()).
@@ -50,14 +48,14 @@ template <int D, class ExecSpace = Kokkos::DefaultExecutionSpace, class Riemann 
 class FiniteVolume {
 public:
     static_assert(D == 2 || D == 3, "hydro::FiniteVolume: D = 1 is finite_volume_1d.hpp");
-    static constexpr int V = D + 2;  // variables
+    static constexpr int V = D + 2;
     using P = Precision;
     using Memory = typename ExecSpace::memory_space;
     using Mesh = voronoi::Mesh<D, ExecSpace, typename P::geometry, typename P::weight>;
     using State = hydro::State<D>;
     using Vec = hydro::Vec<D>;
-    using G = typename P::gradient;            // gradient arithmetic
-    using GStore = typename P::gradient_store;  // gradient storage
+    using G = typename P::gradient;
+    using GStore = typename P::gradient_store;
     using FluxStore = typename P::flux;
     static constexpr int gradient_width = row_width<GStore>(V * D);
     using Cells = Kokkos::View<double* [V], Kokkos::LayoutRight, Memory>;
@@ -72,9 +70,7 @@ public:
     // AREPO next generation's mesh regularisation, as its Sedov examples set it (docs/design.md).
     static constexpr double cell_shaping_speed = 0.5, cell_max_angle_factor = 2.25;
 
-    // mesh: built, with update_cells() done. Static: its geometry must not
-    // change while this object is used. Moving: this object owns the
-    // positions (starting from the mesh's snapped ones) and updates the mesh.
+    // mesh: built, update_cells() done. Static: its geometry must not change. Moving: this object owns the positions.
     FiniteVolume(const ExecSpace& exec, Mesh& mesh, const Gas& gas, int order, Update update,
                  Limiter limiter = Limiter::face_centroid, Motion motion = Motion::static_mesh)
         : FiniteVolume(exec, mesh, gas, order, update, limiter, motion, default_integrator(motion, order)) {}
@@ -100,8 +96,7 @@ public:
         refresh();
     }
 
-    // The extensive conserved state of each cell, Q(i, v) = (mass, momentum,
-    // energy); set it before stepping.
+    // The extensive conserved state Q(i, v) = (mass, momentum, energy); set it before stepping.
     Cells state() const { return q_; }
     // Moving: the positions of the mesh-generating points and their velocities.
     Points positions() const { return x_; }
@@ -113,8 +108,7 @@ public:
     const Gas& gas() const { return gas_; }
     const MeshStats& mesh_stats() const { return mesh_stats_; }
 
-    // A host copy of the limited density gradients of the last time_step(), one row per cell: what the
-    // scheme reconstructs from its value at the centroid. For output; double or float storage, order 1.
+    // Host copy of the limited density gradients of the last time_step(), one row per cell; for output.
     Kokkos::View<double**, Kokkos::HostSpace> density_gradients() const {
         Kokkos::View<double**, Kokkos::HostSpace> rows("density_gradients", n_, D);
         if constexpr (P::half) {
@@ -128,9 +122,8 @@ public:
     }
     void set_step_rule(StepRule rule) { rule_ = rule; }
 
-    // The global time step: the smallest of AREPO next generation's cell time steps, without the power-of-two time bins.
-    // courant: the safety factor; timings: if given, the phase times are added to it. Returns dt.
-    // Also runs the sweep (point velocities, gradients) that the next step() uses; the formula is in docs/design.md.
+    // The global time step: the smallest of AREPO next generation's cell time steps, no power-of-two bins. Returns dt.
+    // courant: safety factor; timings: if given, the phase times are added. Also runs the sweep the next step() uses.
     double time_step(double courant, Timings* timings = nullptr) {
         timer_.reset();
         refresh();
@@ -143,9 +136,7 @@ public:
         return dt;
     }
 
-    // One step of length dt with the gradients and point velocities of the
-    // last time_step() (swept again if there was none since the last step;
-    // the state must not change in between).
+    // One step of length dt with the gradients of the last time_step() (swept again if there was none since the last step).
     void step(double dt, Timings* timings = nullptr) {
         timer_.reset();
         refresh();
@@ -168,8 +159,7 @@ public:
         if (motion_ == Motion::moving) move(dt, timings);
     }
 
-    // Face sides of the last step whose extrapolated state was not
-    // physical and which took the cell's state instead.
+    // Face sides of the last step that took the cell's state because the extrapolated one was not physical.
     long long fallbacks() const { return fallbacks_; }
 
     // The radius of a sphere (D = 3) or circle (D = 2) of volume v.
@@ -193,10 +183,10 @@ public:
         Kokkos::View<const int*, Memory> owner, neighbour, start, face;
         typename Mesh::Rows area, face_centroid, centroid;
         typename Mesh::FaceRows rows;
-        typename Mesh::Weights weights;  // gradient weights of list entry k
+        typename Mesh::Weights weights;
         Kokkos::View<const double*, Memory> volume;
         typename Mesh::Positions positions;
-        exact_predicates::BoxN<D> box;  // the periodic box, sides per axis (Mesh::sides())
+        exact_predicates::BoxN<D> box;
 
         template <class Rows>
         KOKKOS_INLINE_FUNCTION Vec row(const Rows& v, int i) const {
@@ -251,7 +241,6 @@ public:
 
     // Public only because CUDA device lambdas may not be defined in private member functions.
 
-    // Ends a timed phase (fenced) when timings are wanted.
     void phase_end(Timings* timings, double Timings::*part) {
         if (!timings) return;
         exec_.fence();
@@ -285,8 +274,7 @@ public:
     std::size_t exponent_bytes() const { return order_ == 1 && P::half ? sectors(sizeof(std::uint32_t) * static_cast<std::size_t>(n_)) : 0; }
     std::size_t cell_row_bytes() const { return prim_bytes() + gradient_bytes() + exponent_bytes(); }
 
-    // Primitive rows, gradient rows (and FP16 exponents), then face flux rows (per-face loop), in the mesh's scratch, 32-byte aligned;
-    // two passes: the cell rows in held_, only the fluxes in the scratch.
+    // Primitive, gradient (and FP16 exponent), then face flux rows in the mesh's scratch, 32-byte aligned; two passes keep the cell rows in held_.
     void borrow_scratch() {
         const std::size_t flux_bytes =
             update_ == Update::per_face ? sizeof(FluxStore) * V * static_cast<std::size_t>(faces_) : 0;
@@ -300,7 +288,6 @@ public:
         if (update_ == Update::per_face) flux_ = FaceFluxes(reinterpret_cast<FluxStore*>(fluxes), faces_);
     }
 
-    // W = primitive(Q / V), the sound speed and the radius of every cell, once per step.
     void primitives() {
         const auto q = q_;
         const auto prim = prims_;
@@ -314,13 +301,11 @@ public:
                 prim(i, V + 1) = radius(geo.volume(i));
             });
     }
-    // Row i of the primitives.
     KOKKOS_INLINE_FUNCTION static State primitive_row(const Prims& prim, int i) {
         return make_state<D>([&](int v) { return prim(i, v); });
     }
 
-    // The sweep of time_step() over cell i's face list, one thread per cell: (moving) the point velocity, then (order 1) the limited
-    // least-squares gradients of the primitives, both as AREPO next generation (docs/design.md); the point velocity has the bits of main 3fd11aa.
+    // The sweep of time_step(), one thread per cell: the point velocity (moving), then the limited least-squares gradients (order 1).
     template <bool Moving, bool Grad>
     struct Sweep {
         Prims prim;
@@ -363,7 +348,7 @@ public:
                         for (int c = 0; c < D; ++c) weight[c] = static_cast<G>(geo.weights(k, c));
                     } else {
                         const Vec between = d + geo.row(geo.centroid, j) - centroid;
-                        X[0] = 1;  // the regressors (1, d), weighted by the area
+                        X[0] = 1;
                         for (int p = 1; p < U; ++p) X[p] = static_cast<G>(between[p - 1]);
                         const G w = static_cast<G>(magnitude);
                         for (int p = 0; p < U; ++p)
@@ -403,7 +388,6 @@ public:
                 for (int a = 0; a < D; ++a) w(i, a) = wi[a];
             }
             if constexpr (Grad) {
-                // limit_gradient, face by face.
                 for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
                     if (limiter == Limiter::none) break;
                     const int f = geo.face(k);
@@ -455,8 +439,7 @@ public:
             }
         }
 
-        // The gradient part of the fit's solution, M x_v = b_v for every
-        // variable: M is symmetric positive definite, Cholesky M = L L^T once.
+        // The gradient part of the fit: M x_v = b_v for every variable, M = L L^T by Cholesky once.
         template <int U>
         KOKKOS_INLINE_FUNCTION static void solve(const G (&M)[U][U], const G (&b)[V][U], Gradient<D, G>& grad) {
             G L[U][U] = {};
@@ -483,9 +466,7 @@ public:
             }
         }
 
-        // The row of cell i; FP16: each variable group (rho, v, P) scaled by
-        // 2^k so that its largest component lies in [2^14, 2^15), k in
-        // exponents(i) (one byte per group).
+        // The row of cell i; FP16: each group (rho, v, P) is scaled by 2^k to put its largest component in [2^14, 2^15).
         KOKKOS_INLINE_FUNCTION void store(int i, const Gradient<D, G>& grad) const {
             if constexpr (P::half) {
                 float largest[3] = {0, 0, 0};
@@ -545,8 +526,7 @@ public:
             smallest = Kokkos::fmin(smallest, courant / rate);
         }
     };
-    // The pair terms: vsig_ij and d_ij are the same from both sides, so each
-    // face gives both cells' terms at once; only their minimum is wanted.
+    // vsig_ij and d_ij are the same from both sides, so each face gives both cells' pair terms at once.
     struct FaceStep {
         Prims prim;
         Geometry geo;
@@ -565,7 +545,6 @@ public:
         }
     };
 
-    // Runs the sweep; returns the global time step.
     double sweep(double courant) {
         const bool moving = motion_ == Motion::moving;
         if (order_ == 1)
@@ -617,8 +596,7 @@ public:
         refresh();
     }
 
-    // The flux through face f (times its area, from owner to neighbour);
-    // `fallbacks` counts the sides that took the cell's state.
+    // The flux through face f (times its area, owner to neighbour); `fallbacks` counts the sides that took the cell's state.
     template <int Order, bool Moving>
     struct FaceFlux {
         Cells q;
@@ -644,9 +622,8 @@ public:
             }
             return grad;
         }
-        // As AREPO's prepare_state: the time and space extrapolations only if rho and P stay positive, else the cell's state;
-        // the space part goes to the face centroid at the half step. Reduced precision: the change in G, added to the double W.
-        // Order 0: W is computed here from Q, not loaded, or the bits change (contraction into euler.hpp's sums; docs/design.md).
+        // As AREPO's prepare_state: extrapolate in time and space only if rho and P stay positive, else the cell's state.
+        // Order 0 computes W here from Q instead of loading it, or the bits change (docs/design.md).
         KOKKOS_INLINE_FUNCTION State side(int i, Vec r, int& fallbacks) const {
             if constexpr (Order == 0) {
                 (void)r;
@@ -671,8 +648,7 @@ public:
                 return W;
             }
         }
-        // AREPO-ng's face velocity: the mean of the two point velocities plus a correction along n from the face centroid's
-        // offset c to the generators' midpoint, |c| limited to 0.9 |d|.
+        // AREPO-ng's face velocity: the mean point velocity plus a correction along n, |c| limited to 0.9 |d|.
         KOKKOS_INLINE_FUNCTION Vec face_velocity(int f, int o, int j) const {
             const Vec wL = geo.row(w, o), wR = geo.row(w, j);
             const Vec d = geo.separation(o, j);
@@ -721,8 +697,7 @@ public:
         }
     };
 
-    // The fluxes of the two-pass integrator: the first pass on the mesh of t^n with W^n + g (x_f^n - c^n), no half step; the second on
-    // the mesh of t^n+1 with W^n advanced a whole step, i.e. FaceFlux::side with twice the step and d = x_f^n+1 - c^n.
+    // Two-pass fluxes: pass 1 on the mesh of t^n with W^n + g (x_f^n - c^n); pass 2 on t^n+1 with W^n advanced a whole step.
     template <bool Second>
     struct TwoPassFlux : FaceFlux<1, true> {
         Points old_centroid;
@@ -746,7 +721,7 @@ public:
             const int o = this->geo.owner_of(f), j = this->geo.neighbour_of(f);
             const Vec a = this->geo.area_of(f);
             const double magnitude = Kokkos::sqrt(dot(a, a));
-            if (magnitude == 0) return State{};  // as FaceFlux
+            if (magnitude == 0) return State{};
             const Vec wf = this->face_velocity(f, o, j);
             const State L = pass_side(o, this->geo.face_offset(f, o), fallbacks_o);
             const State R = pass_side(j, this->geo.face_offset(f, j), fallbacks_j);
@@ -756,8 +731,7 @@ public:
         }
     };
 
-    // The two-pass integrator of AREPO next generation: fluxes on the mesh of t^n, points drift, mesh update, fluxes on the new mesh
-    // from the same W^n and g advanced a whole step, each half applied. Needs held_ and the centroids of t^n (docs/design.md).
+    // The two-pass integrator of AREPO next generation: fluxes on t^n, drift, mesh update, fluxes on t^n+1, each half applied.
     void step_two_pass(double dt, Timings* timings) {
         const auto old = old_centroid_;
         const Geometry geo = geometry_;
@@ -792,9 +766,7 @@ public:
         const Geometry geo = geometry_;
         const auto q = q_;
         if (update_ == Update::per_cell) {
-            // In place at order 1: the fluxes read only the primitive and
-            // gradient rows; order 0 reads Q (FaceFlux::side), so into next_.
-            // Each cell counts the fallbacks of its own sides.
+            // In place at order 1 (the fluxes read only the primitive and gradient rows); order 0 reads Q, so into next_.
             const auto next = Order == 0 ? next_ : q_;
             Kokkos::parallel_reduce(
                 "hydro::fluxes_and_update", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_),
