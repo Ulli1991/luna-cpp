@@ -380,7 +380,9 @@ int main(int argc, char** argv) {
     conservation(check);
     sound_wave(check);
     sod(check);
-    noh(check);
+#ifndef __SANITIZE_ADDRESS__
+    noh(check);  // the long run (65536 cells, 1900 steps), about 11x slower under sanitizers
+#endif
     galilean(check);
     return check.failed() != 0;
 }
