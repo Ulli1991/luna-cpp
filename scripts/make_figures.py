@@ -420,12 +420,6 @@ PROBLEMS = (("sod", "Sod"), ("shu-osher", "Shu-Osher"), ("woodward-colella", "Wo
 ROWS = ((0, r"$L_1(\rho)$"), (2, r"$L_1(P)$"))
 
 
-def grid_legend(fig, axes, handles):
-    """One legend above a grid of panels."""
-    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, axes[0, 0].get_position().y1), ncol=len(handles), fontsize=LABEL,
-               columnspacing=1.5)
-
-
 def fig_convergence():
     rows = report()
     wide = wide_rule_l1()
@@ -450,8 +444,8 @@ def fig_convergence():
                 ax.set_xlabel(r"$N$")
             ax.set_xlim(150, 5e5)
         corner(axes[0, j], title, 0.95, 0.95, "right")
-    grid_legend(fig, axes, [key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True),
-                            key("padded", "moving, [-15, 5], LUNA rule", True), key("padded3", "moving, [-15, 5], default rule", True)])
+    axes[1, 0].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], loc="lower left", fontsize=LABEL)
+    axes[1, 1].legend(handles=[key("padded", "moving, LUNA rule", True), key("padded3", "moving, default rule", True)], **LEGEND)
     save(fig, "convergence_1d")
 
 
@@ -475,7 +469,7 @@ def fig_time():
                 ax.set_xlabel(r"GPU time (s)")
             ax.set_xlim(4e-3, 6e2)
         corner(axes[0, j], title, 0.95, 0.95, "right")
-    grid_legend(fig, axes, [key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)])
+    axes[1, 1].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], **LEGEND)
     save(fig, "time_to_target_1d")
 
 
@@ -1039,7 +1033,7 @@ def fig_throughput():
     for ax in (top, low):
         ax.axvspan(24 ** 3, 48 ** 3, color="0.90", lw=0, zorder=0)
     TEXTS.append(top.text(32 ** 3, 1.1, "L2 to DRAM", ha="center", fontsize=LABEL))
-    top.legend(loc="lower left", bbox_to_anchor=(0, 1.01), ncol=3, fontsize=LABEL, borderaxespad=0, columnspacing=1.5)
+    top.legend(loc="lower right", ncol=2, fontsize=LABEL, columnspacing=1.5)
     low.loglog(x, [ours[s, "two-pass"]["gpu_MB"] / 1e3 for s in sides], color=MOVING_C, marker="D", label="ours, two passes, GPU in use", **style)
     low.loglog(x, [ours[s, "two-pass"]["views_MB"] / 1e3 for s in sides], color=MOVING_C, ls="--", marker="D", mfc="white", label="ours, Kokkos views", **style)
     kept = [s for s in shown if memory[s] >= 10]  # LUNA prints two decimals of a GB
@@ -1106,7 +1100,7 @@ def fig_throughput_precision():
     axes[1, 0].set_ylim(0.005, 200)
     axes[0, 0].set_ylabel("G cell updates/s")
     axes[1, 0].set_ylabel("GPU GB")
-    axes[0, 0].legend(loc="lower left", bbox_to_anchor=(0, 1.01), ncol=7, fontsize=LABEL, borderaxespad=0, columnspacing=1.2, handlelength=2)
+    axes[0, 0].legend(loc="lower right", ncol=2, fontsize=LABEL, columnspacing=1.2)
     save(fig, "throughput_precision")
 
 
