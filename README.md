@@ -150,7 +150,7 @@ Sod shock tube, N = 512, against the exact solution. Moving has the sharper cont
 
 ![Shu-Osher density](docs/figures/shu_osher.png)
 
-Shu-Osher, N = 1024 on LUNA's domain. Gas enters through the left wall, which supplies cells at the initial spacing, 1508 at the end ([research_notes/inflow_2026-11-06.md](research_notes/inflow_2026-11-06.md)).
+Shu-Osher, N = 1024 on LUNA's domain. Moving holds the left wall at the fixed inflow state instead of LUNA's zero flux, which static keeps, because a zero-flux wall let the totals drift from the budget through the walls. Gas enters there, and the wall supplies cells at the initial spacing, 1508 at the end ([research_notes/inflow_2026-11-06.md](research_notes/inflow_2026-11-06.md)).
 
 ![Woodward-Colella density](docs/figures/woodward_colella.png)
 
