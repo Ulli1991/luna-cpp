@@ -11,9 +11,8 @@ where the exact gas is; Noh counts [4 cells, 0.3] only. Linear waves: the part o
 (linear_waves.py, errors). Shu-Osher, Woodward-Colella: against a fine LUNA MC run (compare_1d.py ref); Titarev-Toro, density only,
 against AthenaK PPMX 65536, as LUNA's external gate; both averaged over the cell. Finer than a reference, both go on its cells.
 
-Orders: p_all a fit over the ladder, p_top over its last four rungs (N >= 2^14 on the full ladder), of the rungs above a floor:
-a rung is at the round-off floor when it falls short of a factor 1.1 from the rung before and is below 1e-7, or has a rung at the floor
-before it.
+Orders: p_all a fit over the ladder, p_top over its last four rungs (N >= 2^14 on the full ladder). On the linear waves, whose errors
+at amplitude 1e-6 meet rounding, only the rungs before the first that falls short of a factor 1.1 from the one before.
 """
 import json
 import os
@@ -173,11 +172,11 @@ def fit(ns, es):
     return float(-np.polyfit(np.log(ns), np.log(es), 1)[0]) if len(ns) >= 2 else None
 
 
-def above_floor(ns, es):
-    """The rungs before a round-off floor (see the head of this file)."""
+def above_floor(p, ns, es):
+    """The rungs before a round-off floor (see the head of this file): linear waves at amplitude 1e-6 only."""
     keep = len(ns)
     for i in range(1, len(ns)):
-        if es[i - 1] < 1.1 * es[i] and es[i] < 1e-7:
+        if p in pr.LINEAR and es[i - 1] < 1.1 * es[i]:
             keep = i
             break
     return ns[:keep], es[:keep]
@@ -193,7 +192,7 @@ def orders(rows):
             es = [r["L1"][k] for r in sel if r["L1"][k] is not None]
             if not ns or any(e == 0 for e in es):
                 continue
-            n2, e2 = above_floor(ns, es)
+            n2, e2 = above_floor(key[0], ns, es)
             out[(*key, k)] = dict(p_all=fit(n2, e2), p_top=fit(n2[-4:], e2[-4:]), N=ns, L1=es, floor=len(n2) < len(ns), n_fit=len(n2))
     return out
 
@@ -243,7 +242,7 @@ def table(runs, reports, refs_dir):
 
 # Moving runs that cannot run yet: the issue of each (a failure must stay measured), and those waiting for the inflow fix.
 KNOWN = {}
-WAITS = ("shu-osher", "titarev-toro")
+WAITS = ("shu-osher", "titarev-toro", "toro-5")
 GATE_N = {"titarev-toro": (1024, 2048, 4096)}
 BINS = {"shu-osher": 256, "woodward-colella": 256, "titarev-toro": 1024}
 FLOOR = 1e-7

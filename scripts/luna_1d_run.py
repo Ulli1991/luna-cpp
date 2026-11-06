@@ -109,7 +109,7 @@ def main():
     peak_mb = stats.get("peak_bytes_in_use", 0) / 1e6
     np.savez(out, rho=rho, u=u, p=p, steps=steps, wall_s=wall, t=float(t), N=n, problem=problem, solver=solver,
              limiter=limiter, cfl=cfl, device=str(jax.devices()[0]))
-    if reached or max_s == 0:
+    if reached or max_s == 0 or not np.isfinite(float(t)):
         with open(out + ".json", "w") as meta:
             json.dump(dict(series=series, problem=problem, N=n, steps=steps, wall_s=wall, peak_MB=peak_mb, t=float(t), reached=int(reached),
                            file=os.path.basename(out)), meta)

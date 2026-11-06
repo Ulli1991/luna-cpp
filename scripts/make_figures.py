@@ -62,6 +62,18 @@ PRECISION = f"{RUNS}/build-roofline/logs/ladder-31953468.out"  # scripts/profile
 DIMS = f"{RUNS}/build-roofline/logs"  # scripts/dims_a100.sh
 SCALING = f"{RUNS}/build-roofline/logs/roof-31928911.out"  # scripts/roofline_a100.sh on branch roofline, job 31928911
 
+LAD_RUNS = f"{RUNS}/build-1dtests/runs"      # scripts/ladder_1d_a100.sh
+LADDER = f"{RUNS}/build-1dtests/report/ladder_1d.json"
+LADDER_NAMES = {"toro-1": "Toro 1", "toro-2": "Toro 2", "toro-3": "Toro 3", "toro-4": "Toro 4", "toro-5": "Toro 5", "einfeldt-shear": "Einfeldt shear", "la-peak": "LA Peak",
+                "la-rcvcr": "LA RCVCR", "la-stationary": "LA stationary", "la-slow": "LA slow", "la-streams": "LA streams", "la-near-vacuum": "LA near vacuum", "leblanc": "LeBlanc",
+                "noh": "Noh", "shu-osher": "Shu-Osher", "woodward-colella": "Woodward-Colella", "titarev-toro": "Titarev-Toro", "sound-right": "sound right", "sound-left": "sound left",
+                "sound-advected": "sound advected", "simple-wave": "simple wave"}
+
+sys.path.insert(0, HERE)
+import ladder_1d as lad  # noqa: E402
+import problems_1d as pr1d  # noqa: E402
+ldr = lad
+
 spec = importlib.util.spec_from_file_location("compare_1d", f"{HERE}/compare_1d.py")
 cmp1d = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cmp1d)
@@ -1187,9 +1199,98 @@ def fig_throughput_dims():
     save(fig, "throughput_dimensions")
 
 
+def ladder_rows():
+    """The 1D ladder (scripts/ladder_1d.py table), and the orders of its series."""
+    rows = json.load(open(LADDER))
+    return rows, lad.orders(rows)
+
+
+LADDER_PANELS = [p for p in lad.ALL if p not in ("einfeldt-strong", "la-vacuum")]  # einfeldt-strong is Toro 2
+
+
+def fig_ladder():
+    """L1(rho) against N for every 1D test, ours beside LUNA's, measured order in each panel."""
+    rows, res = ladder_rows()
+    cols = 5
+    lines = (len(LADDER_PANELS) + cols - 1) // cols
+    fig, axes = plt.subplots(lines, cols, figsize=(WIDTH, FIGSIZE[1] * 0.56 * lines), sharex=True, gridspec_kw=dict(hspace=0, wspace=0.3))
+    for ax in axes.ravel()[len(LADDER_PANELS):]:
+        ax.set_visible(False)
+    for ax, p in zip(axes.ravel(), LADDER_PANELS):
+        log_axes(ax)
+        labels = []
+        tops = []
+        for series, style, tag in (("static", "static", "S"), ("luna-mc", "luna", "L"), ("moving", "moving", "M"), ("moving-wide", "padded", "W")):
+            o = res.get((p, series, 0))
+            if o is None:
+                continue
+            loglog(ax, o["N"], o["L1"], style, ms=MS * 0.7)
+            tops += o["L1"]
+            if o["p_all"] is not None:
+                labels.append(f"{tag} {o['p_all']:.2f}")
+        ax.set_xlim(150, 3e5)
+        ax.set_ylim(min(tops) / 3, max(tops) * 40)
+        ax.tick_params(labelsize=LABEL)
+        ax.yaxis.set_major_locator(matplotlib.ticker.LogLocator(numticks=4))
+        ax.yaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+        corner(ax, LADDER_NAMES.get(p, p), 0.95, 0.95, "right")
+        corner(ax, "  ".join(labels), 0.04, 0.05, va="bottom")
+    for ax in axes[:, 0]:
+        ax.set_ylabel(r"$L_1(\\rho)$", fontsize=LABEL + 1)
+    for j, ax in enumerate(axes.ravel()):
+        if ax.get_visible() and j + cols >= len(LADDER_PANELS):
+            ax.set_xlabel(r"$N$")
+            ax.tick_params(labelbottom=True)
+    axes[0, 0].legend(handles=[key("luna", "LUNA MC (L)", True), key("static", "static (S)", True), key("moving", "moving (M)", True), key("padded", "moving, wide line (W)", True)],
+                      loc="center right", fontsize=LABEL - 1, bbox_to_anchor=(1.0, 0.62))
+    save(fig, "ladder_1d")
+
+
+def fig_hard():
+    """Density of the hard cases at one N: LUNA, static, moving, exact; a zoom under each."""
+    cases = (("leblanc", "LeBlanc", "moving", True, (0.72, 0.8), [0.73, 0.75, 0.77, 0.79], "contact"),
+             ("einfeldt-strong", "Einfeldt strong", "moving-wide", False, (0.42, 0.58), [0.45, 0.50, 0.55], "near vacuum"),
+             ("noh", "Noh", None, False, (0.0, 0.03), [0.0, 0.01, 0.02], "wall heating"),
+             ("toro-3", "Toro 3", "moving", False, (0.76, 0.82), [0.77, 0.79, 0.81], "contact and shock"))
+    n = 1024
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.15))
+    outer = fig.add_gridspec(2, 4, height_ratios=[2.2, 1.5], hspace=0.2, wspace=0.28)
+    for j, (p, title, moving, logy, xlim, ticks, label) in enumerate(cases):
+        ax, low = fig.add_subplot(outer[0, j]), fig.add_subplot(outer[1, j])
+        x_l = ldr.cells(f"{LAD_RUNS}/luna-mc_{p}_{n}.npz", p)
+        xl, rl = 0.5 * (x_l[0] + x_l[1]), x_l[2][0]
+        x_s = ldr.cells(f"{LAD_RUNS}/static_{p}_{n}.npy", p)
+        xs, rs = 0.5 * (x_s[0] + x_s[1]), x_s[2][0]
+        runs = [(xl, rl, "luna"), (xs, rs, "static")]
+        box = pr1d.problem(p)["box"]
+        lim = (0.0, 0.4) if p == "noh" else box
+        fine = np.linspace(lim[0], lim[1], 8001)
+        exact = pr1d.exact(p, fine[:-1], fine[1:])[0]
+        fine = 0.5 * (fine[:-1] + fine[1:])
+        ax.plot(fine, exact, **REF)
+        if moving:
+            m = ldr.cells(f"{LAD_RUNS}/{moving}_{p}_{n}.npy", p)
+            runs.append((0.5 * (m[0] + m[1]), m[2][0], "moving"))
+        for x, r, s in runs:
+            line(ax, x, r, s)
+        ax.set_xlim(*lim)
+        if logy:
+            ax.set_yscale("log")
+        ax.tick_params(labelsize=LABEL)
+        corner(ax, f"{title}, N = {n}", 0.95, 0.95, "right")
+        zoom(ax, low, xlim, ticks, runs, [(fine, exact, REF)], "abcd"[j], label)
+        low.set_xlabel(r"$x$")
+        if j == 0:
+            ax.set_ylabel(r"$\\rho$")
+            low.set_ylabel(r"$\\rho$")
+    fig.axes[0].legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"), rkey("exact", REF)], loc="lower left", fontsize=LABEL)
+    save(fig, "hard_1d")
+
+
 FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_woodward_colella, "convergence_1d": fig_convergence,
            "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput,
-           "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "kh_2d_evolution": fig_kh_evolution, "sedov3d_mesh": fig_sedov_mesh, "throughput_precision": fig_throughput_precision, "throughput_dimensions": fig_throughput_dims}
+           "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "kh_2d_evolution": fig_kh_evolution, "sedov3d_mesh": fig_sedov_mesh, "throughput_precision": fig_throughput_precision, "throughput_dimensions": fig_throughput_dims,
+           "ladder_1d": fig_ladder, "hard_1d": fig_hard}
 
 
 def main():
