@@ -84,11 +84,13 @@ TEXTS, BOXES = [], []  # panel labels and box letters, zoom boxes, of the figure
 FAILED = []  # (figure, what) of every overlap
 WIDTH = FIGSIZE[0] * 2  # every figure
 LEGEND = dict(loc="upper right", fontsize=LABEL)
+KH_MESH_N = 128  # of kh_2d_mesh
+KH_VMIN, KH_VMAX = 0.9, 2.1  # LUNA's KH figures, magma (its scripts/validation/plots/kh_grid.py)
 KH_WINDOW = ((0.27, 0.57), (0.11, 0.41))  # the roll-up of the zoom panels
 DIFF = {}
 
 
-def save(fig, name):
+def save(fig, name, dpi=None):
     os.makedirs(OUT, exist_ok=True)
     path = f"{OUT}/{name}.png"
     for ax in fig.axes:
@@ -96,7 +98,7 @@ def save(fig, name):
         if ax.images:
             ax.grid(False)
     overlaps(fig, name)
-    fig.savefig(path)
+    fig.savefig(path, dpi=dpi or plt.rcParams["savefig.dpi"])
     plt.close(fig)
     Image.open(path).convert("RGB").quantize(256, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE).save(path, optimize=True)
     print(f"{path} {os.path.getsize(path) / 1024:.0f} kB, connectors crossing: {crossings()}")
@@ -557,13 +559,13 @@ def fig_kh_density():
         for c, (kind, name) in enumerate(names):
             ax = axes[r, c]
             rho = kh_field(kind, t, n, 2 * n if kind != "luna" else n)
-            image = ax.imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="viridis", vmin=1, vmax=2, interpolation="nearest")
+            image = ax.imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
             corner(ax, f"({panels[4 * r + c]}) {name}, $t = {t}$", y=0.97)
             if t == "1.5":
                 if kind == "moving":
-                    kh_voronoi(axes[last, c], np.fromfile(f"{KH_FIELDS}/field_moving_t{t}_{n}.bin").reshape(-1, 7), window, "k", 0.05)
+                    kh_voronoi(axes[last, c], np.fromfile(f"{KH_FIELDS}/field_moving_t{t}_{n}.bin").reshape(-1, 7), window, "0.85", 0.05)
                 else:
-                    axes[last, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="viridis", vmin=1, vmax=2, interpolation="nearest")
+                    axes[last, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX, interpolation="nearest")
                 axes[last, c].set_xlim(*window[0])
                 axes[last, c].set_ylim(*window[1])
                 corner(axes[last, c], f"({panels[4 * last + c]}) {name}, $t = 1.5$", y=0.97)
@@ -843,46 +845,35 @@ def cell_collection(ax, polygons, colours, edge=None, lw=0.0, **kw):
 
 def kh_voronoi(ax, rows, window, edge=None, lw=0.0):
     _, polygons, colours = voronoi_polygons(rows[:, :2], rows[:, 5], window)
-    cell_collection(ax, polygons, colours, edge, lw, cmap="viridis", norm=matplotlib.colors.Normalize(1, 2))
+    cell_collection(ax, polygons, colours, edge, lw, cmap="magma", norm=matplotlib.colors.Normalize(KH_VMIN, KH_VMAX))
     ax.set_xlim(*window[0])
     ax.set_ylim(*window[1])
     ax.set_aspect("equal")
-
-
-def kh_mesh_panel(ax, t, window, dots=False):
-    rows = np.fromfile(f"{SEDOV_256}/kh_mesh512_t{t}.bin").reshape(-1, 7)
-    near, polygons, colours = voronoi_polygons(rows[:, :2], rows[:, 5], window)
-    image = cell_collection(ax, polygons, colours, "k", 0.4 if dots else 0.12, cmap="viridis", norm=matplotlib.colors.Normalize(1, 2))
-    if dots:
-        ax.plot(*near.T, ls="none", marker=".", ms=1.8, color="k", zorder=3)
-    ax.set_xlim(*window[0])
-    ax.set_ylim(*window[1])
-    ax.set_aspect("equal")
-    return image
 
 
 def fig_kh_mesh():
-    times = ("0", "1.0", "1.5", "2.5", "3.0")
-    window = KH_WINDOW
-    inner = ((0.36, 0.46), (0.20, 0.30))
-    fig, axes = plt.subplots(2, 3, figsize=(WIDTH, WIDTH * 0.72), gridspec_kw=dict(wspace=0.05, hspace=0.05))
-    for ax, t, letter in zip(axes.flat, times, "abcde"):
-        image = kh_mesh_panel(ax, t, window)
-        corner(ax, f"({letter}) $t = {t}$", y=0.97)
-    zoom_ax = axes[1, 2]
-    kh_mesh_panel(zoom_ax, "1.5", inner, dots=True)
-    corner(zoom_ax, "(f) inside the roll-up, $t = 1.5$", y=0.97)
-    mark(axes[0, 2], inner[0], inner[1], "")
-    to_fig = fig.transFigure.inverted()
-    for x, side in ((inner[0][0], 0), (inner[0][1], 1)):
-        fig.add_artist(ConnectionPatch(xyA=(x, inner[1][0]), coordsA=axes[0, 2].transData, xyB=(side, 1), coordsB=zoom_ax.transAxes, color=EDGE, lw=0.6, clip_on=False, zorder=10))
-        CONNECTORS.append((to_fig.transform(axes[0, 2].transData.transform((x, inner[1][0]))), to_fig.transform(zoom_ax.transAxes.transform((side, 1)))))
+    """Top row the moving mesh, exact Voronoi cells with their edges; bottom row LUNA MC on its grid, same N, one colour scale."""
+    n = KH_MESH_N
+    times = ("0", "1.0", "2.5", "4.0", "5.0")
+    fig, axes = plt.subplots(2, 5, figsize=(WIDTH, WIDTH * 0.385), gridspec_kw=dict(wspace=0.04, hspace=0.04, left=0.01, right=0.92, top=0.99, bottom=0.01))
+    norm = matplotlib.colors.Normalize(KH_VMIN, KH_VMAX)
+    for c, t in enumerate(times):
+        rows = np.fromfile(f"{SEDOV_256}/kh5_{n}_t{t}.bin").reshape(-1, 7)
+        _, polygons, colours = voronoi_polygons(rows[:, :2], rows[:, 5], ((0, 1), (0, 1)))
+        image = cell_collection(axes[0, c], polygons, colours, (1, 1, 1, 0.4), 0.1, cmap="magma", norm=norm)
+        axes[0, c].set_xlim(0, 1)
+        axes[0, c].set_ylim(0, 1)
+        axes[0, c].set_aspect("equal")
+        rho = np.load(f"{SEDOV_256}/kh5_luna_{n}_t{t}.npz")["rho"]
+        axes[1, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="magma", norm=norm, interpolation="nearest")
+        corner(axes[0, c], f"moving, $t = {float(t):g}$", y=0.97)
+        corner(axes[1, c], f"LUNA MC, $t = {float(t):g}$", y=0.97)
     for ax in axes.flat:
         ax.set_xticks([])
         ax.set_yticks([])
         ax.minorticks_off()
-    fig.colorbar(image, ax=axes.ravel().tolist(), location="bottom", fraction=0.03, pad=0.02, aspect=50, label=r"$\rho$")
-    save(fig, "kh_2d_mesh")
+    fig.colorbar(image, ax=axes.ravel().tolist(), location="right", fraction=0.012, pad=0.01, label=r"$\rho$")
+    save(fig, "kh_2d_mesh", dpi=400)
 
 
 def plane_cells(run, window, pad=3.0):
