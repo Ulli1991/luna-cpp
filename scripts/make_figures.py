@@ -55,10 +55,11 @@ SCALING = f"{RUNS}/build-roofline/logs/roof-31928911.out"  # scripts/roofline_a1
 
 LAD_RUNS = f"{RUNS}/build-1dtests/runs"      # scripts/ladder_1d_a100.sh
 LADDER = f"{RUNS}/build-1dtests/report/ladder_1d.json"
-LADDER_NAMES = {"toro-1": "Toro 1", "toro-2": "Toro 2", "toro-3": "Toro 3", "toro-4": "Toro 4", "toro-5": "Toro 5", "einfeldt-shear": "Einfeldt shear", "la-peak": "LA Peak",
+LADDER_NAMES = {"toro-1": "Toro 1", "toro-2": "Toro 2", "toro-3": "Toro 3", "toro-4": "Toro 4", "toro-5": "Toro 5", "einfeldt-strong": "Einfeldt strong", "einfeldt-shear": "Einfeldt shear", "la-vacuum": "LA vacuum (rho = 0)", "la-peak": "LA Peak",
                 "la-rcvcr": "LA RCVCR", "la-stationary": "LA stationary", "la-slow": "LA slow", "la-streams": "LA streams", "la-near-vacuum": "LA near vacuum", "leblanc": "LeBlanc",
                 "noh": "Noh", "shu-osher": "Shu-Osher", "woodward-colella": "Woodward-Colella", "titarev-toro": "Titarev-Toro", "sound-right": "sound right", "sound-left": "sound left",
-                "sound-advected": "sound advected", "simple-wave": "simple wave"}
+                "sound-advected": "sound advected", "simple-wave": "simple wave", "shock-1.2": "shock M = 1.2", "shock-1.6556": "shock M = 1.6556", "shock-2": "shock M = 2",
+                "shock-3": "shock M = 3", "shock-5": "shock M = 5", "shock-10": "shock M = 10"}
 
 sys.path.insert(0, HERE)
 import ladder_1d as lad  # noqa: E402
@@ -1254,10 +1255,73 @@ def fig_hard():
     save(fig, "hard_1d")
 
 
+GRID_N = 4096
+GRID_LIM = {"noh": (0.0, 0.4), "titarev-toro": (1.0, 2.0)}
+GRID_LOG = ("leblanc",)
+
+
+def moving_of(p, n):
+    """The moving run shown for a test: the default if it reached t_end, else the labelled stand-in; its tag."""
+    for series, tag in (("moving", ""), ("moving-wide", ", wide line"), ("moving-fixed", ", fixed dt")):
+        path = f"{LAD_RUNS}/{series}_{p}_{n}.npy"
+        if os.path.exists(path + ".json"):
+            meta = json.load(open(path + ".json"))
+            if meta.get("reached", 1) and meta["steps"] >= 16:
+                return path, tag
+    return None, ""
+
+
+def fig_grid():
+    """Density at t_end, one panel per 1D test, the same N: LUNA, static, moving, the exact solution or reference."""
+    refs = lad.references(FINE)
+    cols, n = 5, GRID_N
+    rows = (len(lad.ALL) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(WIDTH, FIGSIZE[1] * 0.5 * rows), gridspec_kw=dict(hspace=0.28, wspace=0.3))
+    for ax, p in zip(axes.ravel(), lad.ALL):
+        pb = pr1d.problem(p)
+        lim = GRID_LIM.get(p, pb["box"])
+        linear = p in pr1d.LINEAR
+        scale = (lambda r: (r - 1.0) / pr1d.EPS) if linear else (lambda r: r)
+        name = LADDER_NAMES.get(p, p) + ("\n" + r"$(\rho-1)/10^{-6}$" if linear else "")
+        if lim != pb["box"]:
+            name += "\nwindow of the box"
+        edges = np.linspace(pb["box"][0], pb["box"][1], 8193)
+        if pb["kind"] == "reference":
+            x_e, r_e = 0.5 * (edges[:-1] + edges[1:]), refs[p].average(edges[:-1], edges[1:])[0]
+        else:
+            x_e, r_e = 0.5 * (edges[:-1] + edges[1:]), scale(pr1d.exact(p, edges[:-1], edges[1:])[0])
+        ax.plot(x_e, r_e, **REF)
+        shown = [r_e]
+        for path, style in ((f"{LAD_RUNS}/luna-mc_{p}_{n}.npz", "luna"), (f"{LAD_RUNS}/static_{p}_{n}.npy", "static"), (moving_of(p, n)[0], "moving")):
+            if path and os.path.exists(path + ".json") and json.load(open(path + ".json")).get("reached", 1):
+                a, b, W = lad.cells(path, p)
+                line(ax, 0.5 * (a + b), scale(W[0]), style, zorder=1.9 if style == "moving" else STYLE[style]["zorder"])  # moving shows where it differs
+                shown.append(scale(W[0]))
+        tag = moving_of(p, n)[1] if moving_of(p, n)[0] else ", no moving run"
+        tag = tag.replace(", ", "\nmoving: ", 1)
+        ax.set_xlim(*lim)
+        if p in GRID_LOG:
+            ax.set_yscale("log")
+            ax.set_ylim(5e-4, 300)
+        else:
+            keep = [y[np.isfinite(y)] for y in shown]
+            lo, hi = min(y.min() for y in keep), max(y.max() for y in keep)
+            ax.set_ylim(lo - 0.08 * (hi - lo), hi + 0.62 * (hi - lo))
+        ax.tick_params(labelsize=LABEL - 1)
+        corner(ax, name + tag, 0.97, 0.95, "right")
+    axes.ravel()[lad.ALL.index("la-near-vacuum")].legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"), rkey("exact, reference", REF)],
+                                                          loc="upper left", bbox_to_anchor=(0.03, 0.72), fontsize=LABEL - 2, handlelength=1.4, labelspacing=0.1, borderpad=0, handletextpad=0.4)
+    for ax in axes[:, 0]:
+        ax.set_ylabel(r"$\rho$", fontsize=LABEL + 1)
+    for ax in axes[-1, :]:
+        ax.set_xlabel(r"$x$", fontsize=LABEL + 1)
+    save(fig, "grid_1d")
+
+
 FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_woodward_colella, "convergence_1d": fig_convergence,
            "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput,
            "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "kh_2d_evolution": fig_kh_evolution, "sedov3d_mesh": fig_sedov_mesh, "throughput_precision": fig_throughput_precision, "throughput_dimensions": fig_throughput_dims,
-           "ladder_1d": fig_ladder, "hard_1d": fig_hard}
+           "ladder_1d": fig_ladder, "hard_1d": fig_hard, "grid_1d": fig_grid}
 
 
 def main():
