@@ -25,7 +25,8 @@
 // N^2 * steps / stepping time; the final state hash must agree between runs.
 // --phases fences the phases and prints their rates. --out writes
 // <prefix>.txt (t M K) and <prefix>.bin (doubles per cell: generator x y, centroid
-// x y, V, rho, rho_vy).
+// x y, V, rho, rho_vy) and <prefix>.grad.bin (doubles per cell: the limited density gradient of the
+// end state, to reconstruct from the centroid).
 
 #include "device_memory.hpp"
 #include "finite_volume.hpp"
@@ -227,6 +228,10 @@ int run(const Options& o) {
                 std::memcpy(&u, &q(i, v), 8);
                 hash = (hash ^ u) * 1099511628211ull;
             }
+        double total[4] = {0, 0, 0, 0};
+        for (int i = 0; i < n; ++i)
+            for (int v = 0; v < 4; ++v) total[v] += q(i, v);
+        std::printf("totals: t=%.6g mass=%.15e x_momentum=%.15e y_momentum=%.15e energy=%.15e\n", t, total[0], total[1], total[2], total[3]);
         const double rate = n * double(steps) / wall * 1e-6;
         std::printf("run: wall_s=%.4f steps=%lld M_cell_updates_per_s=%.1f hash=%016llx\n", wall, steps, rate,
                     static_cast<unsigned long long>(hash));
@@ -239,6 +244,13 @@ int run(const Options& o) {
             stats_best = fv.mesh_stats();
         }
         if (r + 1 == o.repeats && !o.out.empty()) {
+            fv.time_step(o.courant);  // the gradients of the end state; the run is over
+            const auto gradient = fv.density_gradients();
+            std::ofstream gradients(o.out + ".grad.bin", std::ios::binary);
+            for (int i = 0; i < n; ++i) {
+                const double row[2] = {gradient(i, 0), gradient(i, 1)};
+                gradients.write(reinterpret_cast<const char*>(row), sizeof(row));
+            }
             std::ofstream text(o.out + ".txt");
             text.precision(17);
             for (const auto& row : series) text << row[0] << " " << row[1] << " " << row[2] << "\n";

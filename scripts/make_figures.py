@@ -8,6 +8,7 @@ Data paths, each an environment variable, none of them in this repository:
     VORONOI_RUNS               voronoi-cpp checkout with the build-* run directories
     KH_TABLE, KH_FIELDS        the KH table and the density fields, default under VORONOI_RUNS
     LUNA_REFERENCE_SOLUTIONS   luna-reference-solutions at 99a52d0 (sha256 checked against its MANIFEST.json)
+    LUNA_SEDOV_RUNS            snapshots of the 256^3 Sedov runs; profiles and column densities are cached there
     LUNA_CPP_FIGURES           output directory, default docs/figures next to this script's parent
 
 Every figure is checked before it is written: a legend or panel label on plotted data, or a legend on a zoom box, stops the
@@ -25,12 +26,16 @@ from collections import defaultdict
 
 import h5py
 import matplotlib
+import matplotlib.colors
 import matplotlib.ticker
 import numpy as np
 from matplotlib.path import Path
 from matplotlib.patches import ConnectionPatch, Rectangle
 from PIL import Image
-from scipy.spatial import cKDTree
+from matplotlib.collections import PolyCollection
+from scipy.spatial import Voronoi, cKDTree
+from matplotlib.collections import PolyCollection
+from scipy.spatial import Voronoi, cKDTree
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -52,6 +57,7 @@ KH_FIELDS = os.environ.get("KH_FIELDS", f"{RUNS}/build-2d/runs")  # field_* of d
 SEDOV = f"{RUNS}/build-limiters/sedov"
 SEDOV_L1 = f"{RUNS}/build-limiters/sedov_l1.json"
 SEDOV_LADDER = f"{RUNS}/build-metric"
+SEDOV_256 = os.environ.get("LUNA_SEDOV_RUNS", "/ptmp/uli/luna-cpp-sedov")  # moving, static, LUNA at 256^3, snapshots every 1000 yr
 SCALING = f"{RUNS}/build-roofline/logs/roof-31928911.out"  # scripts/roofline_a100.sh on branch roofline, job 31928911
 
 spec = importlib.util.spec_from_file_location("compare_1d", f"{HERE}/compare_1d.py")
@@ -60,16 +66,17 @@ spec.loader.exec_module(cmp1d)
 
 apply_style()
 LUNA_C, STATIC_C, MOVING_C = "C0", "C1", "C2"
-LW, THIN = 1.2, 0.8  # runs; static over LUNA and the references
+LW = 2.0  # every curve; connectors, zoom boxes, cell edges and guide lines stay thin
 STYLE = {"luna": dict(color=LUNA_C, ls="-", marker="o", lw=LW, zorder=2),
-         "static": dict(color=STATIC_C, ls="--", marker="s", lw=THIN, zorder=2.5),
+         "static": dict(color=STATIC_C, ls="--", marker="s", lw=LW, zorder=2.5),
          "moving": dict(color=MOVING_C, ls="-", marker="^", lw=LW, zorder=3),
          "two": dict(color=MOVING_C, ls="--", marker="D", lw=LW, zorder=3),
          "padded": dict(color=MOVING_C, ls="--", marker="v", lw=LW, zorder=3),
          "padded3": dict(color=MOVING_C, ls=":", marker="x", lw=LW, zorder=3)}
-REF = dict(color="k", lw=THIN, zorder=2.7)
-AK = dict(color="k", lw=THIN, ls=":", zorder=2.7)
-MS = 2.8      # open markers
+REF = dict(color="k", lw=LW, zorder=2.7)
+AK = dict(color="k", lw=LW, ls=":", zorder=2.7)
+MS = 4.0      # filled markers of the cells in a zoom
+ERROR_LW, ERROR_MS = LW, 6.5  # the L1, error and throughput plots: heavy curves, filled markers
 LABEL = 10    # letters and labels inside panels, as in LUNA's figures
 EDGE = "0.65"  # connectors
 CONNECTORS = []  # of the figure being drawn, figure coordinates
@@ -86,6 +93,8 @@ def save(fig, name):
     path = f"{OUT}/{name}.png"
     for ax in fig.axes:
         decorate(ax)
+        if ax.images:
+            ax.grid(False)
     overlaps(fig, name)
     fig.savefig(path)
     plt.close(fig)
@@ -121,10 +130,10 @@ def line(ax, x, y, s, **over):
 
 
 def cells(ax, x, y, s, xlim, most=32):
-    """Actual cells in a window: small open markers, every cell while they stay apart."""
+    """Actual cells in a window: small filled markers, every cell while they stay apart."""
     k = STYLE[s]
     keep = (x >= xlim[0]) & (x <= xlim[1])
-    ax.plot(x[keep], y[keep], color=k["color"], ls=k["ls"], lw=THIN, zorder=k["zorder"], marker=k["marker"], ms=MS, mew=0.6, mfc="white",
+    ax.plot(x[keep], y[keep], color=k["color"], ls=k["ls"], lw=LW, zorder=k["zorder"], marker=k["marker"], ms=MS, mew=0, mfc=k["color"],
             markevery=max(1, keep.sum() // most))
 
 
@@ -134,7 +143,8 @@ def corner(ax, text, x=0.04, y=0.95, ha="left", va="top"):
 
 def key(s, label, marker=False):
     k = STYLE[s]
-    return plt.Line2D([], [], color=k["color"], ls=k["ls"], lw=k["lw"], marker=k["marker"] if marker else None, ms=MS, mfc="none", label=label)
+    return plt.Line2D([], [], color=k["color"], ls=k["ls"], lw=ERROR_LW if marker else k["lw"], marker=k["marker"] if marker else None,
+                      ms=ERROR_MS + (1.5 if s == "static" else 0), mfc=k["color"], label=label)
 
 
 def rkey(label, kw=REF):
@@ -143,7 +153,8 @@ def rkey(label, kw=REF):
 
 def loglog(ax, x, y, s, **over):
     k = STYLE[s]
-    style = dict(color=k["color"], ls=k["ls"], lw=k["lw"], marker=k["marker"], ms=MS, mew=0.6, mfc="none", zorder=k["zorder"])
+    style = dict(color=k["color"], ls=k["ls"], lw=ERROR_LW, marker=k["marker"], ms=ERROR_MS + (1.5 if s == "static" else 0),
+                 mec=k["color"], mfc=k["color"], zorder=1.9 if s == "static" else k["zorder"])  # static under LUNA: its squares show round LUNA's circles
     style.update(over)
     ax.plot(x, y, **style)
 
@@ -475,7 +486,7 @@ def fig_vortex():
     nx = (32, 64, 128, 256)
     for i, ax, ylabel, v in ((0, axes[0], r"$L_1(\rho)$", "rho"), (1, axes[1], r"$L_1(v)$", "v")):
         log_axes(ax)
-        ax.plot(nx, [rows["sta", n][1][i] for n in nx], color="k", ls=":", lw=THIN, zorder=1)
+        ax.plot(nx, [rows["sta", n][1][i] for n in nx], color="k", ls=":", lw=LW, zorder=1)
         for q, over in ((8, dict()), (1, dict(ls="--"))):
             s = pick & (d["ic_quad"] == q)
             o = np.argsort(d["nx"][s])
@@ -487,9 +498,9 @@ def fig_vortex():
         ax.set_xlim(26, 310)
         ax.set_xlabel(r"$n_x$")
         ax.set_ylabel(ylabel)
-    axes[0].legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=LW, marker="o", ms=MS, mfc="none", label="LUNA MC, point start"),
+    axes[0].legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=ERROR_LW, marker="o", ms=ERROR_MS, label="LUNA MC, point start"),
                             key("static", "static", True), key("moving", "moving, one pass", True), key("two", "moving, two passes", True),
-                            rkey(r"$O(h)$ floor", dict(color="k", ls=":", lw=THIN))], **LEGEND, ncol=2)
+                            rkey(r"$O(h)$ floor", dict(color="k", ls=":", lw=LW))], **LEGEND, ncol=2)
     axes[0].set_ylim(top=axes[0].get_ylim()[1] * 9)
     save(fig, "vortex_3d")
 
@@ -516,55 +527,65 @@ def fig_kh():
 
 
 def kh_field(kind, t, n, m):
-    """Density on an m x m lattice, [x, y]: LUNA's cells, or the Voronoi cells of a run by nearest generator (periodic)."""
+    """Density on an m x m lattice, [x, y]: LUNA's cell values; ours, each pixel its nearest cell (periodic) plus the run's limited
+    gradient from the centroid, the linear reconstruction of the scheme, as AREPO's images."""
     if kind == "luna":
         rho = np.load(f"{KH_FIELDS}/field_luna_t{t}_{n}.npz")["rho"]
         return rho if rho.shape[0] == m else rho.repeat(m // rho.shape[0], 0).repeat(m // rho.shape[0], 1)
     rows = np.fromfile(f"{KH_FIELDS}/field_{kind}_t{t}_{n}.bin").reshape(-1, 7)
+    gradient = np.fromfile(f"{KH_FIELDS}/field_{kind}_t{t}_{n}.grad.bin").reshape(-1, 2)
     at = (np.arange(m) + 0.5) / m
     x, y = np.meshgrid(at, at, indexing="ij")
-    return rows[cKDTree(rows[:, :2] % 1.0, boxsize=1.0).query(np.c_[x.ravel(), y.ravel()])[1], 5].reshape(m, m)
+    pixels = np.c_[x.ravel(), y.ravel()]
+    near = cKDTree(rows[:, :2] % 1.0, boxsize=1.0).query(pixels, workers=-1)[1]
+    d = (pixels - rows[near, 2:4] + 0.5) % 1.0 - 0.5  # from the centroid, periodic
+    return (rows[near, 5] + (gradient[near] * d).sum(1)).reshape(m, m)
 
 
 def fig_kh_density():
-    """Density maps at two times, one colour scale; a zoom on a roll-up; the difference from LUNA at the finest N."""
+    """Density maps by time, one colour scale; a zoom on a roll-up; the difference from LUNA at the finest N."""
     n, fine = 1024, 2048
     window = KH_WINDOW
-    fig, axes = plt.subplots(3, 4, figsize=(WIDTH, WIDTH * 0.76), gridspec_kw=dict(wspace=0.05, hspace=0.07))
+    times = ("1.0", "1.5", "2.5", "3.0")
+    last = len(times)
+    fig, axes = plt.subplots(last + 1, 4, figsize=(WIDTH, WIDTH * 0.76 * (last + 1) / 3), gridspec_kw=dict(wspace=0.05, hspace=0.07))
     names = (("luna", "LUNA MC"), ("static", "static"), ("moving", "moving"))
     limit = 0.0
-    panels = "abcdefghijkl"
-    for r, t in enumerate(("1.0", "1.5")):
+    panels = "abcdefghijklmnopqrst"
+    for r, t in enumerate(times):
         ref = kh_field("luna", t, fine, fine)
         for c, (kind, name) in enumerate(names):
             ax = axes[r, c]
             rho = kh_field(kind, t, n, 2 * n if kind != "luna" else n)
             image = ax.imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="viridis", vmin=1, vmax=2, interpolation="nearest")
             corner(ax, f"({panels[4 * r + c]}) {name}, $t = {t}$", y=0.97)
-            if r == 1:
-                axes[2, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="viridis", vmin=1, vmax=2, interpolation="nearest")
-                axes[2, c].set_xlim(*window[0])
-                axes[2, c].set_ylim(*window[1])
-                corner(axes[2, c], f"({panels[8 + c]}) {name}", y=0.97)
+            if t == "1.5":
+                if kind == "moving":
+                    kh_voronoi(axes[last, c], np.fromfile(f"{KH_FIELDS}/field_moving_t{t}_{n}.bin").reshape(-1, 7), window, "k", 0.05)
+                else:
+                    axes[last, c].imshow(rho.T, origin="lower", extent=(0, 1, 0, 1), cmap="viridis", vmin=1, vmax=2, interpolation="nearest")
+                axes[last, c].set_xlim(*window[0])
+                axes[last, c].set_ylim(*window[1])
+                corner(axes[last, c], f"({panels[4 * last + c]}) {name}, $t = 1.5$", y=0.97)
                 mark(ax, window[0], window[1], "")
                 to_fig = fig.transFigure.inverted()
                 for x, side in ((window[0][0], 0), (window[0][1], 1)):
-                    fig.add_artist(ConnectionPatch(xyA=(x, window[1][0]), coordsA=ax.transData, xyB=(side, 1), coordsB=axes[2, c].transAxes,
+                    fig.add_artist(ConnectionPatch(xyA=(x, window[1][0]), coordsA=ax.transData, xyB=(side, 1), coordsB=axes[last, c].transAxes,
                                                    color=EDGE, lw=0.6, clip_on=False, zorder=10))
                     CONNECTORS.append((to_fig.transform(ax.transData.transform((x, window[1][0]))),
-                                       to_fig.transform(axes[2, c].transAxes.transform((side, 1)))))
+                                       to_fig.transform(axes[last, c].transAxes.transform((side, 1)))))
         moving = kh_field("moving", t, n, fine)
         difference = moving - ref
         limit = max(limit, float(np.percentile(np.abs(difference), 99.9)))
         DIFF[t] = difference
-    for r, t in enumerate(("1.0", "1.5")):
+    for r, t in enumerate(times):
         ax = axes[r, 3]
         delta = ax.imshow(DIFF[t].T, origin="lower", extent=(0, 1, 0, 1), cmap="RdBu_r", vmin=-limit, vmax=limit, interpolation="nearest")
-        corner(ax, f"({panels[4 * r + 3]}) moving $-$ LUNA {fine}", y=0.97)
-    bottom = axes[2, 3]
+        corner(ax, f"({panels[4 * r + 3]}) moving $-$ LUNA {fine}, sampled", y=0.97)
+    bottom = axes[last, 3]
     static = kh_field("static", "1.5", n, fine) - kh_field("luna", "1.5", fine, fine)
     bottom.imshow(static.T, origin="lower", extent=(0, 1, 0, 1), cmap="RdBu_r", vmin=-limit, vmax=limit, interpolation="nearest")
-    corner(bottom, f"(l) static $-$ LUNA {fine}", y=0.97)
+    corner(bottom, f"({panels[4 * last + 3]}) static $-$ LUNA {fine}, $t = 1.5$", y=0.97)
     for ax in axes.flat:
         ax.grid(False)
         ax.set_xticks([])
@@ -624,9 +645,311 @@ def fig_sedov():
     b.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
     b.set_xlabel(r"$n$")
     b.set_ylabel(r"$L_1(\rho)$")
-    b.legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=LW, marker="o", ms=MS, mfc="none", label="LUNA minmod"),
+    b.legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=ERROR_LW, marker="o", ms=ERROR_MS, label="LUNA minmod"),
                       key("static", "static", True), key("moving", "moving", True), rkey("Sedov-Taylor", REF)], **LEGEND)
     save(fig, "sedov_3d")
+
+
+KPC, MSUN, YEAR, PC, MP, KB = 3.08568e21, 1.98892e33, 3.15576e7, 3.08568e18, 1.67262e-24, 1.38065e-16
+UNIT_T, UNIT_RHO, UNIT_P = KPC / 1e5, 1e10 * MSUN / KPC ** 3, 1e10 * MSUN / (KPC * (KPC / 1e5) ** 2)
+BOX = 0.05  # kpc
+RUNS_3D = {"moving": "moving, two passes", "static": "static", "luna": "LUNA MC"}
+SIDE = 256
+
+
+def sedov_files(run):
+    return sorted(glob.glob(f"{SEDOV_256}/{run}_{SIDE}/snapdir_*/*.hdf5"))
+
+
+def sedov_cells(path):
+    """Position (kpc, from the box corner), volume, density, velocity, pressure, time of a snapshot; ours Voronoi, LUNA's grid."""
+    with h5py.File(path, "r") as f:
+        c = f["cells"]
+        rho = np.asarray(c["density"][...], float)
+        v = np.stack([np.asarray(c[f"velocity_{a}"][...], float).ravel() for a in "xyz"])
+        P = np.asarray(c["pressure"][...], float).ravel()
+        t = float(c.attrs["time"])
+        if "x" in c:
+            pos, vol = np.stack([c[a][...] for a in "xyz"]).astype(float), np.asarray(c["volume"][...], float)
+        else:
+            n = rho.shape[0]
+            g = (np.arange(n) + 0.5) * BOX / n
+            X, Y, Z = np.meshgrid(g, g, g, indexing="ij")
+            pos, vol = np.stack([X.ravel(), Y.ravel(), Z.ravel()]), np.full(n ** 3, (BOX / n) ** 3)
+    return pos, vol, rho.ravel(), v, P, t
+
+
+def sedov_profiles(run):
+    """Volume-weighted shells about the box centre, n_x / 2 bins out to the corner (LUNA's radial_profile), per snapshot; cached."""
+    cache = f"{SEDOV_256}/profiles_{run}.npz"
+    if not os.path.exists(cache):
+        edges = np.linspace(0, np.sqrt(3) * BOX / 2, SIDE // 2 + 1)
+        rows = []
+        for path in sedov_files(run):
+            pos, vol, rho, v, P, t = sedov_cells(path)
+            d = pos - BOX / 2
+            r = np.sqrt((d ** 2).sum(0))
+            weight = np.maximum(np.histogram(r, edges, weights=vol)[0], 1e-300)
+            shell = lambda f: np.histogram(r, edges, weights=f * vol)[0] / weight  # noqa: E731
+            rows.append((t, shell(rho), shell((v * d).sum(0) / np.maximum(r, 1e-30)), shell(P)))
+        np.savez(cache, r=0.5 * (edges[1:] + edges[:-1]), t=[x[0] for x in rows], rho=[x[1] for x in rows], vr=[x[2] for x in rows], P=[x[3] for x in rows])
+    return np.load(cache)
+
+
+def sedov_column(run, m=2 * SIDE, samples=4 * SIDE):
+    """Column density along z on m^2 rays, g cm^-2. LUNA: its cell values summed along z, as its own figure. Ours: midpoint rule with
+    `samples` points along each ray, each point in its nearest cell (the Voronoi cell the ray crosses) with the run's limited
+    gradient from the centroid, the linear reconstruction in cells as in AREPO's projections. Cached."""
+    cache = f"{SEDOV_256}/column_{run}.npz"
+    if not os.path.exists(cache):
+        pos, _, rho, _, _, _ = sedov_cells(sedov_files(run)[-1])
+        if run == "luna":
+            n = round(rho.size ** (1 / 3))
+            column = rho.reshape(n, n, n).sum(axis=2) * BOX / n * UNIT_RHO * KPC
+            column = column.repeat(m // n, 0).repeat(m // n, 1)
+        else:
+            extra = np.fromfile(f"{SEDOV_256}/{run}_{SIDE}/gradients.bin").reshape(-1, 6)
+            centroid, gradient = (pos.T + extra[:, :3]), extra[:, 3:]
+            h = BOX / m
+            g = (np.arange(m) + 0.5) * h
+            tree = cKDTree(pos.T % BOX, boxsize=BOX)
+            X, Y = np.meshgrid(g, g, indexing="ij")
+            total = np.zeros((m, m))
+            for z in (np.arange(samples) + 0.5) * BOX / samples:
+                at = np.stack([X.ravel(), Y.ravel(), np.full(m * m, z)], axis=1)
+                near = tree.query(at, workers=-1)[1]
+                d = (at - centroid[near] + BOX / 2) % BOX - BOX / 2
+                total += (rho[near] + (gradient[near] * d).sum(1)).reshape(m, m)
+            column = total * BOX / samples * UNIT_RHO * KPC
+        np.savez(cache, column=column)
+    return np.load(cache)["column"]
+
+
+def fig_sedov_shock():
+    prof = {run: sedov_profiles(run) for run in ("moving", "luna")}
+    rho0, e0 = MP / UNIT_RHO, 1e51 / (1e10 * MSUN * 1e10)
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 2.2))
+    outer = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.2)
+    top = outer[0].subgridspec(1, 2, wspace=0.22)
+    a, b = fig.add_subplot(top[0]), fig.add_subplot(top[1])
+    maps = outer[1].subgridspec(1, 3, wspace=0.34)
+    names = {"moving": (MOVING_C, "o-"), "luna": (LUNA_C, "o-")}
+    for run, (color, _) in names.items():
+        p = prof[run]
+        t = p["t"][1:] * UNIT_T / YEAR
+        peak = p["r"][p["rho"][1:].argmax(axis=1)] * KPC / PC
+        a.loglog(t, peak, color=color, marker="o", ms=ERROR_MS, lw=ERROR_LW, label=f"{RUNS_3D[run]}, peak-$\\rho$ location")
+    t_all = prof["luna"]["t"][1:]
+    t_line = np.geomspace(1, t_all[-1] * UNIT_T / YEAR, 200)
+    a.loglog(t_line, [exact_sedov.solution(np.array([0.0]), x * YEAR / UNIT_T, e0, rho0, 5 / 3)[3] * KPC / PC for x in t_line], color="0.5", lw=1.0,
+             label=rf"$R_s(t) = \xi (E t^2/\rho_0)^{{1/5}}$, $\xi$={exact_sedov.xi0(5 / 3):.2f}")
+    a.set_xlabel("t [yr]")
+    a.set_ylabel(r"$R_{shock}$ [pc]")
+    a.legend(loc="upper left", fontsize=LABEL)
+    r_fine = np.linspace(0.02, 25, 3000) * PC / KPC
+    pick = [i for i, t in enumerate(prof["luna"]["t"]) if i in (1, 2, 4, 7, 10)]
+    for i in pick:
+        t = prof["luna"]["t"][i]
+        rho, _, _, R = exact_sedov.solution(r_fine, t, e0, rho0, 5 / 3)
+        b.semilogy(r_fine * KPC / PC, np.maximum(rho, 1e-300) * UNIT_RHO / MP, **REF)
+        for run, (color, _) in names.items():
+            b.semilogy(prof[run]["r"] * KPC / PC, prof[run]["rho"][i] * UNIT_RHO / MP, color=color, lw=LW)
+        b.text(R * KPC / PC, 4.6, f"{t * UNIT_T / YEAR / 1e3:.0f}", ha="center", fontsize=LABEL)
+    b.set_xlim(0, 16)
+    b.set_ylim(1e-3, 12)
+    b.set_xlabel("r [pc]")
+    b.set_ylabel(r"n [cm$^{-3}$]")
+    b.legend(handles=[plt.Line2D([], [], color=MOVING_C, lw=LW, label=RUNS_3D["moving"]), plt.Line2D([], [], color=LUNA_C, lw=LW, label=RUNS_3D["luna"]), rkey("Sedov-Taylor", REF)],
+             loc="lower right", fontsize=LABEL)
+    corner(b, r"$t$ [$10^3$ yr] above each shock", 0.03, 0.05, va="bottom")
+    ours, theirs = sedov_column("moving"), sedov_column("luna")
+    lo, hi = min(ours.min(), theirs.min()), max(ours.max(), theirs.max())
+    L = BOX * KPC / PC
+    panels = [("moving, two passes", ours, dict(cmap="magma", vmin=lo, vmax=hi)), ("LUNA MC", theirs, dict(cmap="magma", vmin=lo, vmax=hi)),
+              ("moving $-$ LUNA", ours - theirs, dict(cmap="RdBu_r", vmin=-abs(ours - theirs).max(), vmax=abs(ours - theirs).max()))]
+    axes = [fig.add_subplot(maps[i]) for i in range(3)]
+    for ax, (label, field, kw) in zip(axes, panels):
+        im = ax.imshow(field.T, origin="lower", extent=(0, L, 0, L), aspect="equal", **kw)
+        ax.set_xlabel("x [pc]")
+        ax.set_ylabel("y [pc]")
+        corner(ax, label, 0.03, 0.97)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03, label=r"$\Sigma$ [g cm$^{-2}$]")
+    save(fig, "sedov3d_shock")
+
+
+def fig_sedov_radial():
+    prof = {run: sedov_profiles(run) for run in RUNS_3D}
+    rho0, e0 = MP / UNIT_RHO, 1e51 / (1e10 * MSUN * 1e10)
+    t = prof["luna"]["t"][-1]
+    fig, axes = plt.subplots(2, 2, figsize=(WIDTH, FIGSIZE[1] * 1.8), gridspec_kw=dict(hspace=0.28, wspace=0.26))
+    r_fine = np.linspace(0.02, 25, 4000) * PC / KPC
+    rho, u, P, R = exact_sedov.solution(r_fine, t, e0, rho0, 5 / 3)
+    ex = dict(n=rho * UNIT_RHO / MP, v=u, P=P * UNIT_P)
+    style = {"moving": (MOVING_C, "-"), "static": (STATIC_C, "--"), "luna": (LUNA_C, "-")}
+    for run, (color, ls) in style.items():
+        p = prof[run]
+        r = p["r"] * KPC / PC
+        n, vr, Pc = p["rho"][-1] * UNIT_RHO / MP, p["vr"][-1], p["P"][-1] * UNIT_P
+        kw = dict(color=color, ls=ls, lw=LW, label=RUNS_3D[run])
+        axes[0, 0].plot(r, n, **kw)
+        axes[0, 1].plot(r, vr, **kw)
+        axes[1, 0].plot(r, Pc, **kw)
+        axes[1, 1].plot(r, Pc / np.maximum(n, 1e-30) / KB, **kw)
+    inside = r_fine < R
+    axes[0, 0].plot(r_fine[inside] * KPC / PC, ex["n"][inside], **REF, label="Sedov-Taylor")
+    axes[0, 1].plot(r_fine[inside] * KPC / PC, ex["v"][inside], **REF)
+    axes[1, 0].plot(r_fine[inside] * KPC / PC, ex["P"][inside], **REF)
+    meta = ((axes[0, 0], "n [cm$^{-3}$]", "log"), (axes[0, 1], r"$v_r$ [km s$^{-1}$]", "linear"), (axes[1, 0], "P [erg cm$^{-3}$]", "log"), (axes[1, 1], "T [K]", "log"))
+    for ax, ylabel, scale in meta:
+        ax.axvline(R * KPC / PC, color="0.5", lw=1.0, label=rf"$R_s$ analytic = {R * KPC / PC:.1f} pc" if ax is axes[0, 0] else None)
+        ax.set_xlim(0, 25)
+        ax.set_yscale(scale)
+        ax.set_xlabel("r [pc]")
+        ax.set_ylabel(ylabel)
+    axes[0, 0].legend(loc="lower right", fontsize=LABEL)
+    save(fig, "sedov3d_radial")
+
+
+def voronoi_polygons(points, values, window, margin=0.03):
+    """Exact Voronoi cells of periodic generators (unit box) touching a window, from scipy.spatial.Voronoi with periodic images: polygons and their values."""
+    (x0, x1), (y0, y1) = window
+    near, value = [], []
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            q = points % 1.0 + (dx, dy)
+            keep = (q[:, 0] > x0 - margin) & (q[:, 0] < x1 + margin) & (q[:, 1] > y0 - margin) & (q[:, 1] < y1 + margin)
+            near.append(q[keep])
+            value.append(values[keep])
+    near, value = np.concatenate(near), np.concatenate(value)
+    v = Voronoi(near)
+    polygons, colours = [], []
+    for i, region in enumerate(v.point_region):
+        ring = v.regions[region]
+        if not ring or -1 in ring:
+            continue
+        p = v.vertices[ring]
+        if p[:, 0].max() > x0 and p[:, 0].min() < x1 and p[:, 1].max() > y0 and p[:, 1].min() < y1:
+            polygons.append(p)
+            colours.append(value[i])
+    return near, polygons, np.array(colours)
+
+
+def cell_collection(ax, polygons, colours, edge=None, lw=0.0, **kw):
+    """Cells as polygons, coloured by density, thin edges or none."""
+    cells = PolyCollection(polygons, array=colours, edgecolors=edge if edge else "face", linewidths=lw if edge else 0.15, **kw)
+    ax.add_collection(cells)
+    return cells
+
+
+def kh_voronoi(ax, rows, window, edge=None, lw=0.0):
+    _, polygons, colours = voronoi_polygons(rows[:, :2], rows[:, 5], window)
+    cell_collection(ax, polygons, colours, edge, lw, cmap="viridis", norm=matplotlib.colors.Normalize(1, 2))
+    ax.set_xlim(*window[0])
+    ax.set_ylim(*window[1])
+    ax.set_aspect("equal")
+
+
+def kh_mesh_panel(ax, t, window, dots=False):
+    rows = np.fromfile(f"{SEDOV_256}/kh_mesh512_t{t}.bin").reshape(-1, 7)
+    near, polygons, colours = voronoi_polygons(rows[:, :2], rows[:, 5], window)
+    image = cell_collection(ax, polygons, colours, "k", 0.4 if dots else 0.12, cmap="viridis", norm=matplotlib.colors.Normalize(1, 2))
+    if dots:
+        ax.plot(*near.T, ls="none", marker=".", ms=1.8, color="k", zorder=3)
+    ax.set_xlim(*window[0])
+    ax.set_ylim(*window[1])
+    ax.set_aspect("equal")
+    return image
+
+
+def fig_kh_mesh():
+    times = ("0", "1.0", "1.5", "2.5", "3.0")
+    window = KH_WINDOW
+    inner = ((0.36, 0.46), (0.20, 0.30))
+    fig, axes = plt.subplots(2, 3, figsize=(WIDTH, WIDTH * 0.72), gridspec_kw=dict(wspace=0.05, hspace=0.05))
+    for ax, t, letter in zip(axes.flat, times, "abcde"):
+        image = kh_mesh_panel(ax, t, window)
+        corner(ax, f"({letter}) $t = {t}$", y=0.97)
+    zoom_ax = axes[1, 2]
+    kh_mesh_panel(zoom_ax, "1.5", inner, dots=True)
+    corner(zoom_ax, "(f) inside the roll-up, $t = 1.5$", y=0.97)
+    mark(axes[0, 2], inner[0], inner[1], "")
+    to_fig = fig.transFigure.inverted()
+    for x, side in ((inner[0][0], 0), (inner[0][1], 1)):
+        fig.add_artist(ConnectionPatch(xyA=(x, inner[1][0]), coordsA=axes[0, 2].transData, xyB=(side, 1), coordsB=zoom_ax.transAxes, color=EDGE, lw=0.6, clip_on=False, zorder=10))
+        CONNECTORS.append((to_fig.transform(axes[0, 2].transData.transform((x, inner[1][0]))), to_fig.transform(zoom_ax.transAxes.transform((side, 1)))))
+    for ax in axes.flat:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.minorticks_off()
+    fig.colorbar(image, ax=axes.ravel().tolist(), location="bottom", fraction=0.03, pad=0.02, aspect=50, label=r"$\rho$")
+    save(fig, "kh_2d_mesh")
+
+
+def plane_cells(run, window, pad=3.0):
+    """Sections of the 3D Voronoi cells by the plane z = 25 pc, exact: scipy.spatial.Voronoi on the generators within pad pc of the window,
+    each ridge cut by the plane gives one edge of both its cells. Polygons in pc, n in cm^-3, generators near the plane."""
+    pos, _, rho, _, _, _ = sedov_cells(sedov_files(run)[-1])
+    p = pos * KPC / PC
+    (x0, x1), (y0, y1) = window
+    keep = (p[0] > x0 - pad) & (p[0] < x1 + pad) & (p[1] > y0 - pad) & (p[1] < y1 + pad) & (abs(p[2] - 25) < pad)
+    p, n = p[:, keep].T, rho[keep] * UNIT_RHO / MP
+    v = Voronoi(p)
+    edges = defaultdict(list)
+    for (a, b), ridge in zip(v.ridge_points, v.ridge_vertices):
+        if -1 in ridge:
+            continue
+        q = v.vertices[ridge]
+        z = q[:, 2] - 25
+        if z.min() >= 0 or z.max() <= 0:
+            continue
+        i, j = np.where(z > 0)[0], np.where(z <= 0)[0]
+        s_ = z[i][:, None] / (z[i][:, None] - z[j][None, :])
+        cut = (q[i][:, None, :2] + s_[:, :, None] * (q[j][None, :, :2] - q[i][:, None, :2])).reshape(-1, 2)
+        axis = cut - cut.mean(0)
+        along = axis @ np.linalg.svd(axis, full_matrices=False)[2][0]
+        ends = cut[[along.argmin(), along.argmax()]]
+        edges[a].append(ends)
+        edges[b].append(ends)
+    polygons, colours = [], []
+    for cell, parts in edges.items():
+        c = np.concatenate(parts)
+        if c[:, 0].max() < x0 or c[:, 0].min() > x1 or c[:, 1].max() < y0 or c[:, 1].min() > y1:
+            continue
+        mid = c.mean(0)
+        polygons.append(c[np.argsort(np.arctan2(c[:, 1] - mid[1], c[:, 0] - mid[0]))])
+        colours.append(n[cell])
+    return polygons, np.array(colours), p[abs(p[:, 2] - 25) < 0.5 * 50 / SIDE]
+
+
+def fig_sedov_mesh():
+    box, shell = ((25, 41), (17, 33)), ((34.5, 39.5), (22.5, 27.5))
+    fig, axes = plt.subplots(1, 3, figsize=(WIDTH, WIDTH * 0.36), gridspec_kw=dict(wspace=0.06))
+    norm = matplotlib.colors.LogNorm(1e-2, 5)
+    polygons, colours, _ = plane_cells("moving", box)
+    image = cell_collection(axes[0], polygons, colours, cmap="magma", norm=norm)
+    axes[0].set_xlim(*box[0])
+    axes[0].set_ylim(*box[1])
+    axes[0].set_aspect("equal")
+    corner(axes[0], "(a) moving, $z = 25$ pc", y=0.97)
+    for ax, run, label in ((axes[1], "moving", "(b) moving, two passes"), (axes[2], "static", "(c) static")):
+        polygons, colours, p = plane_cells(run, shell, 1.5)
+        cell_collection(ax, polygons, colours, "white", 0.3, cmap="magma", norm=norm)
+        ax.plot(p[:, 0], p[:, 1], ls="none", marker=".", ms=1.5, color="k", zorder=3)
+        ax.set_xlim(*shell[0])
+        ax.set_ylim(*shell[1])
+        ax.set_aspect("equal")
+        corner(ax, label, y=0.97)
+    mark(axes[0], shell[0], shell[1], "")
+    to_fig = fig.transFigure.inverted()
+    for y, side in ((shell[1][0], 0), (shell[1][1], 1)):
+        fig.add_artist(ConnectionPatch(xyA=(shell[0][1], y), coordsA=axes[0].transData, xyB=(0, side), coordsB=axes[1].transAxes, color=EDGE, lw=0.6, clip_on=False, zorder=10))
+    for ax in axes:
+        ax.set_xlabel("x [pc]")
+    axes[0].set_ylabel("y [pc]")
+    axes[1].tick_params(labelleft=False)
+    axes[2].tick_params(labelleft=False)
+    fig.colorbar(image, ax=axes.ravel().tolist(), location="right", fraction=0.02, pad=0.015, label=r"n [cm$^{-3}$]")
+    save(fig, "sedov3d_mesh")
 
 
 def scaling_log():
@@ -658,7 +981,7 @@ def fig_throughput():
     sides = sorted(k for k in {k[0] for k in ours} if k >= 32)
     x = [ours[s, "static"]["n"] for s in sides]
     fig, (top, low) = plt.subplots(2, 1, figsize=(WIDTH, FIGSIZE[1] * 1.45), sharex=True, gridspec_kw=dict(height_ratios=(3, 1.25), hspace=0))
-    style = dict(lw=LW, ms=MS + 1, mew=0.8, mfc="none")
+    style = dict(lw=ERROR_LW, ms=ERROR_MS)
     curves = (("static", "hydro", STATIC_C, "-", "s", "hydro, static"), ("two-pass", "hydro", MOVING_C, ":", "^", "hydro, two passes"),
               ("two-pass", "mesh", "0.5", "-", "v", "mesh only"), ("one-pass", "step", MOVING_C, "--", "o", "whole moving step, one pass"),
               ("two-pass", "step", MOVING_C, "-", "D", "whole moving step, two passes"))
@@ -675,7 +998,7 @@ def fig_throughput():
     TEXTS.append(top.text(32 ** 3, 1.1, "L2 to DRAM", ha="center", fontsize=LABEL))
     top.legend(loc="lower left", bbox_to_anchor=(0, 1.01), ncol=3, fontsize=LABEL, borderaxespad=0, columnspacing=1.5)
     low.loglog(x, [ours[s, "two-pass"]["gpu_MB"] / 1e3 for s in sides], color=MOVING_C, marker="D", label="ours, two passes, GPU in use", **style)
-    low.loglog(x, [ours[s, "two-pass"]["views_MB"] / 1e3 for s in sides], color=MOVING_C, ls="--", marker="D", label="ours, Kokkos views", **style)
+    low.loglog(x, [ours[s, "two-pass"]["views_MB"] / 1e3 for s in sides], color=MOVING_C, ls="--", marker="D", mfc="white", label="ours, Kokkos views", **style)
     kept = [s for s in shown if memory[s] >= 10]  # LUNA prints two decimals of a GB
     low.loglog([s ** 3 for s in kept], [memory[s] / 1e3 for s in kept], color=LUNA_C, marker="o", label="LUNA, reported", **style)
     low.axhline(42.4, color="0.6", lw=0.8, ls=":")  # the A100's memory
@@ -688,7 +1011,8 @@ def fig_throughput():
 
 
 FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_woodward_colella, "convergence_1d": fig_convergence,
-           "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput}
+           "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput,
+           "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "sedov3d_mesh": fig_sedov_mesh}
 
 
 def main():

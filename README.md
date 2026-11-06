@@ -150,7 +150,7 @@ passes): 128³ 0.0629, 0.0648; 256³ 0.0369, 0.0377 (research_notes/two_pass_202
 ![Kelvin-Helmholtz density](docs/figures/kh_2d_density.png)
 
 Density of the smooth Kelvin-Helmholtz test of McNally, Lyra & Passy (2012), N = 1024, at t = 1.0 and 1.5, one colour scale:
-LUNA MC, static, moving (two passes, Voronoi cells rasterised by nearest generator on 2048²), with a zoom on one roll-up, and
+LUNA MC, static, moving (two passes, the Voronoi cells drawn as exact polygons), with a zoom on one roll-up, and
 the differences from LUNA MC at N = 2048. All HLLC, FP64; LUNA Pallas, CFL 0.8; ours face limiter, per-face, LUNA's rule 0.8.
 One A100 at 1305 MHz, jobs 31952222 (t = 1.0), 31952223 (t = 1.5).
 
@@ -192,15 +192,15 @@ From `scripts/make_figures.py`, in LUNA's figure style (`scripts/figstyle.py`).
 
 ![Sod density](docs/figures/sod.png)
 
-Sod, t = 0.25, N = 512, cell means at centroids against the exact solution; the boxes mark the zooms, open markers are cells (static lies on LUNA, drawn dashed). Moving has the sharper contact and 2.5 times LUNA's error at the tail of the rarefaction (x = 0.48); the strip clips the contact and shock spikes. HLLC, MUSCL-Hancock, FP64; LUNA: MC, Pallas, CFL 0.8; static: uniform points, face limiter, LUNA's time step rule at 0.8; moving: face limiter, the default rule at 0.4, regularised. Job 31917206, voronoi-cpp 947946a.
+Sod, t = 0.25, N = 512, cell means at centroids against the exact solution; the boxes mark the zooms, filled markers are cells (static lies on LUNA, drawn dashed). Moving has the sharper contact and 2.5 times LUNA's error at the tail of the rarefaction (x = 0.48); the strip clips the contact and shock spikes. HLLC, MUSCL-Hancock, FP64; LUNA: MC, Pallas, CFL 0.8; static: uniform points, face limiter, LUNA's time step rule at 0.8; moving: face limiter, the default rule at 0.4, regularised. Job 31917206, voronoi-cpp 947946a.
 
 ![Shu-Osher density](docs/figures/shu_osher.png)
 
-Shu-Osher, t = 1.8, N = 1024. LUNA and static on [-5, 5], job 31917208, 947946a, runs as for Sod. Moving on the domain [-15, 5], same cell width, default rule at 0.3 (0.4 was not run there), OpenMP, job 31920121, branch dim-1d-diag. Inflow on a moving mesh needs cells to be added at the wall, see [issue #3](https://github.com/Ulli1991/luna-cpp/issues/3); until then moving is shown on the padded domain. Zooms of the regions marked above, open markers a regular subset of the cells where they would touch. Curves: luna-reference-solutions 99a52d0, `luna/shu_osher/shu_osher_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/shu_osher/so_ppmx_rk4_16384.npz` (AthenaK c52f88f).
+Shu-Osher, t = 1.8, N = 1024. LUNA and static on [-5, 5], job 31917208, 947946a, runs as for Sod. Moving on the domain [-15, 5], same cell width, default rule at 0.3 (0.4 was not run there), OpenMP, job 31920121, branch dim-1d-diag. Inflow on a moving mesh needs cells to be added at the wall, see [issue #3](https://github.com/Ulli1991/luna-cpp/issues/3); until then moving is shown on the padded domain. Zooms of the regions marked above, filled markers a regular subset of the cells where they would touch. Curves: luna-reference-solutions 99a52d0, `luna/shu_osher/shu_osher_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/shu_osher/so_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
 ![Woodward-Colella density](docs/figures/woodward_colella.png)
 
-Woodward-Colella, t = 0.038, N = 2048, reflecting walls, shown from x = 0.4 (flat to its left); zooms on each contact and shock, open markers a regular subset of the cells where they would touch. Moving holds them in far fewer cells than LUNA, with an overshoot at x = 0.765. Job 31917210, 947946a, runs as for Sod. Curves: luna-reference-solutions 99a52d0, `luna/woodward_colella/woodward_colella_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/woodward_colella/a9_ppmx_rk4_16384.npz` (AthenaK c52f88f).
+Woodward-Colella, t = 0.038, N = 2048, reflecting walls, shown from x = 0.4 (flat to its left); zooms on each contact and shock, filled markers a regular subset of the cells where they would touch. Moving holds them in far fewer cells than LUNA, with an overshoot at x = 0.765. Job 31917210, 947946a, runs as for Sod. Curves: luna-reference-solutions 99a52d0, `luna/woodward_colella/woodward_colella_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/woodward_colella/a9_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
 ![Field L1 by N](docs/figures/convergence_1d.png)
 
