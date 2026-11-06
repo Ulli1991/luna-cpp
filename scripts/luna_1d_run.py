@@ -1,7 +1,7 @@
 """LUNA's 1D tests (Sod-Shock, Shu-Osher, Woodward-Colella) at LUNA's settings, timed.
 
 Run with LUNA's environment, LUNA's src on the path, outside LUNA's tree:
-    python luna_1d_run.py <sod|shu-osher|woodward-colella> <N> <hllc|hll> <out.npz> [LIMITER=1] [CFL=0.8] [steps=0]
+    python luna_1d_run.py <sod|shu-osher|titarev-toro|woodward-colella> <N> <hllc|hll> <out.npz> [LIMITER=1] [CFL=0.8] [steps=0]
         [kernel=auto] [repeats=2] [series=luna] [max_s=0] [resume=<state.npz>]
 
 Setups as LUNA's tests: Sod = Toro test 1 from the exact cell averages
@@ -45,6 +45,7 @@ G = 1.4
 SETUPS = {
     "sod": dict(test_problem="Sod-Shock", Lx=1.0, BOUNDARY=1, t_end=0.25),
     "shu-osher": dict(test_problem="Shu-Osher", Lx=10.0, BOUNDARY=1, t_end=1.8),
+    "titarev-toro": dict(test_problem="Titarev-Toro", Lx=10.0, BOUNDARY=1, t_end=5.0),
     "woodward-colella": dict(test_problem="Woodward-Colella", Lx=1.0, BOUNDARY=2, t_end=0.038),
 }
 

@@ -1,6 +1,6 @@
 // LUNA's 1D tests on the 1D Voronoi mesh (hydro::FiniteVolume<1>), timed.
 //
-//   hydro_1d <sod|shu-osher|woodward-colella> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]
+//   hydro_1d <sod|shu-osher|titarev-toro|woodward-colella> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]
 //            [--dt=luna|arepo|fixed] [--courant=<c>] [--fixed-dt=<dt>] [--jitter=<spacings>]
 //            [--limiter=face|cell|none] [--steps=<max>] [--repeats=<r>] [--phases] [--memory]
 //            [--no-regularise] [--unfused] [--inflow-spacing=<spacings>] [--out=<file.npy>] [--series=<name>]
@@ -9,7 +9,8 @@
 // Sod (Toro 1: (1, 0, 1) | (0.125, 0, 0.1) at 0.5 on [0, 1], t = 0.25,
 // zero-gradient walls), Shu-Osher (LEFT = (3.857143, 2.629369, 10.33333)
 // for x < -4, (1 + 0.2 sin 5x, 0, 1) beyond, on [-5, 5], t = 1.8,
-// zero-gradient walls), Woodward-Colella (rho = 1, u = 0, p = 1000 | 0.01
+// zero-gradient walls), Titarev-Toro (the same with (1.515695, 0.523346, 1.805)
+// for x < -4.5, 1 + 0.1 sin 20 pi x, t = 5), Woodward-Colella (rho = 1, u = 0, p = 1000 | 0.01
 // | 100 split at 0.1 and 0.9 on [0, 1], t = 0.038, reflective walls);
 // gamma 1.4. Every cell starts from the exact average of the initial state
 // over its own interval (LUNA's: cell averages over its uniform cells;
@@ -216,7 +217,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
 int main(int argc, char* argv[]) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     if (argc < 3) {
-        std::cerr << "usage: hydro_1d <sod|shu-osher|woodward-colella> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
+        std::cerr << "usage: hydro_1d <sod|shu-osher|titarev-toro|woodward-colella> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|cell|none]"
                      " [--steps=max] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--inflow-spacing=s] [--out=file.npy] [--series=name]\n";
         return 1;
