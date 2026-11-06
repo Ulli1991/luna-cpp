@@ -57,7 +57,7 @@ KH_FIELDS = os.environ.get("KH_FIELDS", f"{RUNS}/build-2d/runs")  # field_* of d
 SEDOV = f"{RUNS}/build-limiters/sedov"
 SEDOV_L1 = f"{RUNS}/build-limiters/sedov_l1.json"
 SEDOV_LADDER = f"{RUNS}/build-metric"
-SEDOV_256 = os.environ.get("LUNA_SEDOV_RUNS", "/ptmp/uli/luna-cpp-sedov")  # moving, static, LUNA at 256^3, snapshots every 1000 yr
+SEDOV_256 = os.environ.get("LUNA_SEDOV_RUNS", f"{RUNS}/sedov_256")  # moving, static, LUNA at 256^3, snapshots every 1000 yr
 PRECISION = f"{RUNS}/build-roofline/logs/ladder-31953468.out"  # scripts/profile_a100.sh ladder on branch roofline, e90a913, 1305 MHz
 SCALING = f"{RUNS}/build-roofline/logs/roof-31928911.out"  # scripts/roofline_a100.sh on branch roofline, job 31928911
 
