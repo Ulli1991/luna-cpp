@@ -1,14 +1,7 @@
 #!/bin/bash
 # The 2D hydro on one A100. From the repository root:
 #   sbatch --export=ALL,REPO=$PWD,BUILD=<build dir> -o <logs>/dim2d-%j.out scripts/dim2d_a100.sh <mode> [args]
-# Modes:
-#   build            configure if needed, build wide (18 CPUs), ctest
-#   kh <N> [...]     KH at N = each: LUNA (MC, HLLC, CFL 0.8, Pallas), ours static and moving (LUNA's rule 0.8)
-#   all <targets>    build, the 2D test
-#   khbulk <u> <N>.. KH with a bulk velocity u along x
-#   khfield <t> <N>.. density fields at time t: LUNA (N^2), static, moving (two passes), runs/field_*
-#   run <command...> anything, with our modules, the binaries of $BIN (a copy of the build) on PATH
-# The clock and the node go into the log (nvidia-smi, one line per 5 s, into BUILD/runs/clock-<job>.csv).
+# Modes are the cases below; the clock and the node go into BUILD/runs/clock-<job>.csv.
 #SBATCH -J dim2d
 #SBATCH -p gpu1,gpudev
 #SBATCH --gres=gpu:a100:1

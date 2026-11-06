@@ -9,11 +9,7 @@
 #include <string>
 #include <vector>
 
-// 3D problems with an exact solution, gamma 1.4, shared by hydro_wave3d and the test `hydro_wave`.
-//   sound:  a right-going linear wave along x (c = 1), [0, 1) x [0, 1/4)^2, nx * nx/4 * nx/4 cells, t = 1, one period
-//   simple: the exact isentropic simple wave of hydro_1d along x, the same box, t = 0.2
-//   vortex: Yee's isentropic vortex (beta 5) in [-5, 5)^2 x [0, 2.5), nx * nx * nx/4 cells, t = 10; a steady state
-//   tube:   periodic Sod, left state in [0.5, 1.5) of [0, 2) x [0, 1/4)^2, 2 nx * nx/4 * nx/4 cells, t = 0.25
+// 3D problems with an exact solution, gamma 1.4: sound, simple, vortex, tube; boxes and end times: docs/design.md.
 namespace hydro {
 
 constexpr double wave_gamma = 1.4;

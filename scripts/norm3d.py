@@ -2,15 +2,7 @@
 
     python norm3d.py <vortex|simple|tube> <file.npy> <nx> [subdivision] [--t=t] [--amp=a]
 
-A regular grid of `subdivision` points per lattice spacing is assigned to the nearest generator (the Voronoi cell, periodic).
-Columns, L1 of rho, |v - v_exact|, P, V or sample weighted:
-  gen     cell value against the exact value at the generator (the wrong place; first order on a moving mesh)
-  cen     against the exact value at the centroid (what l1_3d.py prints)
-  avg     against the exact average over the cell (LUNA's cell-average table): exact(centroid) + mean over the cell's samples of exact
-          minus exact at the samples' mean, so that the samples' error in the centroid cancels
-  field0  piecewise constant field against the exact field, sample mean (O(h) even for exact averages)
-  exact0  the same with the exact averages as the field: the floor of field0
-  field1  W_i + g_i (x - c_i), g_i unlimited least squares over the 12 nearest centroids
+Columns, L1 of rho, |v - v_exact|, P: gen, cen, avg, field0, exact0, field1 (cell value or field against the exact one).
 tube needs LUNA's exact Riemann solver on PYTHONPATH (luna.hydro.exact_riemann).
 """
 import sys
@@ -20,7 +12,6 @@ from scipy.spatial import cKDTree
 
 G = 1.4
 a = dict(s[2:].split("=") for s in sys.argv[1:] if s.startswith("--") and "=" in s)
-a = {k[2:]: v for k, v in a.items()}
 pos = [s for s in sys.argv[1:] if not s.startswith("--")]
 problem, path, nx = pos[0], pos[1], int(pos[2])
 sub = int(pos[3]) if len(pos) > 3 else 4
@@ -144,5 +135,5 @@ for x0 in np.array_split(g_axes[0], max(1, g_axes[0].size // 16)):
     _, ids = tree.query(p.T, workers=-1)
     f0x += scalars(avg[:, ids] - exact(p)).sum(axis=1)
 fmt = lambda v: " ".join(f"{e:.3e}" for e in v)
-print(f"gen {fmt(line(W - exact(gen.T)))} | cen {fmt(line(W - exact(cen.T)))} | avg {fmt(line(W - avg))} | field0 {fmt(f0 / total)} | exact0 {fmt(f0x / total)} | field1 {fmt(f1 / total)}"
+print(f"gen {fmt(line(W - exact(gen.T)))} | cen {fmt(line(W - exact(cen.T)))} | avg {fmt(line(W - avg))} | linf_avg {fmt(scalars(W - avg).max(axis=1))} | field0 {fmt(f0 / total)} | exact0 {fmt(f0x / total)} | field1 {fmt(f1 / total)}"
       f" | offset/h {np.sqrt(((cen - gen + side / 2) % side - side / 2) ** 2).sum(axis=1).mean() / (side[0] / cells[0]):.3f}")

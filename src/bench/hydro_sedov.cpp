@@ -1,40 +1,5 @@
-// The Sedov-Taylor blast of LUNA's scripts/validation/runs/sedov3d_run.py
-// on the Voronoi mesh (hydro::FiniteVolume), static or moving, with phase
-// timings.
-//
-//   hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face]
-//               [--limiter=face|cell|none] [--riemann=hllc|hll] [--precision=<name>]
-//               [--moving] [--bulk=<km/s>] [--no-blast] [--box=fx,fy,fz] [--out=<dir>]
-//               [--snapshots=10] [--steps=<max>] [--input-order] [--memory] [--gradients]
-//               [--integrator=one-pass|two-pass]
-//
-// side^3 generating points in a 50 pc periodic box (jittered: a lattice
-// moved by up to 0.1 spacings; uniform: uniform random). AREPO units (kpc,
-// 1e10 Msun, km/s), gamma 5/3, n = 1 cm^-3, T = 1e4 K, 1e51 erg into the
-// cells nearest the centre whose volumes add up closest to LUNA's 8 central
-// cells at the same resolution (8 (L / side)^3), as extra pressure
-// (gamma - 1) E / V_deposit over their actual volume V_deposit; run to
-// 1e4 yr. --moving: the points move with the flow (AREPO-ng's
-// regularisation), the mesh is updated every step. --bulk: the whole box
-// moves along x at that speed (a moving blast wave). --box: the box sides as
-// multiples of 50 pc (default 1,1,1; about side^3 cells). --out writes snapshots
-// 0..snapshots at equal times (LUNA's time_bet_snaps = t_end / n_snaps); --gradients also writes
-// <out>/gradients.bin at the end (six doubles per cell: centroid offset, limited density gradient).
-// --steps stops after that many steps (timing runs). Particles are numbered
-// in Morton order of their positions (--input-order: as generated, lattice
-// rows or random). --update: the update loop, default face at order 1 and
-// cell at order 0. --limiter: the gradient limiter (hydro::Limiter: face or
-// cell centroids, or none; default face). --riemann: HLLC (default, as
-// LUNA) or HLL. --precision: the hydro's precision policy (run_precision
-// below; default double). --no-blast: no blast, a uniform stream (with
-// --bulk), printing its largest deviation from uniform. Prints per step
-// phase medians and cell updates per second and a checksum of the final
-// state, positions and volumes (bits),
-// the face sides whose extrapolation fell back to the cell state (total,
-// steps with any, most in one step) and what the mesh updates did;
-// --memory adds device memory (Kokkos allocations) per phase. --integrator:
-// hydro::Integrator, default two-pass on a moving mesh at order 1, else one-pass;
-// two-pass exists only there.
+// The Sedov-Taylor blast of LUNA's sedov3d_run.py on the Voronoi mesh (hydro::FiniteVolume), static or moving, with phase timings.
+// Usage: hydro_sedov <side> <jittered|uniform> [flags]; the flags and the set-up are in docs/design.md.
 
 
 #include "finite_volume.hpp"
@@ -58,8 +23,7 @@ namespace {
 
 using namespace support;
 
-// Device memory through the Kokkos Tools allocation callbacks: now and at
-// the peak of the current phase, with the live allocations at that peak.
+// Device memory through the Kokkos Tools allocation callbacks: now and at the phase peak, with the live allocations there.
 struct DeviceMemory {
     static inline bool on = false;
     static inline std::unordered_map<const void*, std::pair<std::string, std::uint64_t>> live;
@@ -116,8 +80,7 @@ std::string flag(int argc, char** argv, const std::string& name, const std::stri
     return fallback;
 }
 
-// The points in Morton order (21 bits per coordinate): particle ids follow
-// space, so neighbouring cells sit close in memory.
+// The points in Morton order (21 bits per coordinate), so neighbouring cells sit close in memory.
 Points morton_order(Points points, const Box& box) {
     auto spread = [](std::uint64_t v) {  // the 21 bits of v to every third bit
         v &= 0x1fffff;
@@ -146,8 +109,7 @@ double median(std::vector<double> v) {
     return v[v.size() / 2];
 }
 
-// The Sedov set-up of LUNA (constants: scripts/validation/runs/sedov3d_run.py:19-26,
-// src/luna/ic_generation/sedov3d.py:9-14).
+// The Sedov set-up of LUNA (sedov3d_run.py, sedov3d.py).
 struct Sedov {
     static constexpr double year_s = 3.15576e7, kpc_cm = 3.08568e21, msun_g = 1.98892e33;
     static constexpr double proton_g = 1.6726219e-24, boltzmann = 1.380649e-16;
@@ -206,21 +168,20 @@ struct Options {
     std::string kind, loop, limit, riemann, out, precision;
     hydro::Update update = hydro::Update::per_face;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
-    bool moving = false, input_order = false, blast = true, gradients = false;
+    bool moving = false, input_order = false, blast = true, gradients = false, watch = false;
+    double cold = 1;
     hydro::Integrator integrator = hydro::Integrator::one_pass;
     double bulk = 0;
     long long max_steps = 0;
     Box box{1.0};
 };
 
-// The whole run with the hydro's precision policy P (the mesh carries float
-// face rows if P asks for them) and Riemann solver R.
+// The whole run with the hydro's precision policy P (the mesh carries float face rows if P asks for them) and Riemann solver R.
 template <class P, class R>
 void run(const Options& o, Points points) {
     using FV = hydro::FiniteVolume<3, Exec, R, P>;
-    using Mesh = typename FV::Mesh;  // with the float face rows and gradient weights P asks for
-    // CourantFac of AREPO next generation's Sedov examples
-    // (examples/sedov_3d/sedov_globaltstp_3d/param.txt:52).
+    using Mesh = typename FV::Mesh;
+    // CourantFac of AREPO next generation's Sedov examples.
     const double courant = 0.3;
     const Sedov sedov;
     const Box& box = o.box;
@@ -228,7 +189,6 @@ void run(const Options& o, Points points) {
     const hydro::Gas gas{sedov.gamma};
     const Exec exec;
 
-    // Mesh.
     Kokkos::Timer timer;
     Mesh mesh(exec, box);
     {
@@ -242,7 +202,6 @@ void run(const Options& o, Points points) {
               << " faces_per_cell=" << double(mesh.faces()) / n << " build_s=" << timer.seconds() << "\n";
     DeviceMemory::phase("mesh", n);
 
-    // Initial state on the host: the deposit cells by distance to the centre.
     const auto positions = to_host(mesh.positions());
     const auto volume = to_host(mesh.volume());
     // LUNA's 8 central cells: 8 mean cell volumes.
@@ -270,7 +229,7 @@ void run(const Options& o, Points points) {
         deposited = next;
         ++deposit;
     }
-    if (!o.blast) deposit = 0;  // a uniform (free) stream
+    if (!o.blast) deposit = 0;
     const double p_inject = (gas.gamma - 1.0) * sedov.energy() / deposited;
     std::cout << "sedov: rho=" << sedov.rho() << " P=" << sedov.pressure() << " E=" << sedov.energy() << " t_end=" << sedov.t_end()
               << " deposit_cells=" << deposit << " deposit_volume=" << deposited << " luna_volume=" << target
@@ -280,7 +239,7 @@ void run(const Options& o, Points points) {
     {  // Q = U V: the background moving with the bulk velocity, the blast's pressure on top
         auto Q = Kokkos::create_mirror_view(fv.state());
         for (long long i = 0; i < n; ++i) {
-            const hydro::State<3> W{sedov.rho(), o.bulk, 0, 0, sedov.pressure()};
+            const hydro::State<3> W{sedov.rho(), o.bulk, 0, 0, o.cold * sedov.pressure()};
             const hydro::State<3> u = hydro::conserved(W, gas);
             for (int v = 0; v < 5; ++v) Q(i, v) = u[v] * volume(i);
         }
@@ -294,11 +253,8 @@ void run(const Options& o, Points points) {
     snap.order = o.order;
     snap.gas = gas;
     snap.units = sedov.units;
-    // The radius of the disturbed region: the farthest cell, from the
-    // blast centre moving with the bulk velocity, whose density or
-    // pressure differs from the background by more than 1e-6. Uniform
-    // stream: the largest relative deviation of rho, P and v from the
-    // background.
+    // The radius of the disturbed region: the farthest cell from the blast centre whose rho or P differs from the background by > 1e-6;
+    // a uniform stream: the largest relative deviation of rho, P, v.
     auto write = [&](int index, double t) {
         const auto Q = to_host(fv.state());
         const auto x = to_host(mesh.positions());
@@ -374,6 +330,29 @@ void run(const Options& o, Points points) {
         fallbacks = fv.fallbacks() < 0 ? -1 : fallbacks + fv.fallbacks();  // -1: not counted (per-cell loop)
         most_fallbacks = std::max(most_fallbacks, fv.fallbacks());
         steps_with_fallbacks += fv.fallbacks() > 0;
+        if (o.watch) {
+            const auto q = fv.state();
+            const auto V = mesh.volume();
+            const double smalle = gas.smallc * gas.smallc / gas.gamma / (gas.gamma - 1.0);
+            long long at_floor_rho = 0, at_floor_e = 0, bad = 0;
+            double rho_min = 0, P_min = 0, P_max = 0;
+            Kokkos::parallel_reduce(
+                "watch", Kokkos::RangePolicy<Exec>(exec, 0, n),
+                KOKKOS_LAMBDA(int i, long long& a, long long& b, long long& c, double& r, double& p, double& h) {
+                    const double rho = q(i, 0) / V(i), e = q(i, 4) / V(i);
+                    const double kinetic = 0.5 * (q(i, 1) * q(i, 1) + q(i, 2) * q(i, 2) + q(i, 3) * q(i, 3)) / (V(i) * q(i, 0));
+                    const double u = e - kinetic;
+                    a += rho < gas.smallr;
+                    b += u < smalle * rho;
+                    c += !Kokkos::isfinite(rho) || !Kokkos::isfinite(e);
+                    r = Kokkos::fmin(r, rho);
+                    p = Kokkos::fmin(p, (gas.gamma - 1.0) * u);
+                    h = Kokkos::fmax(h, (gas.gamma - 1.0) * u);
+                },
+                at_floor_rho, at_floor_e, bad, Kokkos::Min<double>(rho_min), Kokkos::Min<double>(P_min), Kokkos::Max<double>(P_max));
+            std::cout << "watch: step=" << steps << " t=" << t << " dt=" << dt << " fallbacks=" << fv.fallbacks() << " floor_rho=" << at_floor_rho
+                      << " floor_e=" << at_floor_e << " not_finite=" << bad << " rho_min=" << rho_min << " P_min=" << P_min << " P_max=" << P_max << "\n";
+        }
         t = snapshot ? t_next : t + dt;
         ++steps;
         if (snapshot) {
@@ -383,7 +362,7 @@ void run(const Options& o, Points points) {
     }
     exec.fence();
     const double wall_s = wall.seconds();
-    if (t < sedov.t_end()) write(next, t);  // stopped by --steps: the last state
+    if (t < sedov.t_end()) write(next, t);
     DeviceMemory::phase("steps", n);
     const Totals after = totals(fv);
     const double hydro_ms = median(prim_ms) + median(sweep_ms) + median(flux_ms) + median(update_ms);
@@ -418,20 +397,20 @@ void run(const Options& o, Points points) {
               << std::dec << "\n";
 }
 
-// The precision policies of --precision (hydro/precision.hpp): <name>
-// geometry / gradient weights / gradients / face fluxes / Riemann; default:
-// double, the fit solved in the sweep (weights void).
+// The precision policies of --precision, as <name>: geometry / gradient weights / gradients / face fluxes / Riemann.
+// default: the hydro's default; double: double throughout, what older logs call `default`.
 template <class R>
 void run_precision(const Options& o, const Points& points) {
     using hydro::Half;
     using hydro::Precision;
     const std::string& p = o.precision;
-    if (p == "default") return run<Precision<>, R>(o, points);
+    if (p == "default") return run<hydro::DefaultPrecision<3>, R>(o, points);
+    if (p == "double") return run<Precision<>, R>(o, points);
     if constexpr (std::is_same_v<R, hydro::HLLC>) {
         if (p == "weight32") return run<Precision<double, float>, R>(o, points);
         if (p == "weight64") return run<Precision<double, double>, R>(o, points);
         if (p == "flux32") return run<Precision<double, void, double, float>, R>(o, points);
-        if (p == "grad32") return run<Precision<double, void, float>, R>(o, points);
+        if (p == "grad32") return run<hydro::Grad32, R>(o, points);
         if (p == "grad16") return run<Precision<double, void, Half>, R>(o, points);
         if (p == "geo32") return run<Precision<float>, R>(o, points);
         if (p == "riemann32") return run<Precision<double, void, double, double, float>, R>(o, points);
@@ -440,7 +419,7 @@ void run_precision(const Options& o, const Points& points) {
         if (p == "low") return run<Precision<float, void, Half, float, float>, R>(o, points);
         if (p == "lowweights") return run<Precision<float, float, Half, float, float>, R>(o, points);
     }
-    throw std::invalid_argument("hydro_sedov: unknown --precision " + p + " (HLL: double only)");
+    throw std::invalid_argument("hydro_sedov: unknown --precision " + p + " (HLL: default or double only)");
 }
 
 }  // namespace
@@ -452,9 +431,9 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);
     if (args.size() < 2) {
         std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]"
-                     " [--riemann=hllc|hll] [--precision=default|weight32|weight64|flux32|grad32|grad16|geo32|riemann32|mixed|mixed16|low|lowweights]"
+                     " [--riemann=hllc|hll] [--precision=default|double|weight32|weight64|flux32|grad32|grad16|geo32|riemann32|mixed|mixed16|low|lowweights]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
-                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--integrator=one-pass|two-pass]\n";
+                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--integrator=one-pass|two-pass] [--cold=f] [--watch]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -462,7 +441,7 @@ int main(int argc, char** argv) {
     o.side = std::stoi(args[0]);
     o.kind = args[1];
     o.order = std::stoi(flag(argc, argv, "--order", "1"));
-    // Default loop: the faster one measured on the A100 (research_notes/hydro_stage1_2026-10-31.md).
+    // Default loop: the faster one measured on the A100.
     o.loop = flag(argc, argv, "--update", o.order == 1 ? "face" : "cell");
     o.update = o.loop == "face" ? hydro::Update::per_face : hydro::Update::per_cell;
     o.limit = flag(argc, argv, "--limiter", "face");
@@ -478,14 +457,15 @@ int main(int argc, char** argv) {
                    : integrator == "two-pass" ? hydro::Integrator::two_pass
                                               : hydro::Integrator::one_pass;
     o.blast = flag(argc, argv, "--no-blast", "") != "1";
+    o.watch = flag(argc, argv, "--watch", "") == "1";
+    o.cold = std::stod(flag(argc, argv, "--cold", "1"));
     o.bulk = std::stod(flag(argc, argv, "--bulk", "0"));  // km/s along x
     o.out = flag(argc, argv, "--out", "");
     o.snapshots = std::stoi(flag(argc, argv, "--snapshots", "10"));
     o.gradients = flag(argc, argv, "--gradients", "") == "1";
     o.max_steps = std::stoll(flag(argc, argv, "--steps", "0"));
     o.input_order = flag(argc, argv, "--input-order", "") == "1";
-    // The periodic box: --box=fx,fy,fz times the 50 pc of LUNA's set-up (a
-    // cube by default); the lattice keeps about equal spacings per axis.
+    // The periodic box: --box=fx,fy,fz times 50 pc (a cube by default); the lattice keeps about equal spacings per axis.
     const Sedov sedov;
     const std::string shape_arg = flag(argc, argv, "--box", "1,1,1");
     double f[3] = {1, 1, 1};

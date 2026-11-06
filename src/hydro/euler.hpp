@@ -5,23 +5,8 @@
 #include <cstddef>
 #include <utility>
 
-// The Euler equations of an ideal gas in D = 1, 2 or 3 dimensions, per cell
-// and per face: conversions, the MUSCL-Hancock half step and the HLL and
-// HLLC fluxes along a face normal.
-//
-// Conventions are LUNA's (src/luna/hydro/conversions.py:1): primitives
-// W = (rho, v_1 .. v_D, P), conserved U = (rho, rho v_1 .. rho v_D, E) per
-// unit volume, D + 2 entries (LUNA's layout, ic.py:141). Line references
-// (LUNA file:line, AREPO file:line) are in
-// research_notes/hydro_stage1_2026-10-31.md.
-//
-// Every expression is written so that D = 3 is the arithmetic, in the same
-// order and the same form, of the 3D-only code before: dot products written
-// out left to right, vectors and states built as brace initializers
-// {f(0), .., f(N - 1)} (braced) where that code had them, loops over d < D
-// where it looped over d < 3. Compilers contract a * b + c into FMAs
-// depending on that form, so a loop where an initializer was gives other
-// bits (measured on the A100 and with gcc).
+// The Euler equations of an ideal gas in D = 1, 2, 3: conversions, MUSCL-Hancock half step, HLL and HLLC; bit-identity: docs/design.md.
+// Primitives W = (rho, v_1 .. v_D, P), conserved U = (rho, rho v_1 .. rho v_D, E) per unit volume, as LUNA.
 namespace hydro {
 
 template <int D, class T = double>
@@ -88,15 +73,13 @@ KOKKOS_INLINE_FUNCTION Vec<D, T> velocity(const Kokkos::Array<T, N>& W) {
     return make_vec<D, T>([&](int k) { return W[1 + k]; });
 }
 
-// Ideal gas with LUNA's RAMSES floors (template_config.py:41-42): density
-// at least smallr, specific internal energy at least smallc^2 / (gamma
-// (gamma - 1)); applied to primitives, never to the conserved state.
+// Ideal gas with LUNA's RAMSES floors (density >= smallr, internal energy >= smallc^2 / (gamma (gamma - 1))), on primitives only.
 struct Gas {
     double gamma = 5.0 / 3.0;
     double smallr = 1e-10, smallc = 1e-10;
 };
 
-// U -> W with the floors (conversions.py:28-36, cons_to_prim_floored).
+// U -> W with the floors (LUNA's cons_to_prim_floored).
 template <std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION State<D> primitive(const Kokkos::Array<double, N>& U, const Gas& gas) {
     const double rho = Kokkos::fmax(U[0], gas.smallr);
@@ -108,7 +91,6 @@ KOKKOS_INLINE_FUNCTION State<D> primitive(const Kokkos::Array<double, N>& U, con
     return make_state<D>([&](int k) { return k == 0 ? rho : k == D + 1 ? (gas.gamma - 1.0) * e : v[k - 1]; });
 }
 
-// W -> U (conversions.py:39-48).
 template <std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION State<D> conserved(const Kokkos::Array<double, N>& W, const Gas& gas) {
     const double rho = W[0];
@@ -127,9 +109,7 @@ KOKKOS_INLINE_FUNCTION double sound_speed(const Kokkos::Array<double, N>& W, con
 template <int D, class T = double>
 using Gradient = Kokkos::Array<Vec<D, T>, D + 2>;
 
-// The rate of the MUSCL-Hancock half step, sum_d A_d(W) dW/dx_d, with the
-// primitive-variable Jacobians of jacobian.py:84-97 summed over the axes in
-// order as muscl_hancock.py:105-116 does.
+// The rate of the MUSCL-Hancock half step, sum_d A_d(W) dW/dx_d, with the primitive Jacobians summed over the axes in order.
 template <class T, std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION StateT<D, T> half_step_rate(const Kokkos::Array<T, N>& W, const Gradient<D, T>& g,
                                                    const Gas& gas) {
@@ -160,28 +140,13 @@ KOKKOS_INLINE_FUNCTION State<D> half_step(const Kokkos::Array<double, N>& W, con
     return half;
 }
 
-// Riemann solvers along the unit normal n of a face moving with velocity w
-// (w = 0 on a static mesh): the states' velocities are taken relative to
-// w, the Riemann problem is solved along n, and the flux returned is the
-// lab-frame flux through the moving face (F(U) - (w.n) U for equal
-// states). Flux per unit area, from L to R. Wave speeds after Davis as
-// LUNA (fluxes.py:146-147, 65-66).
-//
-// LUNA rotates the states into (normal, two tangents), solves, and rotates
-// the flux back (fluxes.py:9-48). Here the vectors stay in box axes: every
-// branch of HLL and HLLC is chosen by scalars (S_L, S_M, S_R) that do not
-// depend on the frame, and within a branch each flux component is the same
-// linear combination of the corresponding components of F, U and U*, so
-// rotating is the identity up to rounding; for HLLC the star momentum is
-// rho* (v_t + S_M n), the tangential velocity v_t = v - (v.n) n carried
-// through, which is LUNA's rho* (S_M, vt1, vt2) in box axes (in 1D, n = +-1
-// and v_t = 0). CTest `hydro` checks both against LUNA's values and under
-// random rotations.
+// Riemann solvers along the unit normal n of a face moving with velocity w: states are taken relative to w, the lab-frame flux is per area, L to R.
+// Vectors stay in box axes, not LUNA's (normal, tangents) rotation; equal up to rounding (docs/design.md).
 namespace detail {
 
 template <int D, class T>
 struct Side {
-    Vec<D, T> v;        // velocity relative to the face
+    Vec<D, T> v;
     T vn, c, E;         // normal velocity, sound speed (0 if c^2 <= 0), energy
     StateT<D, T> F, U;  // flux along n and conserved state
 };
@@ -201,9 +166,7 @@ KOKKOS_INLINE_FUNCTION Side<D, T> side(const StateT<D, T>& W, Vec<D, T> n, Vec<D
     return s;
 }
 
-// From the face frame to the lab frame, as AREPO next generation's
-// flux_convert_to_lab_frame (mesh_fluxes.cc:492-498): energy + w.F_momentum
-// + |w|^2 / 2 F_rho, momentum + w F_rho.
+// From the face frame to the lab frame (AREPO next generation's flux_convert_to_lab_frame).
 template <int D, class T>
 KOKKOS_INLINE_FUNCTION StateT<D, T> to_lab(StateT<D, T> F, Vec<D, T> w) {
     if constexpr (D == 1) F[2] += w[0] * F[1] + T(0.5) * dot(w, w) * F[0];
@@ -215,7 +178,7 @@ KOKKOS_INLINE_FUNCTION StateT<D, T> to_lab(StateT<D, T> F, Vec<D, T> w) {
 
 }  // namespace detail
 
-// HLL, LUNA's _hll_core (fluxes.py:135-167).
+// HLL, LUNA's _hll_core.
 struct HLL {
     template <int D, class T>
     KOKKOS_INLINE_FUNCTION static StateT<D, T> flux(const StateT<D, T>& L, const StateT<D, T>& R, Vec<D, T> n,
@@ -236,9 +199,7 @@ struct HLL {
     }
 };
 
-// HLLC, LUNA's _hllc_core (fluxes.py:51-106; Toro 2009, ch. 10), with its
-// guards: c^2 < 0 on either side takes F_R (fluxes.py:62, 88-94),
-// divisions are kept off zero by 1e-20 (fluxes.py:71-72).
+// HLLC, LUNA's _hllc_core with its guards: c^2 < 0 on either side takes F_R, divisions are kept off zero by 1e-20.
 struct HLLC {
     template <class T>
     KOKKOS_INLINE_FUNCTION static T nonzero(T d) {
@@ -249,8 +210,7 @@ struct HLLC {
     KOKKOS_INLINE_FUNCTION static StateT<D, T> flux(const StateT<D, T>& L, const StateT<D, T>& R, Vec<D, T> n,
                                                     Vec<D, T> w, const Gas& gas) {
         constexpr int P = D + 1;
-        // Wave speeds and the contact speed from the normal velocities and
-        // sound speeds alone; the flux is then built for one side only.
+        // Wave speeds and the contact speed from the normal velocities and sound speeds alone; the flux is then built for one side only.
         const T vnL = dot(velocity(L) - w, n), vnR = dot(velocity(R) - w, n);
         const T c2L = T(gas.gamma) * L[P] / L[0], c2R = T(gas.gamma) * R[P] / R[0];
         const bool ok = c2L >= 0 && c2R >= 0;
@@ -259,7 +219,7 @@ struct HLLC {
         const T SR = Kokkos::fmax(vnL + cL, vnR + cR);
         const T denomL = L[0] * (SL - vnL), denomR = R[0] * (SR - vnR);
         const T SM = (R[P] - L[P] + denomL * vnL - denomR * vnR) / nonzero(denomL - denomR);
-        // LUNA's branch order (fluxes.py:88-94): F_L, F*_L, F*_R, F_R.
+        // LUNA's branch order: F_L, F*_L, F*_R, F_R.
         const bool left = ok && (SL >= 0 || SM >= 0);
         const bool star = ok && SL < 0 && (SM >= 0 || SR > 0);
         const StateT<D, T>& W = left ? L : R;

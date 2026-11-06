@@ -1,25 +1,7 @@
 #!/bin/bash
-# Hydro speed and precision options on one A100 (research_notes/hydro_speed_2026-11-04.md).
-# MAIN and FIX are two CUDA build directories (main and this branch), passed
-# with sbatch --export=ALL,MAIN=...,FIX=... (Raven's sbatch does not export
-# the environment otherwise). Submit from the repository root:
-#   MAIN=<build> FIX=<build> sbatch -p gpudev -o <logs>/speed-%j.out scripts/hydro_speed_a100.sh <out> <mode>
-# Modes:
-#   speed128   MAIN and FIX interleaved (MAIN FIX MAIN FIX), 128^3, static and
-#              moving, 40 steps, --memory; then every precision option of FIX
-#              (static and moving, 40 steps, twice)
-#   speed256   the same at 256^3: MAIN and FIX once each, then the options
-#              (PRECISIONS, default "mixed mixed16 low")
-#   accuracy   FIX, every option (PRECISIONS, default all): the whole Sedov at
-#              128^3, static and moving, final snapshot in <out>/<option>_<mesh>
-#   stream     FIX, every option: uniform streams (--no-blast) at 10 and 500
-#              km/s, 40 static and 40 moving steps
-#   repro      FIX, every option: two identical runs (static 100 steps, moving
-#              100 steps), checksums of the final state, positions, volumes
-#   bits       MAIN and FIX: final-state hashes of five paths (50 steps, 128^3)
-#   ctest      ctest of FIX
-#   ncu        Nsight Compute of FIX's hydro kernels, 128^3, static and moving
-#              (PRECISIONS, default "default")
+# Hydro speed and precision options on one A100 (research_notes/hydro_speed_2026-11-04.md). MAIN and FIX are two CUDA build directories:
+#   MAIN=<build> FIX=<build> sbatch --export=ALL,MAIN=...,FIX=... -p gpudev -o <logs>/speed-%j.out scripts/hydro_speed_a100.sh <out> <mode>
+# The modes are the cases below; PRECISIONS selects the options.
 #SBATCH -J hydro_speed
 #SBATCH -p gpudev
 #SBATCH --gres=gpu:a100:1
@@ -35,7 +17,7 @@ out="$(realpath -m "${1:-speed-runs}")"
 mode="${2:-speed128}"
 mkdir -p "$out"
 nvidia-smi -L
-all="default weight32 weight64 flux32 grad32 grad16 geo32 riemann32 mixed mixed16 low lowweights"
+all="default double weight32 weight64 flux32 grad32 grad16 geo32 riemann32 mixed mixed16 low lowweights"
 
 speed() {  # speed <build> <side> [flags]: the phase lines of a 40-step run
     local build="$1" side="$2"
@@ -122,12 +104,13 @@ repro)
     done
     ;;
 bits)
-    # MAIN and FIX, the paths of scripts/dim_gate_a100.sh, 50 steps at
-    # 128^3: hashes of the final U, x and volume (scripts/snapshot_hash.sh).
+    # MAIN and FIX, 50 steps at 128^3: hashes of the final U, x and volume (scripts/snapshot_hash.sh).
+    # An old tree takes MAIN_FLAGS empty, FIX_FLAGS=--precision=double.
     for variant in MAIN FIX; do
+        extra="${variant}_FLAGS"
         for flags in "" "--moving" "--order=0" "--update=cell --moving" "--riemann=hll --moving"; do
             tag="$(echo "$flags" | tr -d ' -=')"
-            "${!variant}/hydro_sedov" 128 jittered $flags --snapshots=1 --steps=50 --out="$out/bits_${tag:-static}_$variant" > /dev/null
+            "${!variant}/hydro_sedov" 128 jittered $flags ${!extra:-} --snapshots=1 --steps=50 --out="$out/bits_${tag:-static}_$variant" > /dev/null
         done
     done
     bash scripts/snapshot_hash.sh "$out"/bits_* | sort

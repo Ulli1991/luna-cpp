@@ -1,19 +1,4 @@
-// The finite-volume hydro on the static Voronoi mesh (src/hydro/):
-//   - HLL and HLLC: on sample states the flux equals LUNA's
-//     hll_flux_primitive / hllc_flux_primitive (src/luna/hydro/fluxes.py;
-//     values printed by LUNA in float64); equal states give the exact flux,
-//     also through a moving face (F(U) - (w.n) U); swapping the states and
-//     the normal flips the flux; rotating states and normal rotates the
-//     flux (solving along n in box axes equals LUNA's rotated frame);
-//   - a uniform state stays uniform to rounding on jittered and uniform
-//     random meshes, first and second order, both update loops;
-//   - mass, momentum and energy are conserved to rounding in the periodic
-//     box (a blast plus random perturbations, second order);
-//   - two runs give the same bits; the two update loops agree to rounding;
-//   - moving mesh: a uniform state with a bulk velocity stays uniform;
-//     mass, momentum and energy are conserved to rounding while the cells
-//     move; a blast moving with the box equals the blast at rest
-//     (Galilean invariance), while on a static mesh it smears.
+// The finite-volume hydro on the Voronoi mesh: HLL and HLLC against LUNA, uniform state, conservation, same bits, Galilean invariance.
 
 #include "check.hpp"
 #include "finite_volume.hpp"
@@ -70,8 +55,7 @@ const LunaCase luna_hll[] = {
     {2, {1.1, -4.0, 0.0, 0.5, 0.5}, {1.3, -3.5, 0.1, 0.2, 0.4}, {0.3956780378220708, -1.7908409418191646, -0.04162575810617627, 0.7953580101016026, 4.6019572824376}},
 };
 
-// From LUNA's hllc_flux_primitive(W_L, W_R, axis, gamma = 5/3), jax x64: the
-// same states and a pair with a contact at rest.
+// From LUNA's hllc_flux_primitive(W_L, W_R, axis, gamma = 5/3), jax x64: the same states and a pair with a contact at rest.
 const LunaCase luna_hllc[] = {
     {0, {1.0, 0.75, -0.2, 0.1, 1.0}, {0.125, 0.0, 0.3, -0.4, 0.1}, {0.9196817777792649, 1.3665683598451346, -0.183936355555853, 0.0919681777779265, 2.2324199149234163}},
     {1, {1.0, 0.75, -0.2, 0.1, 1.0}, {0.125, 0.0, 0.3, -0.4, 0.1}, {0.3130650464627618, 0.2347987848470714, 0.27502286388364394, 0.03130650464627618, 0.5623838935957439}},
@@ -189,9 +173,8 @@ HostCells rough_state(int n, const hydro::Gas& gas) {
 
 const char* name(hydro::Update u) { return u == hydro::Update::per_cell ? "per cell" : "per face"; }
 
-// Precision: a hydro policy; with float face rows the areas of a cell close
-// only to float rounding, so a uniform state stays uniform to ~1e-7 only.
-template <class Riemann, class Precision = hydro::Precision<>>
+// Precision: a hydro policy; with float face rows a cell's areas close only to ~1e-7, so a uniform state stays uniform only to that.
+template <class Riemann, class Precision = hydro::DefaultPrecision<3>>
 void mesh_tests(Check& check, const std::string& kind, const std::string& solver) {
     using FV = hydro::FiniteVolume<3, Exec, Riemann, Precision>;
     const hydro::Gas gas{5.0 / 3.0};
@@ -205,7 +188,7 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
         for (const auto update : {hydro::Update::per_cell, hydro::Update::per_face}) {
             const std::string what = solver + ", " + kind + ", order " + std::to_string(order) + ", " + name(update);
             FV fv(Exec{}, mesh, gas, order, update);
-            {  // uniform state
+            {
                 const State W{1.3, 0.3, -0.2, 0.1, 0.7};
                 const State U = hydro::conserved(W, gas);
                 HostCells h("uniform", n);
@@ -220,7 +203,7 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
                 const double tolerance = FV::Mesh::float_rows ? 1e-6 : 1e-13;
                 check.expect(worst < tolerance, what + ": a uniform state stays uniform over 3 steps (" + sci(worst) + ")");
             }
-            {  // conservation, a rough state
+            {
                 set_state(fv, mesh, rough_state(n, gas));
                 auto sums = [&](const HostCells& h) {
                     std::array<long double, 5> s{};
@@ -255,9 +238,7 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
     auto same = [&](const HostCells& a, const HostCells& b) { return std::memcmp(a.data(), b.data(), sizeof(double) * 5 * n) == 0; };
     check.expect(same(result[0][0], result[0][1]) && same(result[1][0], result[1][1]),
                  solver + ", " + kind + ": two runs give the same bits (both loops, order 1, 10 steps)");
-    // The loops compile the same face flux into different kernels, where the
-    // compiler may contract multiply-adds differently: equal to rounding,
-    // not necessarily bit for bit.
+    // The loops compile the same face flux into different kernels (multiply-add contraction): equal to rounding, not bit for bit.
     double loops = 0;
     for (int i = 0; i < n; ++i)
         loops = std::max(loops, relative({result[0][0](i, 0), result[0][0](i, 1), result[0][0](i, 2), result[0][0](i, 3), result[0][0](i, 4)},
@@ -269,16 +250,13 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
 }
 
 
-// Moving-mesh tests. Points on the snapping grid (make_points) and steps
-// whose displacement v dt is a multiple of the grid step (2^-30 of the
-// box), so a uniform translation of the points translates the snapped mesh
-// exactly.
-using Moving = hydro::FiniteVolume<3, Exec>;
+// Moving-mesh tests: points on the snapping grid and v dt a multiple of the grid step (2^-30 of the box), so a translation is exact.
 
 // A mesh and a FiniteVolume on it (members in this order: the mesh is built first).
+template <class Precision>
 struct MovingRun {
     HydroMesh mesh;
-    Moving fv;
+    hydro::FiniteVolume<3, Exec, hydro::HLLC, Precision> fv;
     MovingRun(const Points& points, const hydro::Gas& gas, hydro::Motion motion, const Box& box = {},
               hydro::Integrator integrator = hydro::Integrator::two_pass)
         : mesh(Exec{}, box), fv(Exec{}, build(mesh, points), gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion,
@@ -290,8 +268,7 @@ struct MovingRun {
     }
 };
 
-// A blast at the box centre (pressure 100 within r < 0.15, else 1), moving
-// with velocity (bulk, 0, 0).
+// A blast at the box centre (pressure 100 within r < 0.15, else 1), moving with velocity (bulk, 0, 0).
 template <class AnyMesh>
 HostCells blast(const AnyMesh& mesh, double bulk, const hydro::Gas& gas) {
     const auto x = to_host(mesh.positions());
@@ -324,13 +301,16 @@ std::array<double, 8> profile(const HydroMesh& mesh, const HostCells& u, double 
     return sum;
 }
 
-void moving_tests(Check& check, hydro::Integrator integrator) {
-    std::cout << "moving tests, " << (integrator == hydro::Integrator::two_pass ? "two passes (the default)" : "one pass") << ":\n";
+// profile_within: the bound of the Galilean test on the radial profiles.
+template <class Precision>
+void moving_tests(Check& check, const std::string& name_of_precision, hydro::Integrator integrator, double profile_within) {
+    std::cout << "moving tests, " << name_of_precision << ", " << (integrator == hydro::Integrator::two_pass ? "two passes (the default)" : "one pass") << ":\n";
+    using Run = MovingRun<Precision>;
     const hydro::Gas gas{5.0 / 3.0};
     const int n = 4096;
     const Points points = make_points("jittered", n);
     {  // a uniform state with a bulk velocity
-        MovingRun run(points, gas, hydro::Motion::moving, {}, integrator);
+        Run run(points, gas, hydro::Motion::moving, {}, integrator);
         const State U = hydro::conserved(State{1.3, 1.0, 0.5, -0.25, 0.7}, gas);
         HostCells h("uniform", n);
         for (int i = 0; i < n; ++i)
@@ -349,7 +329,7 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
                      "moving mesh: a uniform state with a bulk velocity stays uniform over 5 steps (" + sci(worst) + ")");
     }
     {  // conservation with moving cells
-        MovingRun run(points, gas, hydro::Motion::moving, {}, integrator);
+        Run run(points, gas, hydro::Motion::moving, {}, integrator);
         set_state(run.fv, run.mesh, rough_state(n, gas));
         auto sums = [&](const HostCells& q) {
             std::array<long double, 5> s{};
@@ -369,10 +349,8 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
                                                                ", " + std::to_string(stats.device_flips) + " flips, " +
                                                                std::to_string(stats.rebuilds) + " rebuilds)");
     }
-    {  // 60 moving steps with the per-face loop (its face fluxes grow the mesh's
-       // spare ring pool, which the ring compaction then meets): the mesh is
-       // still the exact mesh of the points
-        MovingRun run(points, gas, hydro::Motion::moving, {}, integrator);
+    {  // 60 moving steps with the per-face loop: the mesh stays the exact mesh of the points
+        Run run(points, gas, hydro::Motion::moving, {}, integrator);
         set_state(run.fv, run.mesh, rough_state(n, gas));
         for (int s = 0; s < 60; ++s) run.fv.step(run.fv.time_step(0.3));
         // The reference is built from the snapped positions the mesh uses.
@@ -385,7 +363,7 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
         check.expect(c.pass(), "moving mesh, 60 steps: the mesh equals an exact rebuild (" + what.str() + ")");
     }
     {  // two identical moving runs give the same bits, step by step
-        MovingRun a(points, gas, hydro::Motion::moving, {}, integrator), b(points, gas, hydro::Motion::moving, {}, integrator);
+        Run a(points, gas, hydro::Motion::moving, {}, integrator), b(points, gas, hydro::Motion::moving, {}, integrator);
         set_state(a.fv, a.mesh, blast(a.mesh, 0, gas));
         set_state(b.fv, b.mesh, blast(b.mesh, 0, gas));
         auto same = [&](const auto& x, const auto& y) {
@@ -409,9 +387,7 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
         }
         check.expect(first < 0, "moving mesh: two identical runs give the same bits over 15 steps" +
                                     (first < 0 ? std::string() : " (step " + std::to_string(first) + ":" + what_differs + ")"));
-        // The cause of 918 vs 923 steps at 256^3: a tetrahedron's stored
-        // centre depended on which kernel (screening or created) computed it
-        // and on its corner order, both set by the order of the racy flips.
+        // The cause of 918 vs 923 steps at 256^3: a tetrahedron's stored centre depended on the kernel and corner order, both set by racy flips.
         // Every stored centre must equal a fresh computation bit for bit.
         const auto& tets = a.mesh.tetrahedra();
         const auto stored = to_host(tets.centre);
@@ -430,7 +406,7 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
         const Points stretched = make_points("jittered", n, box);
         const int m = static_cast<int>(stretched.size());
         {
-            MovingRun run(stretched, gas, hydro::Motion::moving, box, integrator);
+            Run run(stretched, gas, hydro::Motion::moving, box, integrator);
             const State U = hydro::conserved(State{1.3, 1.0, 0.5, -0.25, 0.7}, gas);
             HostCells h("uniform", m);
             for (int i = 0; i < m; ++i)
@@ -449,7 +425,7 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
                                             sci(worst) + ", " + std::to_string(m) + " cells)");
         }
         {
-            MovingRun run(stretched, gas, hydro::Motion::moving, box, integrator);
+            Run run(stretched, gas, hydro::Motion::moving, box, integrator);
             set_state(run.fv, run.mesh, rough_state(m, gas));
             auto sums = [&](const HostCells& q) {
                 std::array<long double, 5> s{};
@@ -473,12 +449,12 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
         }
     }
     {  // Galilean invariance: a blast at rest and the same blast moving with the box
-        const double bulk = 16, dt = std::ldexp(1.0, -12);  // bulk dt = 2^-8 of the box
+        const double bulk = 16, dt = std::ldexp(1.0, -12);
         const int steps = 40;
         double moving_error = 0, cfl = 1;
         double profile_error[2] = {};
         for (const auto motion : {hydro::Motion::moving, hydro::Motion::static_mesh}) {
-            MovingRun rest(points, gas, motion, {}, integrator), flow(points, gas, motion, {}, integrator);
+            Run rest(points, gas, motion, {}, integrator), flow(points, gas, motion, {}, integrator);
             set_state(rest.fv, rest.mesh, blast(rest.mesh, 0, gas));
             set_state(flow.fv, flow.mesh, blast(flow.mesh, bulk, gas));
             for (int s = 0; s < steps; ++s) {
@@ -488,7 +464,7 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
             }
             const HostCells a = host_state(rest.fv, rest.mesh), b = host_state(flow.fv, flow.mesh);
             if (motion == hydro::Motion::moving)
-                for (int i = 0; i < n; ++i) {  // cell by cell: the same cells, moved by bulk t
+                for (int i = 0; i < n; ++i) {
                     const State Wa = hydro::primitive(State{a(i, 0), a(i, 1), a(i, 2), a(i, 3), a(i, 4)}, gas);
                     State Wb = hydro::primitive(State{b(i, 0), b(i, 1), b(i, 2), b(i, 3), b(i, 4)}, gas);
                     Wb[1] -= bulk;
@@ -505,11 +481,10 @@ void moving_tests(Check& check, hydro::Integrator integrator) {
             profile_error[motion == hydro::Motion::static_mesh] = diff / total;
         }
         check.expect(dt <= cfl, "Galilean test: the fixed step " + sci(dt) + " is within the time-step criterion (" + sci(cfl) + ")");
-        // Rounding (v - bulk is not exact) grows through the nonlinear blast
-        // and the limiter; measured 7e-8 on the CPU.
+        // Rounding (v - bulk is not exact) grows through the nonlinear blast and limiter; measured 7e-8 on the CPU and A100, double and grad32.
         check.expect(moving_error < 1e-6, "moving mesh: a blast moving with the box equals the blast at rest, cell by cell, after " +
                                                std::to_string(steps) + " steps (" + sci(moving_error) + ")");
-        check.expect(profile_error[0] < 1e-10 && profile_error[1] > 1e3 * profile_error[0],
+        check.expect(profile_error[0] < profile_within && profile_error[1] > 1e3 * profile_error[0],
                      "radial density profiles, moving blast against blast at rest: moving mesh " + sci(profile_error[0]) +
                          ", static mesh " + sci(profile_error[1]));
     }
@@ -530,7 +505,7 @@ void two_pass_tests(Check& check, const std::string& name_of_precision, double u
             mesh.update_cells();
             return FV(Exec{}, mesh, gas, 1, update, hydro::Limiter::face_centroid, hydro::Motion::moving, hydro::Integrator::two_pass);
         };
-        {  // a uniform state with a bulk velocity
+        {
             typename FV::Mesh mesh(Exec{}, 1.0);
             FV fv = make(mesh);
             const State U = hydro::conserved(State{1.3, 1.0, 0.5, -0.25, 0.7}, gas);
@@ -548,7 +523,7 @@ void two_pass_tests(Check& check, const std::string& name_of_precision, double u
             for (int i = 0; i < n; ++i) worst = std::max(worst, relative({after(i, 0), after(i, 1), after(i, 2), after(i, 3), after(i, 4)}, U));
             check.expect(worst < uniform_within, head + "a uniform state with a bulk velocity stays uniform over 5 steps (" + sci(worst) + ")");
         }
-        {  // conservation
+        {
             typename FV::Mesh mesh(Exec{}, 1.0);
             FV fv = make(mesh);
             set_state(fv, mesh, rough_state(n, gas));
@@ -567,7 +542,7 @@ void two_pass_tests(Check& check, const std::string& name_of_precision, double u
             for (int v = 1; v <= 3; ++v) worst = std::max(worst, std::abs(static_cast<double>(after[v] - before[v])) / scale);
             check.expect(worst < 1e-14, head + "conserved over 10 steps (" + sci(worst) + ")");
         }
-        {  // two identical runs
+        {
             typename FV::Mesh mesh_a(Exec{}, 1.0), mesh_b(Exec{}, 1.0);
             FV a = make(mesh_a), b = make(mesh_b);
             set_state(a, mesh_a, blast(mesh_a, 0, gas));
@@ -600,12 +575,10 @@ void two_pass_refused(Check& check) {
     check.expect(refused(1, hydro::Motion::static_mesh) && refused(0, hydro::Motion::moving), "two passes: a static mesh and order 0 are refused");
 }
 
-// An exact lattice: cospherical corners, so faces of zero area, which carry
-// no flux. Every loop, both orders, static and moving with both integrators:
-// finite, a uniform state stays uniform, a rough state is conserved.
-template <class Riemann>
+// An exact lattice: cospherical corners give faces of zero area and no flux; every loop, order and integrator stays finite and conserved.
+template <class Riemann, class Precision = hydro::DefaultPrecision<3>>
 void lattice_tests(Check& check, const std::string& solver) {
-    using FV = hydro::FiniteVolume<3, Exec, Riemann>;
+    using FV = hydro::FiniteVolume<3, Exec, Riemann, Precision>;
     const hydro::Gas gas{5.0 / 3.0};
     const Points points = make_points("lattice", 4096);
     const int n = static_cast<int>(points.size());
@@ -663,17 +636,24 @@ int main(int argc, char** argv) {
     mesh_tests<hydro::HLLC>(check, "jittered", "HLLC");
     mesh_tests<hydro::HLLC>(check, "uniform", "HLLC");
     mesh_tests<hydro::HLL>(check, "jittered", "HLL");
-    // Precision options: gradient weights from the mesh (float); everything
-    // reduced (float face rows and weights, FP16 gradients, float fluxes and Riemann).
+    // Double throughout: what the runs before grad32 became the default used.
+    mesh_tests<hydro::HLLC, hydro::Precision<>>(check, "jittered", "HLLC double");
+    mesh_tests<hydro::HLL, hydro::Precision<>>(check, "jittered", "HLL double");
+    // Precision options: mesh gradient weights (float); everything reduced (float rows and weights, FP16 gradients, float fluxes and Riemann).
     mesh_tests<hydro::HLLC, hydro::Precision<double, float>>(check, "jittered", "HLLC weight32");
     mesh_tests<hydro::HLLC, hydro::Precision<float, float, hydro::Half, float, float>>(check, "jittered", "HLLC lowweights");
-    moving_tests(check, hydro::Integrator::two_pass);
-    moving_tests(check, hydro::Integrator::one_pass);
+    using Default = hydro::DefaultPrecision<3>;
+    // Float gradients carry the frame's rounding into the profiles: measured 2.5e-10 on the CPU, 1.2e-10 on the A100; double 6e-14.
+    moving_tests<Default>(check, "grad32", hydro::Integrator::two_pass, 1e-9);
+    moving_tests<Default>(check, "grad32", hydro::Integrator::one_pass, 1e-9);
+    moving_tests<hydro::Precision<>>(check, "double", hydro::Integrator::two_pass, 1e-10);
+    two_pass_tests<Default>(check, "grad32", 1e-13);
     two_pass_tests<hydro::Precision<>>(check, "double", 1e-13);
     two_pass_tests<hydro::Precision<float, void, float, float>>(check, "mixed", 1e-6);
     two_pass_tests<hydro::Precision<float, void, hydro::Half, float, float>>(check, "low", 1e-6);
     two_pass_refused(check);
     lattice_tests<hydro::HLLC>(check, "HLLC");
     lattice_tests<hydro::HLL>(check, "HLL");
+    lattice_tests<hydro::HLLC, hydro::Precision<>>(check, "HLLC double");
     return check.failed() != 0;
 }

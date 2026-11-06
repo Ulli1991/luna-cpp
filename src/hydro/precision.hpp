@@ -8,40 +8,20 @@
 #include <cuda_fp16.h>
 #endif
 
-// The hydro's compile-time precision policy (research_notes/hydro_speed_2026-11-04.md).
-// The conserved state Q, the volumes and cell centroids, W = primitive(Q / V)
-// and the sums of the face fluxes are double in every policy. The default,
-// Precision<>, is double throughout, with the least-squares fit solved in
-// the gradient sweep (main's arithmetic and bits). The settings:
-//   Geometry  the face rows the hydro reads (area vector, centroid, owner,
-//             neighbour): double (the mesh's double arrays) or float (the
-//             mesh's float rows, voronoi::Mesh<D, Exec, float>); converted to
-//             double when read, so only storage is reduced
-//   Weight    void: the area-weighted least-squares fit is summed and solved
-//             in the gradient sweep (default); float or double: the fit's
-//             weight of each face side, computed in double by the mesh at
-//             every update (voronoi::Mesh<D, Exec, F, Weight>,
-//             tet_mesh::gradient_weights) and stored as Weight, so that the
-//             gradient is a weighted sum (measured: research notes)
-//   Gradient  the least-squares gradients, the limiter and the face-state
-//             change (half step + extrapolation): double; float; or Half,
-//             float arithmetic with the gradients stored as FP16 with one
-//             power-of-two exponent per variable group (rho, v, P). With a
-//             float type the differences W_j - W_i and separations are formed
-//             in double and rounded once, and a face state is W + (its change
-//             in float), so a uniform state stays exactly uniform
-//   Flux      the stored face fluxes (per-face loop): double or float, summed
-//             in double
-//   Riemann   the Riemann solve: double, or float in the frame of the face
-//             (the states' velocities relative to the face in double, then
-//             rounded; the flux back to the lab frame in double)
-// The FP16 storage is the precision study's (branch precision-study 59ff9d1,
-// src/hydro/precision.hpp).
+// The hydro's compile-time precision policy; Precision<> is double throughout, the default is DefaultPrecision<D>.
 namespace hydro {
 
 // FP16 storage of float gradients (a Gradient setting).
 struct Half {};
 
+// The precision settings; Q, volumes, centroids, W and the sums of the face fluxes are double in every policy.
+//   Geometry  face rows the hydro reads (area vector, centroid, owner, neighbour): double, or float rows of the mesh
+//   Weight    void: the least-squares fit is solved in the gradient sweep; float or double: the mesh stores each face
+//             side's fit weight and the gradient is a weighted sum
+//   Gradient  gradients, limiter and face-state change: double, float, or Half (float arithmetic, FP16 storage with one
+//             power-of-two exponent per group rho, v, P)
+//   Flux      the stored face fluxes (per-face loop): double or float, summed in double
+//   Riemann   the Riemann solve: double, or float in the frame of the face (flux back to the lab frame in double)
 template <class Geometry = double, class Weight = void, class Gradient = double, class Flux = double,
           class Riemann = double>
 struct Precision {
@@ -54,12 +34,19 @@ struct Precision {
     static_assert(std::is_same_v<Flux, double> || std::is_same_v<Flux, float>, "flux: double or float");
     static_assert(std::is_same_v<Riemann, double> || std::is_same_v<Riemann, float>, "riemann: double or float");
     using geometry = Geometry;
-    using gradient = std::conditional_t<std::is_same_v<Gradient, Half>, float, Gradient>;  // arithmetic
+    using gradient = std::conditional_t<std::is_same_v<Gradient, Half>, float, Gradient>;
     using gradient_store = std::conditional_t<std::is_same_v<Gradient, Half>, std::uint16_t, gradient>;
     static constexpr bool half = std::is_same_v<Gradient, Half>;
     using flux = Flux;
     using riemann = Riemann;
 };
+
+// The gradients, limiter and face-state change in float, the rest double (`--precision=grad32`).
+using Grad32 = Precision<double, void, float>;
+
+// The default: Grad32 in 3D (L1 unchanged to ~1e-3, +8 to +12 %, 64 B/cell less; README); double in 2D and in 1D.
+template <int D>
+using DefaultPrecision = std::conditional_t<D == 3, Grad32, Precision<>>;
 
 namespace half {
 
@@ -114,9 +101,7 @@ KOKKOS_INLINE_FUNCTION float to_float(std::uint16_t h) {
 // 2^k for k in [-126, 127].
 KOKKOS_INLINE_FUNCTION float power_of_two(int k) { return Kokkos::bit_cast<float>(static_cast<std::uint32_t>(k + 127) << 23); }
 
-// The exponent k of a group whose largest magnitude is m: m 2^k in
-// [2^14, 2^15) (k = 0 for m = 0), within [-114, 126]: no overflow, 11 bits
-// relative to the group's largest component.
+// The exponent k of a group with largest magnitude m: m 2^k in [2^14, 2^15) (k = 0 for m = 0), within [-114, 126].
 KOKKOS_INLINE_FUNCTION int group_exponent(float m) {
     if (!(m > 0)) return 0;
     const int e = static_cast<int>((Kokkos::bit_cast<std::uint32_t>(m) >> 23) & 0xff) - 127;

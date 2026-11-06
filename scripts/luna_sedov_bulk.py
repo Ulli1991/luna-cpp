@@ -2,11 +2,7 @@
 
     cd <LUNA> && python <this file> <nx> <bulk km/s> <output dir> [Config field=value ...]
 
-The initial state is LUNA's own Sedov-Blast-3D state (ic_generation/sedov3d.py) with the bulk velocity
-added (momentum rho v, kinetic energy rho v^2 / 2), handed to luna.launch as a user state
-(ic_generation/user_ic.py). The boundary is periodic (BOUNDARY=0), so the flow leaves and enters the box
-like the Voronoi run's. Overrides as sedov3d_run.py takes them (field=value, e.g. ORDER=1
-riemann_solver=hllc enable_x64=1).
+LUNA's own Sedov-Blast-3D state plus the bulk velocity, periodic; overrides as sedov3d_run.py takes them.
 """
 import sys
 from dataclasses import fields, replace

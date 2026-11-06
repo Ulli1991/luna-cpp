@@ -1,15 +1,5 @@
-// The 1D hydro (hydro::FiniteVolume<1>, finite_volume_1d.hpp) on the 1D
-// mesh: a uniform state (with a bulk velocity on a periodic line; at rest
-// between reflective walls) stays uniform, static and moving, to rounding;
-// mass, momentum and energy of a rough state are conserved on a periodic
-// line, and mass and energy between reflective walls (to rounding); two
-// identical moving runs give the same bits; inflow keeps its state; Sod's
-// tube (Toro test 1) against the exact solution's cell averages within
-// LUNA's bounds at 128 and 256 cells (test_hydro_accuracy_shocktube.py:14),
-// on static and moving meshes, uniform and jittered; LUNA's own final states
-// of Sod, Shu-Osher and Woodward-Colella at N = 16 on a static uniform line
-// (values printed by LUNA, walls included), to 1e-12; Shu-Osher on a moving
-// mesh: the regularised points never cross, the unregularised ones do.
+// The 1D hydro on the 1D mesh: uniform states, conservation, same bits twice, inflow, Sod against exact averages within LUNA's bounds,
+// LUNA's final states at N = 16, Shu-Osher on a moving mesh; cells from a wall: docs/design.md.
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -33,7 +23,7 @@ using Mesh = voronoi::Mesh<1, Exec>;
 using State = hydro::State<1>;
 template <class Riemann = hydro::HLLC>
 using FV = hydro::FiniteVolume<1, Exec, Riemann>;
-using Primitives = std::function<State(double)>;  // W(x)
+using Primitives = std::function<State(double)>;
 
 std::vector<double> points(int n, double L, double jitter, unsigned seed) {
     std::mt19937_64 rng(seed);
@@ -94,7 +84,7 @@ template <class F>
 std::array<long double, 3> totals(const F& fv) {
     const auto q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
     std::array<long double, 3> t{0, 0, 0};
-    for (std::size_t i = 0; i < q.extent(0); ++i)
+    for (int i = 0; i < fv.cells(); ++i)
         for (int v = 0; v < 3; ++v) t[v] += q(i, v);
     return t;
 }
@@ -242,7 +232,7 @@ int main(int argc, char* argv[]) {
                 Mesh mesh(exec, 1.0, voronoi::Ends::walls);
                 build(mesh, points(n, 1.0, jitter, 6));
                 FV<> fv(exec, mesh, gas, 1, hydro::Limiter::face_centroid, motion, hydro::Walls{});
-                set(fv, mesh, [&](double a, double b) {  // exact averages of the initial jump
+                set(fv, mesh, [&](double a, double b) {
                     const exact_riemann::Primitive w = sod.average(a, b, 0.5, 1e-12);
                     const State U = hydro::conserved(State{w.rho, w.u, w.p}, gas);
                     return State{U[0] * (b - a), U[1] * (b - a), U[2] * (b - a)};
@@ -298,9 +288,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // The fused step: static, time_step() + step() to rounding; moving, a
-    // rough state conserved, the same bits twice, close to the separate
-    // kernels (whose time step knows the new drift).
+    // The fused step: static, equal to time_step() + step() to rounding; moving, conserving, the same bits twice, close to the separate kernels.
     for (const Motion motion : motions)
         for (const bool periodic : {true, false}) {
             const std::string name = std::string(motion == Motion::moving ? "moving" : "static") + (periodic ? ", periodic" : ", walls");
@@ -346,8 +334,7 @@ int main(int argc, char* argv[]) {
                              ", energy " + sci(energy) + ", the same bits twice");
         }
 
-    // Shu-Osher on a moving mesh: without the regularisation the end cell,
-    // grown by the inflow, runs into its neighbour; with it no points cross.
+    // Shu-Osher on a moving mesh without a cell supply: unregularised, the grown end cell runs into its neighbour; regularised, no points cross.
     {
         namespace pr = hydro::problems_1d;
         const pr::Problem problem = pr::problem("shu-osher");
@@ -357,6 +344,7 @@ int main(int argc, char* argv[]) {
             Mesh mesh(exec, problem.L, voronoi::Ends::walls);
             build(mesh, points(1024, problem.L, 0.0, 1));
             FV<> fv(exec, mesh, gamma14, 1, hydro::Limiter::face_centroid, Motion::moving, problem.walls, regularise == 1);
+            fv.set_inflow_spacing(0.0);  // the wall supplies no cells, so the end cell grows
             set(fv, mesh, [&](double a, double b) {
                 const State U = problem.average(a + problem.origin, b + problem.origin);
                 return State{U[0] * (b - a), U[1] * (b - a), U[2] * (b - a)};
@@ -366,6 +354,152 @@ int main(int argc, char* argv[]) {
         }
         check.expect(sorts[1] == 0 && sorts[0] > 0, "Shu-Osher, moving, N = 1024: points crossed " + std::to_string(sorts[0]) +
                                                         " times unregularised, " + std::to_string(sorts[1]) + " regularised");
+    }
+
+    // A wall supplies cells: one split alone conserves and keeps the state.
+    {
+        Mesh mesh(exec, 1.0, voronoi::Ends::walls);
+        std::vector<double> x;
+        for (int i = 0; i < 16; ++i) x.push_back(0.4 + 0.02 * i);
+        build(mesh, x);
+        FV<> fv(exec, mesh, gas, 1, hydro::Limiter::face_centroid, Motion::moving, hydro::Walls{});
+        fv.set_inflow_spacing(0.04);
+        const Primitives rough = [](double y) { return State{1.0 + 0.5 * std::sin(9 * y), 0.3 - y, 2.0 + std::cos(7 * y)}; };
+        set(fv, mesh, rough, gas);
+        const auto before = cells(fv, mesh);
+        const auto totals_before = totals(fv);
+        const bool added = fv.supply_cells();
+        const auto after = cells(fv, mesh);
+        const auto totals_after = totals(fv);
+        double moved = 0, state = 0;
+        for (int v = 0; v < 3; ++v) moved = std::max(moved, static_cast<double>(std::abs(totals_after[v] - totals_before[v]) / std::abs(totals_before[v])));
+        const std::size_t last_before = before.size() - 1, last_after = after.size() - 1;
+        for (int v = 0; v < 3; ++v) {
+            state = std::max(state, std::abs(after[before.size() + 0].W[v] / before[0].W[v] - 1));
+            state = std::max(state, std::abs(after[0].W[v] / before[0].W[v] - 1));
+            state = std::max(state, std::abs(after[last_after].W[v] / before[last_before].W[v] - 1));
+            state = std::max(state, std::abs(after[last_before].W[v] / before[last_before].W[v] - 1));
+        }
+        check.expect(added && fv.cells() == 18 && moved < 1e-15 && state < 1e-14,
+                     "a split at each wall: " + std::to_string(fv.cells()) + " cells, totals move by " + sci(moved) + ", both cells keep the old state to " + sci(state));
+    }
+
+    // Supersonic inflow from either wall into gas at rest: cells come out as a lattice of the set spacing, the gas behind the shock stays itself.
+    for (const bool from_left : {true, false}) {
+        const int n = 128;
+        Mesh mesh(exec, 1.0, voronoi::Ends::walls);
+        build(mesh, points(n, 1.0, 0.0, 4));
+        const State in{2.0, from_left ? 3.0 : -3.0, 1.0}, rest{0.5, 0.0, 0.2};
+        hydro::Walls walls{hydro::Wall::outflow, hydro::Wall::outflow};
+        (from_left ? walls.left : walls.right) = hydro::Wall::inflow;
+        (from_left ? walls.left_inflow : walls.right_inflow) = in;
+        FV<> fv(exec, mesh, gas, 1, hydro::Limiter::face_centroid, Motion::moving, walls);
+        const auto near_wall = [&](double x) { return from_left ? x : 1.0 - x; };
+        set(fv, mesh, [&](double x) { return near_wall(x) < 0.5 ? in : rest; }, gas);
+        run(fv, 0.1, 0.4, hydro::TimeStep::arepo);
+        const auto c = cells(fv, mesh);
+        double worst = 0, uneven = 0;
+        std::vector<double> xs;
+        for (const Cell& cell : c) {
+            if (near_wall(cell.x) > 0.3) continue;
+            xs.push_back(cell.x);
+            for (int v = 0; v < 3; ++v) worst = std::max(worst, std::abs(cell.W[v] - in[v]) / std::abs(in[v]));
+        }
+        std::sort(xs.begin(), xs.end());
+        const double spacing = 1.0 / n;
+        for (std::size_t i = 2; i + 2 < xs.size(); ++i) uneven = std::max(uneven, std::abs(xs[i + 1] - xs[i] - spacing) / spacing);
+        check.expect(fv.cells() > n + 30 && worst < 1e-12 && uneven < 1e-9 && mesh.sorts() == 0,
+                     std::string("inflow from the ") + (from_left ? "left" : "right") + ": " + std::to_string(fv.cells()) + " cells from " + std::to_string(n) +
+                         ", the state within " + sci(worst) + ", spacing within " + sci(uneven));
+    }
+
+    // Shu-Osher, moving: conservation with the known wall budget, same bits twice, both step paths, a mirrored run gives the mirrored result.
+    {
+        namespace pr = hydro::problems_1d;
+        const pr::Problem problem = pr::problem("shu-osher");
+        const hydro::Gas gamma14{pr::gamma_gas};
+        const double rhoL = 3.857143, uL = 2.629369, pL = 10.33333, pR = 1.0;
+        const double EL = pL / (pr::gamma_gas - 1) + 0.5 * rhoL * uL * uL;
+        const int n = 512;
+        std::vector<std::vector<Cell>> ends;
+        std::vector<int> counts;
+        for (int pass = 0; pass < 4; ++pass) {
+            const bool mirrored = pass == 2, fixed = pass == 3;  // fixed: the wall holds the state, not the end cell
+            Mesh mesh(exec, problem.L, voronoi::Ends::walls);
+            build(mesh, points(n, problem.L, 0.0, 1));
+            hydro::Walls walls = mirrored ? hydro::Walls{problem.walls.right, problem.walls.left} : fixed ? problem.moving_walls : problem.walls;
+            FV<> fv(exec, mesh, gamma14, 1, hydro::Limiter::face_centroid, Motion::moving, walls);
+            set(fv, mesh, [&](double a, double b) {
+                const double l = mirrored ? problem.L - b : a, r = mirrored ? problem.L - a : b;
+                State U = problem.average(l + problem.origin, r + problem.origin);
+                if (mirrored) U[1] = -U[1];
+                return State{U[0] * (b - a), U[1] * (b - a), U[2] * (b - a)};
+            });
+            const auto start = totals(fv);
+            run(fv, problem.t_end, 0.4, hydro::TimeStep::arepo);
+            const auto end = totals(fv);
+            if (!mirrored) {
+                const double t = problem.t_end;
+                const double expected[3] = {rhoL * uL * t, (rhoL * uL * uL + pL - pR) * t, (EL + pL) * uL * t};
+                double worst = 0;
+                for (int v = 0; v < 3; ++v) worst = std::max(worst, static_cast<double>(std::abs((end[v] - start[v]) - expected[v]) / expected[v]));
+                // Zero gradient: the wall's state is the end cell's, which has the rounding of every step.
+                check.expect(worst < (fixed ? 1e-12 : 1e-11), std::string("Shu-Osher, moving, N = 512, ") + (fixed ? "fixed inflow" : "zero-gradient wall") +
+                                                                  ": totals follow the budget through the walls to " + sci(worst));
+                check.expect(fv.cells() > 1.4 * n && fv.cells() < 1.55 * n, "Shu-Osher, moving: " + std::to_string(fv.cells()) + " cells from " + std::to_string(n));
+                check.expect(mesh.sorts() == 0, "Shu-Osher, moving: no points cross");
+            }
+            if (!fixed) {
+                ends.push_back(cells(fv, mesh));
+                counts.push_back(fv.cells());
+            }
+        }
+        bool twice = counts[0] == counts[1];
+        for (std::size_t i = 0; twice && i < ends[0].size(); ++i) twice = ends[0][i].V == ends[1][i].V && ends[0][i].W == ends[1][i].W;
+        check.expect(twice, "Shu-Osher, moving: two runs give the same bits, cells added included");
+        std::sort(ends[0].begin(), ends[0].end(), [](const Cell& a, const Cell& b) { return a.x < b.x; });
+        std::sort(ends[2].begin(), ends[2].end(), [](const Cell& a, const Cell& b) { return a.x > b.x; });
+        double worst = counts[0] == counts[2] ? 0 : 1;
+        for (std::size_t i = 0; worst < 1 && i < ends[0].size(); ++i) {
+            worst = std::max(worst, std::abs(ends[0][i].W[0] - ends[2][i].W[0]));
+            worst = std::max(worst, std::abs(ends[0][i].W[1] + ends[2][i].W[1]));
+            worst = std::max(worst, std::abs(ends[0][i].W[2] - ends[2][i].W[2]));
+        }
+        check.expect(worst < 1e-9, "Shu-Osher, moving: from the other wall, the mirror to " + sci(worst));
+        // The fused path adds cells as well; its rule is LUNA's, at the head of the moving default.
+        Mesh mesh(exec, problem.L, voronoi::Ends::walls);
+        build(mesh, points(n, problem.L, 0.0, 1));
+        FV<> fv(exec, mesh, gamma14, 1, hydro::Limiter::face_centroid, Motion::moving, problem.walls);
+        set(fv, mesh, [&](double a, double b) {
+            const State U = problem.average(a + problem.origin, b + problem.origin);
+            return State{U[0] * (b - a), U[1] * (b - a), U[2] * (b - a)};
+        });
+        const auto start = totals(fv);
+        double t = 0, next = fv.time_step(0.2, hydro::TimeStep::luna);
+        while (t < problem.t_end * (1 - 1e-12)) {
+            const double dt = std::min(next, problem.t_end - t);
+            next = fv.step_and_time_step(dt, 0.2);
+            t += dt;
+        }
+        const auto end = totals(fv);
+        check.expect(std::abs(static_cast<double>(end[0] - start[0]) - rhoL * uL * problem.t_end) < 1e-11 * rhoL * uL && fv.cells() > 1.4 * n,
+                     "Shu-Osher, moving, fused: " + std::to_string(fv.cells()) + " cells, mass by the budget");
+    }
+
+    // No flow through a wall, no cells: Sod and Woodward-Colella keep their count.
+    for (const std::string name : {"sod", "woodward-colella"}) {
+        namespace pr = hydro::problems_1d;
+        const pr::Problem problem = pr::problem(name);
+        const hydro::Gas gamma14{pr::gamma_gas};
+        Mesh mesh(exec, problem.L, voronoi::Ends::walls);
+        build(mesh, points(256, problem.L, 0.0, 1));
+        FV<> fv(exec, mesh, gamma14, 1, hydro::Limiter::face_centroid, Motion::moving, problem.walls);
+        set(fv, mesh, [&](double a, double b) {
+            const State U = problem.average(a + problem.origin, b + problem.origin);
+            return State{U[0] * (b - a), U[1] * (b - a), U[2] * (b - a)};
+        });
+        run(fv, problem.t_end, 0.4, hydro::TimeStep::arepo);
+        check.expect(fv.cells() == 256 && fv.cells_added() == 0, name + ", moving: no cells added");
     }
     return check.failed() != 0;
 }

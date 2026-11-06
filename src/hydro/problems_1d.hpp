@@ -8,22 +8,18 @@
 #include <stdexcept>
 #include <string>
 
-// The 1D problems: the table every 1D test and bench reads, each with its own
-// gamma. LUNA's setups (scripts/problems_1d.py has the file:line of each, and
-// the same table for LUNA and for the exact solutions), plus two LUNA lacks:
-// the exact isentropic simple wave and a pure shock at any Mach number.
+// The 1D problems, each with its gamma: LUNA's setups (scripts/problems_1d.py has the same table, sources, exact solutions) and two it lacks.
 namespace hydro::problems_1d {
 
-// One problem: the line [origin, origin + L], its ends, t_end, gamma, and the
-// conserved initial state of a cell [a, b] (in the problem's coordinates):
-// the exact average where LUNA's setup has it, LUNA's own form where it has not.
+// One problem: the line [origin, origin + L], its ends, t_end, gamma, and the conserved initial state of a cell [a, b].
 struct Problem {
     double L, origin, t_end, gamma;
     Walls walls;
     std::function<State<1>(double a, double b)> average;
     voronoi::Ends ends = voronoi::Ends::walls;
-    State<1> left{}, right{};  // a tube: the primitives either side of the jump at x0
+    State<1> left{}, right{};  // the primitives either side of a jump at x0
     double x0 = 0;
+    Walls moving_walls{};  // LUNA's unless gas enters supersonically: there the wall holds the state, as the end cell's drifts as N^2
 };
 
 constexpr double pi = 3.141592653589793;
@@ -35,8 +31,7 @@ inline State<1> conserved(const State<1>& W, double gamma) {
 }
 inline double fraction_below(double x, double a, double b) { return std::clamp((x - a) / (b - a), 0.0, 1.0); }
 
-// A jump at x0: LUNA's exact cell averages (la14379 initial(), er.cell_average(..., t=1e-12)),
-// the volume fractions.
+// A jump at x0: LUNA's exact cell averages, the volume fractions.
 inline Problem tube(double L, double origin, double t_end, double gamma, State<1> left, State<1> right, double x0, Walls walls) {
     const State<1> l = conserved(left, gamma), r = conserved(right, gamma);
     return {L, origin, t_end, gamma, walls, [=](double a, double b) {
@@ -60,16 +55,14 @@ inline State<1> woodward_colella(double a, double b) {
     return {1.0, 0.0, p / (1.4 - 1)};
 }
 
-// Noh: cold inflow on a wall, brought to rest towards the far wall by a ramp,
-// sampled at the cell's centre (test_hydro_hard_noh_planar.py, initial()).
+// Noh: cold inflow on a wall, brought to rest towards the far wall by a ramp, at the cell's centre (test_hydro_hard_noh_planar.py).
 inline State<1> noh(double a, double b) {
     constexpr double P0 = 1e-6, U0 = -1, L = 2, A = 1;
     const double x = 0.5 * (a + b), u = U0 * std::clamp((L - x) / (L - A), 0.0, 1.0);
     return {1.0, u, P0 / (monatomic - 1) + 0.5 * u * u};
 }
 
-// A linear eigenmode (test_hydro_accuracy_linear_waves.py, initial()) on the
-// periodic unit line: rho0 = 1, c = 1, carried at v0, as exact cell averages.
+// A linear eigenmode (test_hydro_accuracy_linear_waves.py) on the periodic unit line: rho0 = 1, c = 1, carried at v0, exact averages.
 inline State<1> eigenmode(double a, double b, double eps, double v0, double drho, double dv, double dp) {
     constexpr double k = 2 * pi, G = monatomic, P0 = 1 / G;
     const double h = b - a, half = 0.5 * k * h, s = std::sin(k * 0.5 * (a + b)) * std::sin(half) / half;
@@ -96,8 +89,7 @@ inline State<1> gauss_average(double a, double b, const F& f) {
     return u;
 }
 
-// The exact isentropic simple wave on the periodic unit line, gamma = 1.4:
-// c = 1 + amp sin(2 pi x), u = 5 (c - 1), rho = c^5, P = rho^gamma / gamma.
+// The exact isentropic simple wave on the periodic unit line, gamma = 1.4: c = 1 + amp sin(2 pi x), u = 5 (c - 1), rho = c^5.
 inline State<1> simple_wave(double a, double b, double amp) {
     return gauss_average(a, b, [=](double x) {
         constexpr double gamma = 1.4;
@@ -106,8 +98,7 @@ inline State<1> simple_wave(double a, double b, double amp) {
     });
 }
 
-// A pure shock at x = 0.1 of Mach number `mach` into (1, 0, 1), running right,
-// from Rankine-Hugoniot; t_end leaves it at x = 0.6.
+// A pure shock at x = 0.1 of Mach number `mach` into (1, 0, 1), running right, to x = 0.6.
 inline Problem pure_shock(double mach, const Walls& outflow) {
     constexpr double g = 1.4;
     const double m2 = mach * mach, s = mach * std::sqrt(g);
@@ -115,9 +106,8 @@ inline Problem pure_shock(double mach, const Walls& outflow) {
     return tube(1.0, 0.0, 0.5 / s, g, {rho2, v2, p2}, {1, 0, 1}, 0.1, outflow);
 }
 
-// amplitude: of the linear waves (signed: LUNA keeps the part odd in it) and
-// of the simple wave (0: its default, 0.1).
-inline Problem problem(const std::string& name, double amplitude = 0) {
+// amplitude: of the linear waves (signed: LUNA keeps the part odd in it) and of the simple wave (0: its default, 0.1).
+inline Problem table(const std::string& name, double amplitude) {
     const Walls outflow{Wall::outflow, Wall::outflow}, closed{Wall::reflective, Wall::reflective};
     const auto toro = [&](State<1> l, State<1> r, double t) { return tube(1.0, 0.0, t, 1.4, l, r, 0.5, outflow); };
     // Toro (2009) Table 4.1 (exact_riemann.py:8-15); toro-1 is Sod.
@@ -146,7 +136,7 @@ inline Problem problem(const std::string& name, double amplitude = 0) {
     if (name == "shu-osher")
         return {10.0, -5.0, 1.8, 1.4, outflow, [](double a, double b) {
                     return shock_into_wave(a, b, {3.857143, 2.629369, 10.33333}, -4, 0.2, 5, 1.4);
-                }};
+                }, voronoi::Ends::walls, {3.857143, 2.629369, 10.33333}};
     if (name == "titarev-toro")
         return {10.0, -5.0, 5.0, 1.4, outflow, [](double a, double b) {
                     return shock_into_wave(a, b, {1.515695, 0.523346, 1.805}, -4.5, 0.1, 20 * pi, 1.4);
@@ -169,6 +159,23 @@ inline Problem problem(const std::string& name, double amplitude = 0) {
     }
     if (name.rfind("shock-", 0) == 0) return pure_shock(std::stod(name.substr(6)), outflow);
     throw std::invalid_argument("hydro_1d: unknown problem " + name);
+}
+
+inline Problem problem(const std::string& name, double amplitude = 0) {
+    Problem p = table(name, amplitude);
+    p.moving_walls = p.walls;
+    const auto entering = [&](const State<1>& W, double side) {
+        return W[0] > 0 && side * W[1] > std::sqrt(p.gamma * W[2] / W[0]);
+    };
+    if (p.walls.left == Wall::outflow && entering(p.left, 1)) {
+        p.moving_walls.left = Wall::inflow;
+        p.moving_walls.left_inflow = p.left;
+    }
+    if (p.walls.right == Wall::outflow && entering(p.right, -1)) {
+        p.moving_walls.right = Wall::inflow;
+        p.moving_walls.right_inflow = p.right;
+    }
+    return p;
 }
 
 }  // namespace hydro::problems_1d

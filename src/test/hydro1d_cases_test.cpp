@@ -1,18 +1,5 @@
-// The 1D test cases of LUNA (and two it lacks) against LUNA and against their
-// exact solutions, static and moving, one table: hydro::problems_1d.
-//
-// luna_1d_gates.hpp is generated (scripts/ladder_1d.py gates) from one ladder of
-// runs of both codes, HLLC at LUNA's settings, in the norm of LUNA's tests:
-// the sum over cells of V |W - exact cell average|, for rho, v, P. On a uniform
-// line the static scheme is LUNA's, so static L1 must equal LUNA's, per limiter
-// (MC is our face limiter), within 1e-6, 1e-2 for the linear waves, whose errors at
-// amplitude 1e-6 are near rounding (ratio 1.000). Moving has no LUNA run to
-// equal: L1 within 1.3 x measured, at the two smallest N (CI has 2 cores, with
-// sanitizers). Orders within +-0.2 of the measured value: bands from measurement, per variable, never a nominal
-// order. A moving run with a known failure must still fail as measured; when it
-// stops failing this test says so, and the gate gets its numbers. The rest
-// are LUNA's own checks with LUNA's bounds, on a static uniform line: fronts,
-// budgets, positivity, wall heating and each case's symptom (test files named below).
+// The 1D test cases of LUNA, and two it lacks, against LUNA and their exact solutions, static and moving. Gates: luna_1d_gates.hpp, generated
+// by scripts/ladder_1d.py from one ladder of runs; what each check means is in docs/design.md.
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -68,7 +55,8 @@ Run simulate(const std::string& name, int n, Motion motion, Limiter limiter = Li
         Kokkos::deep_copy(x, h);
         mesh.update(x);
     }
-    hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{pb.gamma}, 1, limiter, motion, pb.walls);
+    hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{pb.gamma}, 1, limiter, motion, motion == Motion::moving ? pb.moving_walls : pb.walls);
+    fv.set_inflow_spacing(pb.L / n);
     auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
     auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
     auto V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
@@ -105,7 +93,7 @@ Run simulate(const std::string& name, int n, Motion motion, Limiter limiter = Li
     V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
     const auto q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
     std::array<long double, 3> sum{0, 0, 0};
-    for (int i = 0; i < n; ++i) {
+    for (int i = 0; i < fv.cells(); ++i) {
         const double a = x(i, 0) + c(i, 0) - 0.5 * V(i) + pb.origin;
         r.cells.push_back({a, a + V(i), hydro::primitive(State{q(i, 0) / V(i), q(i, 1) / V(i), q(i, 2) / V(i)}, fv.gas())});
         for (int v = 0; v < 3; ++v) sum[v] += q(i, v);

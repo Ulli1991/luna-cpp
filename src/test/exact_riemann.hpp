@@ -1,13 +1,7 @@
 #pragma once
 
-// The exact solution of the 1D Riemann problem of an ideal gas (Toro 2009,
-// ch. 4: the pressure function, Newton's method for the star pressure, the
-// sampling), for tests: Sod's tube against the exact cell averages, as
-// LUNA's exact_riemann.cell_average (src/luna/hydro/exact_riemann.py:105-113:
-// conservative averages of sub-samples per cell). Data that generate vacuum
-// have two fans and empty space between them (Toro sec. 4.6, LUNA's
-// test_hydro_hard_la14379.py, _vacuum_sample); a side that is vacuum already
-// (rho = 0) has only the other side's fan.
+// The exact solution of the 1D Riemann problem of an ideal gas (Toro 2009, ch. 4), with LUNA's cell_average (sub-sample averages).
+// Data that generate vacuum, or have it on one side, have fans and empty space (Toro sec. 4.6).
 
 #include <algorithm>
 #include <array>
@@ -26,7 +20,7 @@ public:
         cR_ = R_.rho > 0 ? std::sqrt(g_ * R_.p / R_.rho) : 0;
         vacuum_ = 2 * (cL_ + cR_) / (g_ - 1) <= R_.u - L_.u || L_.rho == 0 || R_.rho == 0;
         if (vacuum_) return;
-        double p = std::max(1e-12, 0.5 * (L_.p + R_.p));  // Newton from the arithmetic mean
+        double p = std::max(1e-12, 0.5 * (L_.p + R_.p));
         for (int it = 0; it < 100; ++it) {
             double fL, dL, fR, dR;
             f(p, L_, cL_, fL, dL);
@@ -74,7 +68,7 @@ public:
             const double u = 2 / (g + 1) * (cL_ + (g - 1) / 2 * L_.u + s);
             return {L_.rho * std::pow(c / cL_, 2 / (g - 1)), u, L_.p * std::pow(c / cL_, 2 * g / (g - 1))};
         }
-        if (p_ > R_.p) {  // right shock
+        if (p_ > R_.p) {
             const double SR = R_.u + cR_ * std::sqrt((g + 1) / (2 * g) * p_ / R_.p + (g - 1) / (2 * g));
             if (s >= SR) return R_;
             const double r = p_ / R_.p, k = (g - 1) / (g + 1);
@@ -88,8 +82,7 @@ public:
         return {R_.rho * std::pow(c / cR_, 2 / (g - 1)), u, R_.p * std::pow(c / cR_, 2 * g / (g - 1))};
     }
 
-    // Conservative average over [a, b] at time t of the problem with its
-    // jump at x0 (`samples` midpoints), returned as primitives.
+    // Conservative average over [a, b] at time t with the jump at x0 (`samples` midpoints), as primitives.
     Primitive average(double a, double b, double x0, double t, int samples = 256) const {
         double m = 0, mom = 0, e = 0;
         for (int k = 0; k < samples; ++k) {

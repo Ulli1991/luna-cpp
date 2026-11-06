@@ -3,21 +3,7 @@
     python compare_1d.py <runs dir> <out dir> [reference dir]
     python compare_1d.py ref <problem> <fine luna .npz> <reference dir>     # make ref_<problem>.npz, check it
 
-Run with LUNA's environment. The norm is the one of research_notes/stage1_1d_2026-11-04.md: the integral of
-|f_h - f_ref| dx / L of the code's reconstructed field, for rho, v and P:
-
-- f_h is what the code reconstructs at t_end: ours, W_i + g_i (x - c_i) on [x_{i-1/2}, x_{i+1/2}] with the least-squares
-  slope and AREPO's face limiter (finite_volume_1d.hpp, redone here on the output); LUNA's, W_i + s_i (x - x_i)
-  with its MC slope (slopes.py:22-24; moncen). Both with the ghosts of their boundaries. "mean" is the piecewise
-  constant field of the same run, the second line.
-- f_ref: Sod, the exact solution (luna.hydro.exact_riemann.sample, the integral split at its waves); Shu-Osher and
-  Woodward-Colella, the finest run of <reference dir> (ref_<problem>.npz, keys edges, rho, u, p: piecewise constant on
-  its cells, the reference is ~8x finer than anything compared to it).
-- The integral is by Gauss-Legendre on the union of the cell edges of both fields (and the waves), so nothing is
-  sampled at generators or at a common grid.
-
-T(eps) is the GPU-seconds to the target error, log-log interpolated between two of a code's own runs bracketing eps
-(no extrapolation; "-" if the runs do not bracket it). W(eps) the same for cell updates.
+Run with LUNA's environment. Norm and T(eps), W(eps): research_notes/stage1_1d_2026-11-04.md.
 """
 import glob
 import json
@@ -27,16 +13,17 @@ import sys
 import numpy as np
 
 G = 1.4
-DOMAIN = {"sod": (0.0, 1.0), "shu-osher": (-5.0, 5.0), "woodward-colella": (0.0, 1.0)}
-BOUNDARY = {"sod": "outflow", "shu-osher": "outflow", "woodward-colella": "reflective"}
+DOMAIN = {"sod": (0.0, 1.0), "shu-osher": (-5.0, 5.0), "titarev-toro": (-5.0, 5.0), "woodward-colella": (0.0, 1.0)}
+BOUNDARY = {"sod": "outflow", "shu-osher": "outflow", "titarev-toro": "outflow", "woodward-colella": "reflective"}
 GL_X, GL_W = np.polynomial.legendre.leggauss(4)
 SUB = 4
 VARS = ("rho", "v", "P")
-# Shu-Osher, moving: the region all generators still cover at t_end; to its left is the inflowing gas of the grown end cell.
+# Shu-Osher, moving: x > 0, where the gas that started on the line sits at t_end; to its left, the gas that came in.
 REGION = {"shu-osher": (0.0, 5.0)}
 # Two targets per test and variable: one every series reaches if it can, one near the end of the ladders.
 TARGETS = {"sod": {"rho": (3e-5, 1.2e-5), "v": (3e-5, 1e-5), "P": (1.3e-5, 5e-6)},
            "shu-osher": {"rho": (1e-3, 1e-4), "v": (3e-4, 3e-5), "P": (1e-3, 1e-4)},
+           "titarev-toro": {"rho": (1e-2, 3e-3), "v": (1e-3, 3e-4), "P": (2e-3, 5e-4)},
            "woodward-colella": {"rho": (5e-3, 1e-3), "v": (2e-3, 1e-3), "P": (5e-2, 2.5e-2)}}
 
 
@@ -175,6 +162,11 @@ def make_reference(problem, path, out):
               f"{np.abs(d['rho'].reshape(rho.size, k).mean(1) - rho).mean():.3e}")
 
 
+def updates(r):
+    """Cell updates of a run: the summed cells of each step where cells are added."""
+    return float(r.get("cell_updates", r["N"] * r["steps"]))
+
+
 def interp(ns, errors, costs, eps):
     """log-log interpolation of cost at error eps between two runs bracketing it, in order of N."""
     for i in range(len(ns) - 1):
@@ -203,7 +195,7 @@ def main():
     if os.path.exists(f"{reports}/dim1d_errors.json"):  # the integrals are slow: keep those of runs already compared
         done = {(r["series"], r["problem"], r["N"]): r for r in json.load(open(f"{reports}/dim1d_errors.json"))}
     refs = {"sod": Exact()}
-    for p in ("shu-osher", "woodward-colella"):
+    for p in ("shu-osher", "titarev-toro", "woodward-colella"):
         f = f"{refs_dir}/ref_{p}.npz"
         if os.path.exists(f):
             refs[p] = Reference(f)
@@ -226,8 +218,8 @@ def main():
     print("| test | series | N | steps | cell updates | T s | M updates/s | peak MB | L1 rho | L1 v | L1 P | mean rho | mean v | mean P |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in rows:
-        print(f"| {r['problem']} | {r['series']} | {r['N']} | {r['steps']} | {r['N'] * r['steps']:.3g} | {r['wall_s']:.3g} | "
-              f"{r['N'] * r['steps'] / r['wall_s'] / 1e6:.0f} | {r.get('peak_MB', float('nan')):.3g} | "
+        print(f"| {r['problem']} | {r['series']} | {r['N']} | {r['steps']} | {updates(r):.3g} | {r['wall_s']:.3g} | "
+              f"{updates(r) / r['wall_s'] / 1e6:.0f} | {r.get('peak_MB', float('nan')):.3g} | "
               + " | ".join(f"{e:.3e}" for e in r["L1"] + r["L1_mean"]) + " |")
     print("\n## Against LUNA at the same N (ratio of field L1, reconstructed; <= 1: as good)\n")
     print("| test | series | N | rho | v | P | rho mean | v mean | P mean |")
@@ -264,7 +256,7 @@ def main():
                 ns = [r["N"] for r in sel]
                 errors = [r["L1"][k] for r in sel]
                 t = interp(ns, errors, [r["wall_s"] for r in sel], eps)
-                w = interp(ns, errors, [float(r["N"] * r["steps"]) for r in sel], eps)
+                w = interp(ns, errors, [updates(r) for r in sel], eps)
                 print(f"| {problem} | {name} | {eps:g} | {series} | {'-' if t is None else f'{t:.3g}'} | "
                       f"{'-' if w is None else f'{w:.3g}'} |")
     scores(rows)
@@ -287,7 +279,7 @@ def scores(rows):
             if len(sel) < 3:
                 continue
             n = np.array([float(r["N"]) for r in sel])
-            w = np.array([r["N"] * float(r["steps"]) for r in sel])
+            w = np.array([updates(r) for r in sel])
             t = np.array([r["wall_s"] for r in sel])
             for k, name in enumerate(VARS):
                 e = np.array([r["L1"][k] for r in sel])

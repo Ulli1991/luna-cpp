@@ -2,11 +2,7 @@
 
     python3 scripts/hydro_ncu_table.py <ncu.csv> [cells] [faces]
 
-Kernels are grouped by a short name (the hydro functor or lambda; mesh
-kernels by their label in the demangled name); per group: launches, median
-time (us), DRAM bytes per cell and per face (read + write), L2 bytes per
-cell, active warps (% of peak), long-scoreboard stall (% of issue cycles),
-FP64 pipe (% of peak), registers per thread.
+Per kernel group: launches, median time, DRAM and L2 bytes per cell and face, active warps, stalls, FP64 pipe, registers.
 """
 import csv
 import re
