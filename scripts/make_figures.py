@@ -21,7 +21,7 @@ import h5py
 import matplotlib
 import matplotlib.ticker
 import numpy as np
-from matplotlib.patches import ConnectionPatch, Rectangle
+from matplotlib.patches import Rectangle
 from PIL import Image
 
 matplotlib.use("Agg")
@@ -50,15 +50,20 @@ spec.loader.exec_module(cmp1d)
 
 apply_style()
 LUNA_C, STATIC_C, MOVING_C = "C0", "C1", "C2"
-STYLE = {"luna": dict(color=LUNA_C, ls="-", marker="o"),
-         "static": dict(color=STATIC_C, ls="--", marker="s"),
-         "moving": dict(color=MOVING_C, ls="-", marker="^"),
-         "two": dict(color=MOVING_C, ls="--", marker="D"),
-         "padded": dict(color=MOVING_C, ls="--", marker="v"),
-         "padded3": dict(color=MOVING_C, ls=":", marker="x")}
-REF = dict(color="k")
-AK = dict(color="k", ls=":")
-MS = 3.5  # as LUNA's figures
+LW, THIN = 1.2, 0.8  # runs; static over LUNA and the references
+STYLE = {"luna": dict(color=LUNA_C, ls="-", marker="o", lw=LW, zorder=2),
+         "static": dict(color=STATIC_C, ls="--", marker="s", lw=THIN, zorder=2.5),
+         "moving": dict(color=MOVING_C, ls="-", marker="^", lw=LW, zorder=3),
+         "two": dict(color=MOVING_C, ls="--", marker="D", lw=LW, zorder=3),
+         "padded": dict(color=MOVING_C, ls="--", marker="v", lw=LW, zorder=3),
+         "padded3": dict(color=MOVING_C, ls=":", marker="x", lw=LW, zorder=3)}
+REF = dict(color="k", lw=THIN, zorder=2.7)
+AK = dict(color="k", lw=THIN, ls=":", zorder=2.7)
+MS = 2.8      # open markers
+LABEL = 10    # letters and labels inside panels, as in LUNA's figures
+EDGE = "0.75"  # zoom boxes and connectors
+WIDTH = FIGSIZE[0] * 2  # every figure
+LEGEND = dict(loc="upper right", fontsize=LABEL)
 
 
 def save(fig, name):
@@ -76,24 +81,24 @@ def save(fig, name):
 
 def line(ax, x, y, s, **over):
     k = STYLE[s]
-    return ax.plot(x, y, color=k["color"], ls=k["ls"], **over)[0]
+    return ax.plot(x, y, **{"color": k["color"], "ls": k["ls"], "lw": k["lw"], "zorder": k["zorder"], **over})[0]
 
 
 def cells(ax, x, y, s, xlim, most=32):
-    """Actual cells in a window: a thin line and small open markers, every cell while they stay apart."""
+    """Actual cells in a window: small open markers, every cell while they stay apart."""
     k = STYLE[s]
     keep = (x >= xlim[0]) & (x <= xlim[1])
-    ax.plot(x[keep], y[keep], color=k["color"], ls=k["ls"], lw=1.0, marker=k["marker"], ms=MS, mfc="white",
-            markevery=max(1, keep.sum() // most), zorder=3)
+    ax.plot(x[keep], y[keep], color=k["color"], ls=k["ls"], lw=THIN, zorder=k["zorder"], marker=k["marker"], ms=MS, mew=0.6, mfc="white",
+            markevery=max(1, keep.sum() // most))
 
 
-def corner(ax, text, x=0.03, y=0.95, ha="left"):
-    ax.text(x, y, text, transform=ax.transAxes, va="top", ha=ha)
+def corner(ax, text, x=0.04, y=0.95, ha="left", va="top"):
+    ax.text(x, y, text, transform=ax.transAxes, va=va, ha=ha, fontsize=LABEL, bbox=dict(fc="white", ec="none", pad=1.0), zorder=6)
 
 
 def key(s, label, marker=False):
     k = STYLE[s]
-    return plt.Line2D([], [], color=k["color"], ls=k["ls"], marker=k["marker"] if marker else None, ms=MS, mfc="none", label=label)
+    return plt.Line2D([], [], color=k["color"], ls=k["ls"], lw=k["lw"], marker=k["marker"] if marker else None, ms=MS, mfc="none", label=label)
 
 
 def rkey(label, kw=REF):
@@ -102,7 +107,7 @@ def rkey(label, kw=REF):
 
 def loglog(ax, x, y, s, **over):
     k = STYLE[s]
-    style = dict(color=k["color"], ls=k["ls"], marker=k["marker"], ms=MS, mfc="none", zorder=3 if s != "static" else 2)
+    style = dict(color=k["color"], ls=k["ls"], lw=k["lw"], marker=k["marker"], ms=MS, mew=0.6, mfc="none", zorder=k["zorder"])
     style.update(over)
     ax.plot(x, y, **style)
 
@@ -211,36 +216,48 @@ def sedov_state(path):
     return np.sqrt(((pos - 0.025) ** 2).sum(0)), vol, rho, t
 
 
-def zoom(main, ax, xlim, runs, refs, letter, label, place="ur", ylim=None):
-    """A zoom panel: reference, static as a line (it lies on LUNA's cells), cells of the other runs; its region marked on main."""
+def zoom(main, ax, xlim, xticks, runs, refs, letter, label, ylim=None, through=()):
+    """A zoom panel: reference, static as a thin line (it lies on LUNA's cells), cells of the others; its region boxed on main.
+
+    The connectors run straight down from the box to the bottom of `through` (the axes under main), then fan out to the
+    panel's top corners below the tick labels: same order on both ends, so they do not cross if the zooms' x ranges do not overlap.
+    """
     ys = [y[(x >= xlim[0]) & (x <= xlim[1])] for x, y, *_ in [*runs, *refs]]
     if ylim is None:
         lo, hi = min(y.min() for y in ys if y.size), max(y.max() for y in ys if y.size)
-        ylim = (lo - 0.08 * (hi - lo), hi + 0.22 * (hi - lo))
+        ylim = (lo - 0.1 * (hi - lo), hi + 0.34 * (hi - lo))
     for x, y, kw in refs:
-        ax.plot(x, y, zorder=2, **kw)
+        ax.plot(x, y, **kw)
     for x, y, s in runs:
         if s == "static":
-            line(ax, x, y, s, lw=1.0, zorder=4)
+            line(ax, x, y, s)
         else:
             cells(ax, x, y, s, xlim)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(3))
-    ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
-    u, v, ha, va = dict(ur=(0.96, 0.95, "right", "top"), ul=(0.04, 0.95, "left", "top"), lr=(0.96, 0.05, "right", "bottom"),
-                        ll=(0.04, 0.05, "left", "bottom"))[place]
-    ax.text(u, v, f"({letter}) {label}", transform=ax.transAxes, ha=ha, va=va)
+    ax.xaxis.set_major_locator(matplotlib.ticker.FixedLocator(xticks))
+    digits = max(len(f"{t:.4f}".rstrip("0").split(".")[1]) for t in xticks)
+    ax.xaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter(f"%.{digits}f"))
+    ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=3, steps=[1, 2, 2.5, 5, 10]))
+    ax.tick_params(labelsize=LABEL)
+    corner(ax, f"({letter}) {label}")
     mark(main, xlim, ylim, letter)
-    for corner_x, side in ((xlim[0], 0), (xlim[1], 1)):
-        main.figure.add_artist(ConnectionPatch(xyA=(corner_x, ylim[0]), coordsA=main.transData, xyB=(side, 1), coordsB=ax.transAxes,
-                                               color="0.5", lw=0.6))
+    fig = main.figure
+    last = through[-1] if through else main
+    for x, side in ((xlim[0], 0), (xlim[1], 1)):
+        main.plot([x, x], [main.get_ylim()[0], ylim[0]], color=EDGE, lw=0.5, zorder=1, scalex=False, scaley=False)
+        for a in through:
+            a.axvline(x, color=EDGE, lw=0.5, zorder=1)
+        xf = fig.transFigure.inverted().transform(main.transData.transform((x, ylim[0])))[0]
+        end = ax.get_position()
+        fig.add_artist(plt.Line2D([xf, end.x1 if side else end.x0], [last.get_position().y0 - 0.33 / fig.get_figheight(), end.y1],
+                                  transform=fig.transFigure, color=EDGE, lw=0.5))
 
 
 def mark(main, xlim, ylim, letter):
-    """A thin rectangle round a zoom's region, with the zoom's letter."""
-    main.add_patch(Rectangle((xlim[0], ylim[0]), xlim[1] - xlim[0], ylim[1] - ylim[0], fill=False, ec="0.3", lw=0.8, zorder=5))
-    main.text(0.5 * (xlim[0] + xlim[1]), ylim[1], letter, ha="center", va="bottom")
+    """A thin light box round a zoom's region, with the zoom's letter."""
+    main.add_patch(Rectangle((xlim[0], ylim[0]), xlim[1] - xlim[0], ylim[1] - ylim[0], fill=False, ec="0.5", lw=0.5, zorder=5))
+    main.text(0.5 * (xlim[0] + xlim[1]), ylim[1], letter, ha="center", va="bottom", fontsize=LABEL)
 
 
 def fig_sod():
@@ -251,8 +268,8 @@ def fig_sod():
     ex = cmp1d.Exact()
     fine = np.linspace(0, 1, 40001)
     exact = ex(fine)[0]
-    fig = plt.figure(figsize=(FIGSIZE[0] * 2, FIGSIZE[1] * 2))
-    outer = fig.add_gridspec(2, 1, height_ratios=[4, 2.2], hspace=0.2)
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 2))
+    outer = fig.add_gridspec(2, 1, height_ratios=[4, 2.2], hspace=0.24)
     top = outer[0].subgridspec(2, 1, height_ratios=[3.2, 1], hspace=0)
     ax = fig.add_subplot(top[0])
     res = fig.add_subplot(top[1], sharex=ax)
@@ -261,22 +278,21 @@ def fig_sod():
     line(ax, xs, rs, "static")
     line(ax, x, r, "moving")
     ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1.12)
+    ax.set_ylim(0.05, 1.12)
     ax.set_ylabel(r"$\rho$")
     ax.tick_params(labelbottom=False)
-    ax.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"), rkey("exact")], loc="upper right")
+    ax.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"), rkey("exact", REF)], **LEGEND)
     res.axhline(0, color="k", lw=0.6)
     for a, b, s in ((xl, rl, "luna"), (xs, rs, "static"), (x, r, "moving")):
         line(res, a, b - ex(a)[0], s)
     res.set_ylim(-0.012, 0.012)
     res.set_ylabel(r"$\rho-\rho_{\rm exact}$")
-    res.set_xlabel(r"$x$")
-    z = outer[1].subgridspec(1, 4, wspace=0.34).subplots()
+    z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
     runs, refs = [(xl, rl, "luna"), (xs, rs, "static"), (x, r, "moving")], [(fine, exact, REF)]
-    zoom(ax, z[0], (0.19, 0.23), runs, refs, "a", "rarefaction head")
-    zoom(ax, z[1], (0.46, 0.52), runs, refs, "b", "rarefaction tail")
-    zoom(ax, z[2], (0.70, 0.76), runs, refs, "c", "contact")
-    zoom(ax, z[3], (0.92, 0.955), runs, refs, "d", "shock")
+    views = (((0.19, 0.23), [0.20, 0.21, 0.22], "a", "rarefaction head"), ((0.46, 0.52), [0.47, 0.49, 0.51], "b", "rarefaction tail"),
+             ((0.70, 0.76), [0.71, 0.73, 0.75], "c", "contact"), ((0.92, 0.955), [0.93, 0.94, 0.95], "d", "shock"))
+    for a, (xlim, ticks, letter, label) in zip(z, views):
+        zoom(ax, a, xlim, ticks, runs, refs, letter, label, through=[res])
     z[0].set_ylabel(r"$\rho$")
     for a in z:
         a.set_xlabel(r"$x$")
@@ -293,8 +309,8 @@ def fig_shu_osher():
     lr = reference_file("luna/shu_osher/shu_osher_mc.npz")["rho"]
     ar = reference_file("athenak/shu_osher/so_ppmx_rk4_16384.npz")["ref_rho"]
     refs = [(centres(-5, 5, lr.size), lr, REF), (centres(-5, 5, ar.size), ar, AK)]
-    fig = plt.figure(figsize=(FIGSIZE[0] * 2, FIGSIZE[1] * 2.6))
-    outer = fig.add_gridspec(2, 1, height_ratios=[2.5, 1.1], hspace=0.16)
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 2.6))
+    outer = fig.add_gridspec(2, 1, height_ratios=[2.5, 1.1], hspace=0.18)
     top = outer[0].subgridspec(2, 1, hspace=0)
     a = fig.add_subplot(top[0])
     b = fig.add_subplot(top[1], sharex=a)
@@ -302,7 +318,7 @@ def fig_shu_osher():
         for rx, ry, kw in refs:
             ax.plot(rx, ry, **kw)
         ax.set_xlim(-5, 5)
-        ax.set_ylim(0.4, 5.4)
+        ax.set_ylim(0.4, 5.9)
         ax.set_ylabel(r"$\rho$")
     line(a, xl, rl, "luna")
     line(a, xs, rs, "static")
@@ -310,17 +326,16 @@ def fig_shu_osher():
     line(b, xl, rl, "luna")
     line(b, xw, rw, "padded")
     a.tick_params(labelbottom=False)
-    corner(a, "LUNA's domain", 0.02, 0.95)
-    corner(b, "padded domain", 0.02, 0.95)
+    corner(a, "LUNA's domain", 0.02)
+    corner(b, "padded domain", 0.02)
     a.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"), key("padded", "moving, padded"),
-                      rkey("LUNA, high resolution"), rkey("AthenaK PPMX", AK)], loc="lower left", ncol=2)
-    b.set_xlabel(r"$x$")
-    z = outer[1].subgridspec(1, 4, wspace=0.34).subplots()
+                      rkey("LUNA, high resolution", REF), rkey("AthenaK PPMX", AK)], **LEGEND)
+    z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
     runs = [(xl, rl, "luna"), (xs, rs, "static"), (x, r, "moving"), (xw, rw, "padded")]
-    views = (((-3.2, 0.2), "a", "left-going waves", "ll", (3.45, 4.35)), ((0.6, 2.3), "b", "wave train", "ll", (2.5, 5.0)),
-             ((1.76, 1.92), "c", "post-shock peak", "ul", (4.25, 4.95)), ((2.33, 2.45), "d", "main shock", "ur", None))
-    for ax, (xlim, letter, label, place, ylim) in zip(z, views):
-        zoom(b, ax, xlim, runs, refs, letter, label, place, ylim)
+    views = (((-3.2, 0.2), [-3, -2, -1, 0], "a", "left-going waves"), ((0.6, 1.72), [0.8, 1.2, 1.6], "b", "wave train"),
+             ((1.76, 1.92), [1.8, 1.85, 1.9], "c", "post-shock peak"), ((2.33, 2.45), [2.36, 2.40, 2.44], "d", "main shock"))
+    for ax, (xlim, ticks, letter, label) in zip(z, views):
+        zoom(b, ax, xlim, ticks, runs, refs, letter, label)
         mark(a, xlim, ax.get_ylim(), letter)
         ax.set_xlabel(r"$x$")
     z[0].set_ylabel(r"$\rho$")
@@ -335,27 +350,26 @@ def fig_woodward_colella():
     lr = reference_file("luna/woodward_colella/woodward_colella_mc.npz")["rho"]
     ar = reference_file("athenak/woodward_colella/a9_ppmx_rk4_16384.npz")["ref_rho"]
     refs = [(centres(0, 1, lr.size), lr, REF), (centres(0, 1, ar.size), ar, AK)]
-    fig = plt.figure(figsize=(FIGSIZE[0] * 2.5, FIGSIZE[1] * 1.8))
-    outer = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.2)
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.8))
+    outer = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.24)
     ax = fig.add_subplot(outer[0])
     for rx, ry, kw in refs:
         ax.plot(rx, ry, **kw)
     line(ax, xl, rl, "luna")
     line(ax, xs, rs, "static")
     line(ax, x, r, "moving")
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 8.6)
-    ax.set_xlabel(r"$x$")
+    ax.set_xlim(0.4, 1)
+    ax.set_ylim(0, 9.2)
     ax.set_ylabel(r"$\rho$")
-    ax.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"), rkey("LUNA, high resolution"), rkey("AthenaK PPMX", AK)],
-              loc="upper left")
-    z = outer[1].subgridspec(1, 5, wspace=0.32).subplots()
+    ax.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"), rkey("LUNA, high resolution", REF), rkey("AthenaK PPMX", AK)],
+              **LEGEND)
+    z = outer[1].subgridspec(1, 5, wspace=0.3).subplots()
     runs = [(xl, rl, "luna"), (xs, rs, "static"), (x, r, "moving")]
-    zoom(ax, z[0], (0.585, 0.607), runs, refs, "a", "contact", "ul", (0, 3.2))
-    zoom(ax, z[1], (0.640, 0.656), runs, refs, "b", "shock", "ul", (1.6, 6.6))
-    zoom(ax, z[2], (0.755, 0.777), runs, refs, "c", "contact", "ul", (2.2, 8.0))
-    zoom(ax, z[3], (0.788, 0.806), runs, refs, "d", "shock", "ur", (0, 7.4))
-    zoom(ax, z[4], (0.855, 0.875), runs, refs, "e", "shock", "ur", (0, 1.6))
+    views = (((0.585, 0.607), [0.588, 0.596, 0.604], "a", "contact"), ((0.640, 0.656), [0.643, 0.648, 0.653], "b", "shock"),
+             ((0.755, 0.777), [0.758, 0.766, 0.774], "c", "contact"), ((0.788, 0.806), [0.790, 0.797, 0.804], "d", "shock"),
+             ((0.855, 0.875), [0.858, 0.865, 0.872], "e", "shock"))
+    for a, (xlim, ticks, letter, label) in zip(z, views):
+        zoom(ax, a, xlim, ticks, runs, refs, letter, label)
     z[0].set_ylabel(r"$\rho$")
     for a in z:
         a.set_xlabel(r"$x$")
@@ -370,7 +384,7 @@ def fig_convergence():
     rows = report()
     wide = wide_rule_l1()
     matrix = [r for r in json.load(open(MATRIX)) if r["problem"] == "shu-osher-wide" and r["config"] == "c04"]
-    fig, axes = plt.subplots(2, 3, figsize=(FIGSIZE[0] * 3, FIGSIZE[1] * 2), sharex=True, gridspec_kw=dict(hspace=0, wspace=0.27))
+    fig, axes = plt.subplots(2, 3, figsize=(WIDTH, FIGSIZE[1] * 1.7), sharex=True, gridspec_kw=dict(hspace=0, wspace=0.34))
     for j, (p, title) in enumerate(PROBLEMS):
         for i, (var, ylabel) in enumerate(ROWS):
             ax = axes[i, j]
@@ -387,15 +401,15 @@ def fig_convergence():
             if i == 1:
                 ax.set_xlabel(r"$N$")
             ax.set_xlim(150, 5e5)
-        corner(axes[0, j], title, *((0.96, 0.95, "right") if p == "woodward-colella" else (0.06, 0.12)))
-    axes[1, 0].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], loc="lower left")
-    axes[1, 1].legend(handles=[key("padded", "padded, LUNA rule", True), key("padded3", "padded, default rule", True)], loc="upper right", bbox_to_anchor=(1, 0.87))
+        corner(axes[0, j], title, 0.05, 0.05, va="bottom")
+    axes[0, 0].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], **LEGEND)
+    axes[1, 1].legend(handles=[key("padded", "padded, LUNA rule", True), key("padded3", "padded, default rule", True)], fontsize=LABEL, loc="upper right", bbox_to_anchor=(1, 0.87))
     save(fig, "convergence_1d")
 
 
 def fig_time():
     rows = report()
-    fig, axes = plt.subplots(2, 3, figsize=(FIGSIZE[0] * 3, FIGSIZE[1] * 2), sharex=True, gridspec_kw=dict(hspace=0, wspace=0.27))
+    fig, axes = plt.subplots(2, 3, figsize=(WIDTH, FIGSIZE[1] * 1.7), sharex=True, gridspec_kw=dict(hspace=0, wspace=0.34))
     for j, (p, title) in enumerate(PROBLEMS):
         for i, (var, ylabel) in enumerate(ROWS):
             ax = axes[i, j]
@@ -410,8 +424,8 @@ def fig_time():
             if i == 1:
                 ax.set_xlabel(r"GPU time (s)")
             ax.set_xlim(4e-3, 6e2)
-        corner(axes[0, j], title, *((0.96, 0.95, "right") if p == "woodward-colella" else (0.06, 0.12)))
-    axes[1, 0].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], loc="upper right")
+        corner(axes[0, j], title, 0.05, 0.05, va="bottom")
+    axes[0, 0].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], **LEGEND)
     save(fig, "time_to_target_1d")
 
 
@@ -419,11 +433,11 @@ def fig_vortex():
     rows = vortex_rows()
     d = reference_file("luna/yee_vortex/yee_vortex_convergence.npz")
     pick = (d["dim"] == 3) & (d["limiter"] == 1) & (d["vx"] == 0) & (d["cfl"] == 0.8)
-    fig, axes = plt.subplots(1, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1]), gridspec_kw=dict(wspace=0.24))
+    fig, axes = plt.subplots(1, 2, figsize=(WIDTH, FIGSIZE[1]), gridspec_kw=dict(wspace=0.24))
     nx = (32, 64, 128, 256)
     for i, ax, ylabel, v in ((0, axes[0], r"$L_1(\rho)$", "rho"), (1, axes[1], r"$L_1(v)$", "v")):
         log_axes(ax)
-        ax.plot(nx, [rows["sta", n][1][i] for n in nx], color="k", ls=":", zorder=1)
+        ax.plot(nx, [rows["sta", n][1][i] for n in nx], color="k", ls=":", lw=THIN, zorder=1)
         for q, over in ((8, dict()), (1, dict(ls="--"))):
             s = pick & (d["ic_quad"] == q)
             o = np.argsort(d["nx"][s])
@@ -435,16 +449,17 @@ def fig_vortex():
         ax.set_xlim(26, 310)
         ax.set_xlabel(r"$n_x$")
         ax.set_ylabel(ylabel)
-    axes[0].legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", marker="o", ms=MS, mfc="none", label="LUNA MC, point start"),
+    axes[0].legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=LW, marker="o", ms=MS, mfc="none", label="LUNA MC, point start"),
                             key("static", "static", True), key("moving", "moving, one pass", True), key("two", "moving, two passes", True),
-                            rkey(r"$O(h)$ floor", dict(color="k", ls=":"))], loc="lower left")
+                            rkey(r"$O(h)$ floor", dict(color="k", ls=":", lw=THIN))], **LEGEND, ncol=2)
+    axes[0].set_ylim(top=axes[0].get_ylim()[1] * 9)
     save(fig, "vortex_3d")
 
 
 def fig_kh():
     runs, _, _ = kh_rows()
     eps = [float(c) for c in next(l for l in open(KH).read().splitlines() if l.startswith("| series | 0.05")).strip("| \n").split("|")[1:]]
-    fig, (a, b) = plt.subplots(1, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1]), sharey=True, gridspec_kw=dict(wspace=0.06))
+    fig, (a, b) = plt.subplots(1, 2, figsize=(WIDTH, FIGSIZE[1]), sharey=True, gridspec_kw=dict(wspace=0.06))
     for e in eps:
         b.axhline(e, color="0.6", lw=0.8, ls=":", zorder=1)
     for k, s in (("static", "static"), ("luna", "luna"), ("moving", "moving"), ("moving-twoflux", "two")):
@@ -458,7 +473,7 @@ def fig_kh():
     a.set_xlabel(r"$N$")
     a.set_ylabel(r"$\max\,|e|$")
     b.set_xlabel("GPU time (s)")
-    a.legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving, one flux", True), key("two", "moving, two fluxes", True)], loc="lower left")
+    a.legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving, one flux", True), key("two", "moving, two fluxes", True)], **LEGEND)
     save(fig, "kh_2d")
 
 
@@ -466,8 +481,8 @@ def fig_sedov():
     KPC, MSUN = 3.08568e21, 1.98892e33
     rho0 = 1.6726219e-24 / (1e10 * MSUN / KPC ** 3)
     e0 = 1e51 / (1e10 * MSUN * 1e10)
-    fig = plt.figure(figsize=(FIGSIZE[0] * 2.5, FIGSIZE[1] * 1.8))
-    grid = fig.add_gridspec(2, 3, width_ratios=[1, 1, 1.25], hspace=0.28, wspace=0.26)
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.8))
+    grid = fig.add_gridspec(2, 3, width_ratios=[1, 1, 1], hspace=0.3, wspace=0.3)
     a, b = fig.add_subplot(grid[0, :2]), fig.add_subplot(grid[:, 2])
     z = [fig.add_subplot(grid[1, 0]), fig.add_subplot(grid[1, 1])]
     prof = {}
@@ -488,12 +503,11 @@ def fig_sedov():
         shells.append((mid, y, name))
     a.set_xlim(0, 1.15)
     a.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(1))
-    a.set_xlabel(r"$r/R_{\rm s}$")
     a.set_ylabel(r"$\rho/\rho_0$")
-    a.set_ylim(0, 4.8)
+    a.set_ylim(0, 5.9)
     refs = [(fine / R, exact, REF)]
-    zoom(a, z[0], (0.72, 1.0), shells, refs, "a", "shell", "ul", (0.1, 4.4))
-    zoom(a, z[1], (0.95, 1.08), shells, refs, "b", "shock front", "ur", (0.5, 4.4))
+    zoom(a, z[0], (0.72, 0.95), [0.75, 0.85, 0.95], shells, refs, "a", "shell", ylim=(0.1, 3.3))
+    zoom(a, z[1], (0.95, 1.08), [0.96, 1.0, 1.04], shells, refs, "b", "shock front", ylim=(0.5, 5.2))
     for ax in z:
         ax.set_xlabel(r"$r/R_{\rm s}$")
     z[0].set_ylabel(r"$\rho/\rho_0$")
@@ -512,8 +526,8 @@ def fig_sedov():
     b.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
     b.set_xlabel(r"$n$")
     b.set_ylabel(r"$L_1(\rho)$")
-    b.legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", marker="o", ms=MS, mfc="none", label="LUNA minmod"),
-                      key("static", "static", True), key("moving", "moving", True), rkey("Sedov-Taylor")], loc="upper right")
+    b.legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=LW, marker="o", ms=MS, mfc="none", label="LUNA minmod"),
+                      key("static", "static", True), key("moving", "moving", True), rkey("Sedov-Taylor", REF)], **LEGEND)
     save(fig, "sedov_3d")
 
 

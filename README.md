@@ -185,7 +185,7 @@ Shu-Osher, t = 1.8, N = 1024 on [-5, 5]. Top: on LUNA's domain moving fails: the
 
 ![Woodward-Colella density](docs/figures/woodward_colella.png)
 
-Woodward-Colella, t = 0.038, N = 2048, reflecting walls; zooms on each contact and shock, open markers a regular subset of the cells where they would touch. Moving holds them in far fewer cells than LUNA, with an overshoot at x = 0.765. Job 31917210, 947946a, runs as for Sod. Curves: luna-reference-solutions 99a52d0, `luna/woodward_colella/woodward_colella_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/woodward_colella/a9_ppmx_rk4_16384.npz` (AthenaK c52f88f).
+Woodward-Colella, t = 0.038, N = 2048, reflecting walls, shown from x = 0.4 (flat to its left); zooms on each contact and shock, open markers a regular subset of the cells where they would touch. Moving holds them in far fewer cells than LUNA, with an overshoot at x = 0.765. Job 31917210, 947946a, runs as for Sod. Curves: luna-reference-solutions 99a52d0, `luna/woodward_colella/woodward_colella_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/woodward_colella/a9_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
 ![Field L1 by N](docs/figures/convergence_1d.png)
 
