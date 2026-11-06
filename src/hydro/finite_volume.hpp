@@ -183,6 +183,20 @@ public:
     Integrator integrator() const { return integrator_; }
     const Gas& gas() const { return gas_; }
     const MeshStats& mesh_stats() const { return mesh_stats_; }
+
+    // A host copy of the limited density gradients of the last time_step(), one row per cell: what the
+    // scheme reconstructs from its value at the centroid. For output; double or float storage, order 1.
+    Kokkos::View<double**, Kokkos::HostSpace> density_gradients() const {
+        Kokkos::View<double**, Kokkos::HostSpace> rows("density_gradients", n_, D);
+        if constexpr (P::half) {
+            throw std::invalid_argument("density_gradients: not with half-precision gradient rows");
+        } else {
+            const auto g = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, gradients_);
+            for (std::ptrdiff_t i = 0; i < std::ptrdiff_t(n_); ++i)
+                for (int a = 0; a < D; ++a) rows(i, a) = g(i, a);
+        }
+        return rows;
+    }
     void set_step_rule(StepRule rule) { rule_ = rule; }
 
     // The global time step: the smallest of AREPO next generation's cell

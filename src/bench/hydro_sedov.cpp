@@ -5,7 +5,7 @@
 //   hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face]
 //               [--limiter=face|cell|none] [--riemann=hllc|hll] [--precision=<name>]
 //               [--moving] [--bulk=<km/s>] [--no-blast] [--box=fx,fy,fz] [--out=<dir>]
-//               [--snapshots=10] [--steps=<max>] [--input-order] [--memory]
+//               [--snapshots=10] [--steps=<max>] [--input-order] [--memory] [--gradients]
 //               [--integrator=one-pass|two-pass] [--cold=f] [--watch]
 //
 // side^3 generating points in a 50 pc periodic box (jittered: a lattice
@@ -18,7 +18,8 @@
 // regularisation), the mesh is updated every step. --bulk: the whole box
 // moves along x at that speed (a moving blast wave). --box: the box sides as
 // multiples of 50 pc (default 1,1,1; about side^3 cells). --out writes snapshots
-// 0..snapshots at equal times (LUNA's time_bet_snaps = t_end / n_snaps).
+// 0..snapshots at equal times (LUNA's time_bet_snaps = t_end / n_snaps); --gradients also writes
+// <out>/gradients.bin at the end (six doubles per cell: centroid offset, limited density gradient).
 // --steps stops after that many steps (timing runs). Particles are numbered
 // in Morton order of their positions (--input-order: as generated, lattice
 // rows or random). --update: the update loop, default face at order 1 and
@@ -45,6 +46,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <numeric>
 #include <stdexcept>
@@ -206,7 +208,7 @@ struct Options {
     std::string kind, loop, limit, riemann, out, precision;
     hydro::Update update = hydro::Update::per_face;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
-    bool moving = false, input_order = false, blast = true, watch = false;
+    bool moving = false, input_order = false, blast = true, gradients = false, watch = false;
     double cold = 1;
     hydro::Integrator integrator = hydro::Integrator::one_pass;
     double bulk = 0;
@@ -334,6 +336,16 @@ void run(const Options& o, Points points) {
                   << " shortest_half_box=" << 0.5 * box.shortest();
         if (!o.blast) std::cout << " uniform_deviation: rho=" << drho << " P=" << dP << " v=" << dv;
         if (!o.out.empty()) std::cout << " file=" << hydro::write_snapshot(o.out, snap);
+        if (o.gradients && index == o.snapshots) {  // the run is over: the gradients of the end state
+            fv.time_step(courant);
+            const auto gradient = fv.density_gradients();
+            const auto c = to_host(mesh.centroid());
+            std::ofstream rows(o.out + "/gradients.bin", std::ios::binary);
+            for (long long i = 0; i < n; ++i) {
+                const double row[6] = {double(c(i, 0)), double(c(i, 1)), double(c(i, 2)), gradient(i, 0), gradient(i, 1), gradient(i, 2)};
+                rows.write(reinterpret_cast<const char*>(row), sizeof(row));
+            }
+        }
         std::cout << "\n";
     };
 
@@ -471,7 +483,7 @@ int main(int argc, char** argv) {
         std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]"
                      " [--riemann=hllc|hll] [--precision=default|double|weight32|weight64|flux32|grad32|grad16|geo32|riemann32|mixed|mixed16|low|lowweights]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
-                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--integrator=one-pass|two-pass] [--cold=f] [--watch]\n";
+                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--integrator=one-pass|two-pass] [--cold=f] [--watch]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -500,6 +512,7 @@ int main(int argc, char** argv) {
     o.bulk = std::stod(flag(argc, argv, "--bulk", "0"));  // km/s along x
     o.out = flag(argc, argv, "--out", "");
     o.snapshots = std::stoi(flag(argc, argv, "--snapshots", "10"));
+    o.gradients = flag(argc, argv, "--gradients", "") == "1";
     o.max_steps = std::stoll(flag(argc, argv, "--steps", "0"));
     o.input_order = flag(argc, argv, "--input-order", "") == "1";
     // The periodic box: --box=fx,fy,fz times the 50 pc of LUNA's set-up (a
