@@ -122,13 +122,13 @@ column the moving rows are current (job 31925157, 1305 MHz); the static rows and
 HLL and first-order rows are the earlier code (jobs 31699864, 31699865,
 31700852, kept until they are re-measured):
 
-| Million cell updates per second | 2,097,152 cells | 16,777,216 cells |
+| G cell updates per second | 2,097,152 cells | 16,777,216 cells |
 |---|---|---|
-| moving mesh, two passes (default), HLLC, per-face loop (mesh update and face lists included) | **66** | 68 (whole run) |
-| moving mesh, one pass, same | 84 | 88 (whole run) |
-| static mesh, MUSCL-Hancock HLLC, per-face loop | **152** | 105 |
-| static mesh, MUSCL-Hancock HLL, per-face loop | 116 | 114 |
-| static mesh, first order HLLC, per-cell loop | 288 | 290 |
+| moving mesh, two passes (default), HLLC, per-face loop (mesh update and face lists included) | **0.066** | 0.068 (whole run) |
+| moving mesh, one pass, same | 0.084 | 0.088 (whole run) |
+| static mesh, MUSCL-Hancock HLLC, per-face loop | **0.152** | 0.105 |
+| static mesh, MUSCL-Hancock HLL, per-face loop | 0.116 | 0.114 |
+| static mesh, first order HLLC, per-cell loop | 0.288 | 0.290 |
 | device memory, mesh + hydro (static, per-face, second order) | 2434 B/cell | 2371 B/cell (41.2 GB in use) |
 | device memory, moving mesh + hydro, two passes (per-face) | 2319 B/cell | 2319 B/cell (40.5 GB in use, whole run); `--precision=mixed` 2445 B/cell, does not fit at 256^3, see Limitations |
 | device memory, moving mesh + hydro, one pass (per-face) | 2298 B/cell | 2298 B/cell (40.1 GB in use, whole run); `--precision=mixed` 2334 B/cell (40.7 GB, job 31925336) |
@@ -164,14 +164,14 @@ limiter. Points are regularised as
 AREPO next generation does without a face angle: a drift towards the
 density-displaced centroid when it is more than 0.75 cell radii away.
 
-M cell updates/s, one A100 40 GB at 1305 MHz (ravg1002, job 31917211, Sod,
+G cell updates/s, one A100 40 GB at 1305 MHz (ravg1002, job 31917211, Sod,
 HLLC, 2000 steps, 200 at 2^24; hydro only is a static step, whole step a
 moving one at its defaults with the order check):
 
 | cells | 4,096 | 65,536 | 1,048,576 | 16,777,216 |
 |---|---|---|---|---|
-| hydro only | 81 | 948 | 2810 | 3226 |
-| whole moving step | 48 | 636 | 1872 | 2297 |
+| hydro only | 0.081 | 0.948 | 2.810 | 3.226 |
+| whole moving step | 0.048 | 0.636 | 1.872 | 2.297 |
 
 Below ~1e5 cells a step is bound by launch latency (~60 us), not by the
 kernel. Peak device memory: 144 B/cell static, 152 B/cell moving. Runs are
@@ -188,19 +188,19 @@ Sod, t = 0.25, N = 512, cell means at centroids against the exact solution; the 
 
 ![Shu-Osher density](docs/figures/shu_osher.png)
 
-Shu-Osher, t = 1.8, N = 1024 on [-5, 5]. Top: on LUNA's domain moving fails: the grown inflow cell flattens the waves (job 31917208, 947946a, runs as for Sod). Middle: padded domain [-15, 5], same cell width: moving follows the reference, at the default rule at 0.3 (0.4 was not run padded), OpenMP, job 31920121, branch dim-1d-diag. Bottom: zooms of the regions marked above, open markers a regular subset of the cells where they would touch. Curves: luna-reference-solutions 99a52d0, `luna/shu_osher/shu_osher_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/shu_osher/so_ppmx_rk4_16384.npz` (AthenaK c52f88f).
+Shu-Osher, t = 1.8, N = 1024. LUNA and static on [-5, 5], job 31917208, 947946a, runs as for Sod. Moving on the domain [-15, 5], same cell width, default rule at 0.3 (0.4 was not run there), OpenMP, job 31920121, branch dim-1d-diag. Inflow on a moving mesh needs cells to be added at the wall, see [issue #3](https://github.com/Ulli1991/luna-cpp/issues/3); until then moving is shown on the padded domain. Zooms of the regions marked above, open markers a regular subset of the cells where they would touch. Curves: luna-reference-solutions 99a52d0, `luna/shu_osher/shu_osher_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/shu_osher/so_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
 ![Woodward-Colella density](docs/figures/woodward_colella.png)
 
-Woodward-Colella, t = 0.038, N = 2048, reflecting walls; zooms on each contact and shock, open markers a regular subset of the cells where they would touch. Moving holds them in far fewer cells than LUNA, with an overshoot at x = 0.765. Job 31917210, 947946a, runs as for Sod. Curves: luna-reference-solutions 99a52d0, `luna/woodward_colella/woodward_colella_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/woodward_colella/a9_ppmx_rk4_16384.npz` (AthenaK c52f88f).
+Woodward-Colella, t = 0.038, N = 2048, reflecting walls, shown from x = 0.4 (flat to its left); zooms on each contact and shock, open markers a regular subset of the cells where they would touch. Moving holds them in far fewer cells than LUNA, with an overshoot at x = 0.765. Job 31917210, 947946a, runs as for Sod. Curves: luna-reference-solutions 99a52d0, `luna/woodward_colella/woodward_colella_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/woodward_colella/a9_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
 ![Field L1 by N](docs/figures/convergence_1d.png)
 
-Field L1 of the reconstructed field (`scripts/compare_1d.py`), against the exact solution on Sod, LUNA MC 2^21 cells on Shu-Osher, LUNA MC 2^20 cells on Woodward-Colella. Sod: moving ahead of LUNA in rho, 2-13 % over it in P. Shu-Osher: a floor at 0.037 on LUNA's domain, padded runs (norm on [-5, 5], N per length 10) at LUNA's level: LUNA's rule 0.4, job 31919016, default rule at 0.3, job 31920121, branch dim-1d-diag. Woodward-Colella: ahead of LUNA, with a stall near 3.4e-4 in rho. Jobs 31917206/8/10, 947946a.
+Field L1 of the reconstructed field (`scripts/compare_1d.py`), against the exact solution on Sod, LUNA MC 2^21 cells on Shu-Osher, LUNA MC 2^20 cells on Woodward-Colella. Sod: moving ahead of LUNA in rho, 2-13 % over it in P. Shu-Osher: LUNA and static on [-5, 5]; moving on the domain [-15, 5] (norm on [-5, 5], N per length 10): LUNA's rule 0.4, job 31919016, default rule at 0.3, job 31920121, branch dim-1d-diag. Woodward-Colella: ahead of LUNA, with a stall near 3.4e-4 in rho. Jobs 31917206/8/10, 947946a.
 
 ![GPU time against field L1](docs/figures/time_to_target_1d.png)
 
-GPU seconds of the stepping loop, one A100, one point per N, dotted lines the targets of the notes; LUNA's compile not counted, below ~1e5 cells a step is launch latency. LUNA wins Sod and Shu-Osher, where moving reaches no target. On Woodward-Colella it is close in rho and P, and only moving reaches rho 1e-3 in the ladder. One job per test: Sod 31917206, Shu-Osher 31917208 at 1095 MHz, Woodward-Colella 31917210 at 1305 MHz, 947946a.
+GPU seconds of the stepping loop, one A100, one point per N, dotted lines the targets of the notes; LUNA's compile not counted, below ~1e5 cells a step is launch latency. LUNA wins Sod. Shu-Osher shows LUNA and static on their domain. On Woodward-Colella it is close in rho and P, and only moving reaches rho 1e-3 in the ladder. One job per test: Sod 31917206, Shu-Osher 31917208 at 1095 MHz, Woodward-Colella 31917210 at 1305 MHz, 947946a.
 
 ![3D Yee vortex](docs/figures/vortex_3d.png)
 
@@ -214,11 +214,15 @@ Kelvin-Helmholtz after McNally, Lyra & Passy (2012), N^2 cells, one A100 at 1305
 
 Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot rank schemes, order below 1 for every code (0.66 LUNA minmod, 0.78 moving, n = 128 to 256). Left: volume-weighted shells at 128^3 with zooms on the shell and the shock front, markers are shells, not cells, branch dim-limiters, jobs 31918879 (moving), 31918880 (static), 31918732 (LUNA). Right: field L1 over r < 1.5 R_s of the piecewise-constant field, not sampled at generators; older code, jobs 31879294, 31879807 (LUNA minmod 128-448, moving 64-256, 256 with the per-cell loop, static 64-192), LUNA MC 128 and 256 from dim-limiters. Ours: HLLC, jittered, Courant 0.3, face limiter; moving is one pass in all these runs, older than the two-pass default.
 
+Throughput against resolution on one A100, 32³ to 256³, Sedov 3D, 1095 MHz, double, HLLC, 40 steps, with LUNA (MC, Pallas, FP64; median of the perf lines of three rounds) and peak memory. Hydro is flat from 96³ to 256³; below 64³ the fixed cost per step dominates. Job 31928911, mesh pin 0b433f0.
+
+![Throughput against resolution](docs/figures/throughput_scaling.png)
+
 ## Limitations and open items
 
-- The hydro step is not yet at its target (~300 M cell updates/s): on the A100 at 128^3 double precision runs at
-  152 M cell updates/s static, its hydro part at 140 M cells/s on a moving mesh (one pass), the whole moving step at
-  84 M cell updates/s with one pass, 66 with two. Compile-time precision options (`--precision=`, default double): mixed +10 %, low +19 % on the
+- The hydro step is not yet at its target (~0.3 G cell updates/s): on the A100 at 128^3 double precision runs at
+  0.152 G cell updates/s static, its hydro part at 0.140 G cell updates/s on a moving mesh (one pass), the whole moving step at
+  0.084 G cell updates/s with one pass, 0.066 with two. Compile-time precision options (`--precision=`, default double): mixed +10 %, low +19 % on the
   hydro static, +4 % / +7 % on the whole moving step with one pass (research_notes/hydro_speed_2026-11-04.md).
 - Moving 256^3 on a 40 GB A100: two passes in double fit (2319 B/cell, 40484 of 42405 MB in use); with `--precision=mixed`
   they do not (2445 B/cell, about 42.6 GB needed): use `--integrator=one-pass` there, or `--precision=grad32`
@@ -226,14 +230,13 @@ Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot ran
 - On the CPU (gcc's default FP contraction) some hydro modes differ from the GPU in the last bits; the A100 runs are
   bit-identical run to run.
 - Periodic boxes only in 3D and 2D; only 1D has walls.
-- 1D moving mesh, inflow: no refinement, so the gas that enters from an inflow wall fills a few grown cells. That gas
-  is not uniform in general (Shu-Osher: acoustic waves cross it), so the error there does not converge.
+- 1D moving mesh: inflow needs cells to be added at the wall, see [issue #3](https://github.com/Ulli1991/luna-cpp/issues/3).
 - 1D moving mesh: the error of Woodward-Colella stops falling near N = 2^15, at every Courant number tried
   (research_notes/stage1_1d_2026-11-04.md).
 
 ## Roadmap
 
-1. Hydro speed, first round done: 107 -> 152 M cell updates/s static double, 56 -> 73 for the whole moving step (one pass). The
+1. Hydro speed, first round done: 0.107 -> 0.152 G cell updates/s static double, 0.056 -> 0.073 for the whole moving step (one pass). The
    remaining limit is memory waits in the gradient sweep; sliced lists, 16-bit offsets, tiles and a face-major update
    did not help (research_notes/hydro_speed_2026-11-04.md).
 2. Multi-GPU hydro, on the mesh's domain decomposition and ghost layers (voronoi-cpp).
