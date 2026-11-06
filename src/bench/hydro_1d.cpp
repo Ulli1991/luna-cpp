@@ -1,19 +1,13 @@
 // LUNA's 1D tests on the 1D Voronoi mesh (hydro::FiniteVolume<1>), timed.
 //
-//   hydro_1d <sod|shu-osher|woodward-colella> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]
+//   hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]
 //            [--dt=luna|arepo|fixed] [--courant=<c>] [--fixed-dt=<dt>] [--jitter=<spacings>]
-//            [--limiter=face|cell|none] [--steps=<max>] [--repeats=<r>] [--phases] [--memory]
-//            [--no-regularise] [--unfused] [--out=<file.npy>] [--series=<name>]
+//            [--limiter=face|cell|none|minmod|vanleer] [--amp=<a>] [--steps=<max>] [--max-wall=<s>]
+//            [--repeats=<r>] [--phases] [--memory] [--no-regularise] [--unfused] [--out=<file.npy>] [--series=<name>]
 //
-// Setups are LUNA's (scripts/luna_1d_run.py has the file:line of each):
-// Sod (Toro 1: (1, 0, 1) | (0.125, 0, 0.1) at 0.5 on [0, 1], t = 0.25,
-// zero-gradient walls), Shu-Osher (LEFT = (3.857143, 2.629369, 10.33333)
-// for x < -4, (1 + 0.2 sin 5x, 0, 1) beyond, on [-5, 5], t = 1.8,
-// zero-gradient walls), Woodward-Colella (rho = 1, u = 0, p = 1000 | 0.01
-// | 100 split at 0.1 and 0.9 on [0, 1], t = 0.038, reflective walls);
-// gamma 1.4. Every cell starts from the exact average of the initial state
-// over its own interval (LUNA's: cell averages over its uniform cells;
-// equal on a uniform line). N points on a uniform lattice, or moved by up to
+// Problems: the table of problems_1d.hpp, each with its gamma. Every cell
+// starts from the problem's state over its own interval. --amp: the signed
+// amplitude of the linear waves, or the simple wave's. N points on a uniform lattice, or moved by up to
 // --jitter / 2 spacings. --dt: LUNA's rule, the default of a static run
 // (--courant default 0.8), AREPO's, the default of a moving run (default
 // 0.4), or a constant --fixed-dt; the last step lands on t_end. --steps stops after that many steps (throughput).
@@ -26,7 +20,9 @@
 // --phases, always unfused, fences the phases of a step and prints their rates. --memory adds the peak of the device allocations.
 // --out writes an .npy of N rows (generator, centroid, V, rho, u, p) in x
 // order, x in the problem's coordinates; with --series also <file.npy>.json
-// (series, problem, N, steps, wall_s, peak_MB, file) for scripts/compare_1d.py.
+// (series, problem, N, steps, wall_s, peak_MB, file, t, reached) for scripts/compare_1d.py.
+// A run stops early, reached=0, on a step that is not positive or after
+// --max-wall seconds; what it has is still written.
 
 #include "finite_volume_1d.hpp"
 #include "problems_1d.hpp"
@@ -50,7 +46,6 @@ using Exec = Kokkos::DefaultExecutionSpace;
 using Memory = Exec::memory_space;
 using Mesh = voronoi::Mesh<1, Exec>;
 using State = hydro::State<1>;
-using hydro::problems_1d::gamma_gas;
 using hydro::problems_1d::Problem;
 using hydro::problems_1d::problem;
 
@@ -93,7 +88,7 @@ bool has(int argc, char** argv, const char* name) {
 
 struct Options {
     int n = 0, order = 1;
-    double jitter = 0, courant = 0.8, fixed_dt = 0;
+    double jitter = 0, courant = 0.8, fixed_dt = 0, max_wall = 0;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
     hydro::Motion motion = hydro::Motion::static_mesh;
     bool fixed = false, phases = false, regularise = true, fused = true;
@@ -103,6 +98,7 @@ struct Options {
 
 struct Result {
     long long steps = 0, sorts = 0;
+    bool reached = false;
     double wall_s = 0, t = 0;
     std::uint64_t hash = 0;
     hydro::Timings timings;
@@ -137,7 +133,7 @@ template <class Riemann>
 Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     const Exec exec;
     const int n = o.n;
-    Mesh mesh(exec, pb.L, voronoi::Ends::walls);
+    Mesh mesh(exec, pb.L, pb.ends);
     {
         Kokkos::View<double* [1], Memory> x("x", n);
         auto h = Kokkos::create_mirror_view(x);
@@ -147,7 +143,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
         Kokkos::deep_copy(x, h);
         mesh.update(x);
     }
-    hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{gamma_gas}, o.order, o.limiter, o.motion, pb.walls, o.regularise);
+    hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{pb.gamma}, o.order, o.limiter, o.motion, pb.walls, o.regularise);
     {
         const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
         const auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
@@ -169,6 +165,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     double next = fused ? fv.time_step(o.courant, o.rule) : 0;
     while (t < pb.t_end * (1 - 1e-12) && (o.max_steps == 0 || r.steps < o.max_steps)) {
         double dt = fused ? next : o.fixed ? o.fixed_dt : fv.time_step(o.courant, o.rule, timings);
+        if (!(dt > 1e-15 * pb.t_end) || (o.max_wall > 0 && timer.seconds() > o.max_wall)) break;
         dt = std::min(dt, pb.t_end - t);
         if (fused)
             next = fv.step_and_time_step(dt, o.courant);
@@ -180,6 +177,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     exec.fence();
     r.wall_s = timer.seconds();
     r.t = t;
+    r.reached = t >= pb.t_end * (1 - 1e-12);
     r.sorts = mesh.sorts();
     const auto q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
     r.hash = 14695981039346656037ull;
@@ -208,9 +206,10 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
 int main(int argc, char* argv[]) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     if (argc < 3) {
-        std::cerr << "usage: hydro_1d <sod|shu-osher|woodward-colella> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
-                     " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|cell|none]"
-                     " [--steps=max] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--out=file.npy] [--series=name]\n";
+        std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
+                     " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|cell|none|minmod|vanleer]"
+                     " [--amp=a] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused]"
+                     " [--out=file.npy] [--series=name]\n";
         return 1;
     }
     const std::string name = argv[1];
@@ -229,16 +228,19 @@ int main(int argc, char* argv[]) {
     o.courant = std::stod(flag(argc, argv, "--courant", courant_default.c_str()));
     o.jitter = std::stod(flag(argc, argv, "--jitter", "0"));
     o.max_steps = std::stoll(flag(argc, argv, "--steps", "0"));
+    o.max_wall = std::stod(flag(argc, argv, "--max-wall", "0"));
     o.phases = has(argc, argv, "--phases");
     o.regularise = !has(argc, argv, "--no-regularise");
     o.fused = !has(argc, argv, "--unfused");
     const int repeats = std::stoi(flag(argc, argv, "--repeats", "2"));
     const std::string out = flag(argc, argv, "--out", "");
-    o.limiter = limit == "cell"   ? hydro::Limiter::cell_centroid
-                : limit == "none" ? hydro::Limiter::none
-                                  : hydro::Limiter::face_centroid;
+    o.limiter = limit == "cell"      ? hydro::Limiter::cell_centroid
+                : limit == "none"    ? hydro::Limiter::none
+                : limit == "minmod"  ? hydro::Limiter::minmod
+                : limit == "vanleer" ? hydro::Limiter::van_leer
+                                     : hydro::Limiter::face_centroid;
     if (has(argc, argv, "--memory")) DeviceMemory::start();
-    const Problem pb = problem(name);
+    const Problem pb = problem(name, std::stod(flag(argc, argv, "--amp", "0")));
     Result best;
     bool same = true;
     for (int run = 0; run < repeats; ++run) {
@@ -252,7 +254,7 @@ int main(int argc, char* argv[]) {
     const double rate = double(o.n) * best.steps / best.wall_s;
     std::cout << "ours: problem=" << name << " N=" << o.n << " mesh=" << (moving ? "moving" : "static") << " riemann=" << riemann
               << " order=" << o.order << " dt=" << rule_name << " courant=" << o.courant << " jitter=" << o.jitter
-              << " steps=" << best.steps << " t=" << best.t << " sorts=" << best.sorts << " wall_s=" << best.wall_s
+              << " steps=" << best.steps << " t=" << best.t << " reached=" << (best.reached ? 1 : 0) << " sorts=" << best.sorts << " wall_s=" << best.wall_s
               << " cell_updates=" << double(o.n) * best.steps << " M_cell_updates_per_s=" << rate / 1e6 << " hash=" << best.hash
               << " same_bits=" << (same ? 1 : 0) << " backend=" << Exec::name() << "\n";
     if (o.phases) {
@@ -270,6 +272,7 @@ int main(int argc, char* argv[]) {
         std::ofstream json(out + ".json");
         json << "{\"series\": \"" << series << "\", \"problem\": \"" << name << "\", \"N\": " << o.n << ", \"steps\": " << best.steps
              << ", \"wall_s\": " << best.wall_s << ", \"peak_MB\": " << DeviceMemory::peak / 1e6 << ", \"sorts\": " << best.sorts
+             << ", \"t\": " << best.t << ", \"reached\": " << (best.reached ? 1 : 0)
              << ", \"file\": \"" << out.substr(out.find_last_of('/') + 1) << "\"}\n";
     }
     if (DeviceMemory::peak > 0)

@@ -79,7 +79,8 @@ enum class Update { per_cell, per_face };
 // neighbours' range (AREPO next generation, mesh_gradients.cc:84-94): at
 // the face centroids (AREPO's default), at the neighbours' centroids
 // (AREPO's USE_MINMOD_SLOPE_LIMITING), or nowhere (no limiter).
-enum class Limiter { face_centroid, cell_centroid, none };
+// minmod and van_leer: the 1D hydro only (finite_volume_1d.hpp), LUNA's limiters 0 and 2.
+enum class Limiter { face_centroid, cell_centroid, none, minmod, van_leer };
 
 // A static mesh, or one whose points move with the flow.
 enum class Motion { static_mesh, moving };

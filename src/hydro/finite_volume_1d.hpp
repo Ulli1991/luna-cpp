@@ -31,6 +31,8 @@
 //   until the values extrapolated to the face centroids (or the neighbours'
 //   centroids) stay within the neighbours' range. On a uniform line this is
 //   the MC limiter of LUNA (slopes.py:22-24) on the central difference.
+//   Limiter::minmod and Limiter::van_leer are LUNA's other two (slopes.py:8,
+//   26) on the one-sided slopes between centroids, for the comparison per limiter.
 // - the MUSCL-Hancock half step and HLLC/HLL in 1D (euler.hpp), each side's
 //   face state the cell's if rho or P would not stay positive.
 // - moving: the point velocity is the fluid velocity plus AREPO-ng's
@@ -224,6 +226,12 @@ public:
             const Cell& me = *cell;
             const double dL = -gapL + cell[-1].c - me.c, dR = gapR + cell[1].c - me.c;
             const double Wi = me.W[v], left = cell[-1].W[v], right = cell[1].W[v];
+            if (limiter == Limiter::minmod || limiter == Limiter::van_leer) {
+                const double sL = (left - Wi) / dL, sR = (right - Wi) / dR;
+                if (!(sL * sR > 0)) return 0.0;
+                if (limiter == Limiter::van_leer) return 2 * sL * sR / (sL + sR);
+                return Kokkos::fabs(sL) < Kokkos::fabs(sR) ? sL : sR;
+            }
             double g = ((right - Wi) - (left - Wi)) / (dR - dL);
             if (limiter == Limiter::none) return g;
             const bool faces = limiter == Limiter::face_centroid;

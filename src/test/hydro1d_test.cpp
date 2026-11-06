@@ -279,7 +279,7 @@ int main(int argc, char* argv[]) {
         namespace pr = hydro::problems_1d;
         for (const Case& c : cases) {
             const pr::Problem problem = pr::problem(c.name);
-            const hydro::Gas gamma14{pr::gamma_gas};
+            const hydro::Gas gamma14{problem.gamma};
             Mesh mesh(exec, problem.L, voronoi::Ends::walls);
             build(mesh, points(16, problem.L, 0.0, 1));
             FV<> fv(exec, mesh, gamma14, 1, hydro::Limiter::face_centroid, Motion::static_mesh, problem.walls);
@@ -351,7 +351,7 @@ int main(int argc, char* argv[]) {
     {
         namespace pr = hydro::problems_1d;
         const pr::Problem problem = pr::problem("shu-osher");
-        const hydro::Gas gamma14{pr::gamma_gas};
+        const hydro::Gas gamma14{problem.gamma};
         long long sorts[2];
         for (int regularise = 0; regularise < 2; ++regularise) {
             Mesh mesh(exec, problem.L, voronoi::Ends::walls);
