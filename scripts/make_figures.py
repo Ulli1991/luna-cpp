@@ -36,8 +36,8 @@ OUT = os.environ.get("LUNA_CPP_FIGURES", os.path.join(HERE, "..", "docs", "figur
 SET = f"{RUNS}/build-1d/runs-set"            # jobs 31917206/8/10: LUNA, static, moving default at each N in one job
 REPORT = f"{RUNS}/build-1d/report-set/dim1d_errors.json"
 FINE = f"{RUNS}/build-1d/runs/refs"          # the references of the L1 table: LUNA MC 2^21 (Shu-Osher), 2^20 (WC)
-MATRIX = f"{RUNS}/build-1ddiag/runs_m/matrix.json"
-WIDE_CPU = f"{RUNS}/build-1ddiag/runs_mc"
+INFLOW_SET = f"{RUNS}/build-1dinsert/runs-so"  # Shu-Osher with cells from the inflow wall: LUNA, static, moving in one job
+INFLOW_REPORT = f"{RUNS}/build-1dinsert/report-so/dim1d_errors.json"
 VORTEX_LOGS = f"{RUNS}/build-1ddiag/logs"
 KH = f"{RUNS}/build-2d/runs/kh_table.md"
 SEDOV = f"{RUNS}/build-limiters/sedov"
@@ -54,9 +54,7 @@ LW, THIN = 1.2, 0.8  # runs; static over LUNA and the references
 STYLE = {"luna": dict(color=LUNA_C, ls="-", marker="o", lw=LW, zorder=2),
          "static": dict(color=STATIC_C, ls="--", marker="s", lw=THIN, zorder=2.5),
          "moving": dict(color=MOVING_C, ls="-", marker="^", lw=LW, zorder=3),
-         "two": dict(color=MOVING_C, ls="--", marker="D", lw=LW, zorder=3),
-         "padded": dict(color=MOVING_C, ls="--", marker="v", lw=LW, zorder=3),
-         "padded3": dict(color=MOVING_C, ls=":", marker="x", lw=LW, zorder=3)}
+         "two": dict(color=MOVING_C, ls="--", marker="D", lw=LW, zorder=3)}
 REF = dict(color="k", lw=THIN, zorder=2.7)
 AK = dict(color="k", lw=THIN, ls=":", zorder=2.7)
 MS = 2.8      # open markers
@@ -151,20 +149,8 @@ def centres(a, b, n):
     return a + (np.arange(n) + 0.5) * (b - a) / n
 
 
-def wide_rule_l1():
-    """Field L1 on [-5, 5] of the padded moving runs at the default rule, as matrix.py on dim-1d-diag: N per length 10."""
-    ref = cmp1d.Reference(f"{FINE}/ref_shu-osher.npz")
-    out = {}
-    for n in (512, 2048, 8192):
-        cmp1d.DOMAIN["w"], cmp1d.BOUNDARY["w"] = (-15.0, 5.0), "outflow"
-        rec, _ = cmp1d.ours(f"{WIDE_CPU}/aro_shu-osher-wide_{n}.npy", "w")
-        cmp1d.DOMAIN["w"] = (-5.0, 5.0)
-        out[n // 2] = cmp1d.l1(rec, ref, "w", (-5.0, 5.0)).tolist()
-    return out
-
-
 def report():
-    rows = json.load(open(REPORT))
+    rows = [r for r in json.load(open(REPORT)) if r["problem"] != "shu-osher"] + json.load(open(INFLOW_REPORT))
     return {(r["series"], r["problem"]): sorted([x for x in rows if (x["series"], x["problem"]) == (r["series"], r["problem"])], key=lambda x: x["N"])
             for r in rows}
 
@@ -304,10 +290,9 @@ def fig_sod():
 
 def fig_shu_osher():
     n, p = 1024, "shu-osher"
+    x, r, *_ = ours("moving-a04", p, n, INFLOW_SET)
     xs, rs, *_ = ours("static", p, n)
     xl, rl, *_ = luna(p, n)
-    w = np.load(f"{WIDE_CPU}/aro_shu-osher-wide_{2 * n}.npy")
-    xw, rw = w[:, 1], w[:, 3]
     lr = reference_file("luna/shu_osher/shu_osher_mc.npz")["rho"]
     ar = reference_file("athenak/shu_osher/so_ppmx_rk4_16384.npz")["ref_rho"]
     refs = [(centres(-5, 5, lr.size), lr, REF), (centres(-5, 5, ar.size), ar, AK)]
@@ -318,14 +303,14 @@ def fig_shu_osher():
         ax.plot(rx, ry, **kw)
     line(ax, xl, rl, "luna")
     line(ax, xs, rs, "static")
-    line(ax, xw, rw, "padded")
+    line(ax, x, r, "moving")
     ax.set_xlim(-5, 5)
     ax.set_ylim(0.4, 5.9)
     ax.set_ylabel(r"$\rho$")
-    ax.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("padded", "moving, domain [-15, 5]"),
+    ax.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving"),
                        rkey("LUNA, high resolution", REF), rkey("AthenaK PPMX", AK)], **LEGEND)
     z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
-    runs = [(xl, rl, "luna"), (xs, rs, "static"), (xw, rw, "padded")]
+    runs = [(xl, rl, "luna"), (xs, rs, "static"), (x, r, "moving")]
     views = (((-3.2, 0.2), [-3, -2, -1, 0], "a", "left-going waves"), ((0.6, 1.25), [0.7, 0.9, 1.1], "b", "wave train"),
              ((1.76, 1.92), [1.8, 1.85, 1.9], "c", "post-shock peak"), ((2.33, 2.45), [2.36, 2.40, 2.44], "d", "main shock"))
     for a, (xlim, ticks, letter, label) in zip(z, views):
@@ -375,22 +360,14 @@ ROWS = ((0, r"$L_1(\rho)$"), (2, r"$L_1(P)$"))
 
 def fig_convergence():
     rows = report()
-    wide = wide_rule_l1()
-    matrix = [r for r in json.load(open(MATRIX)) if r["problem"] == "shu-osher-wide" and r["config"] == "c04"]
     fig, axes = plt.subplots(2, 3, figsize=(WIDTH, FIGSIZE[1] * 1.7), sharex=True, gridspec_kw=dict(hspace=0, wspace=0.34))
     for j, (p, title) in enumerate(PROBLEMS):
         for i, (var, ylabel) in enumerate(ROWS):
             ax = axes[i, j]
             log_axes(ax)
             for s, k in (("static", "static"), ("luna", "luna"), ("moving", "moving-a04")):
-                if (s, p) == ("moving", "shu-osher"):  # issue #3: on the padded domain until inflow adds cells
-                    continue
                 r = rows[k, p]
                 loglog(ax, [x["N"] for x in r], [x["L1"][var] for x in r], s)
-            if p == "shu-osher":
-                loglog(ax, [m["N"] for m in matrix], [m["L1"][var] for m in matrix], "padded")
-                ks = sorted(wide)
-                loglog(ax, ks, [wide[k][var] for k in ks], "padded3")
             if j == 0:
                 ax.set_ylabel(ylabel)
             if i == 1:
@@ -398,7 +375,6 @@ def fig_convergence():
             ax.set_xlim(150, 5e5)
         corner(axes[0, j], title, 0.05, 0.05, va="bottom")
     axes[0, 0].legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving", True)], **LEGEND)
-    axes[0, 1].legend(handles=[key("padded", "moving, [-15, 5], LUNA rule", True), key("padded3", "moving, [-15, 5], default rule", True)], **LEGEND)
     save(fig, "convergence_1d")
 
 
@@ -412,8 +388,6 @@ def fig_time():
             for eps in cmp1d.TARGETS[p][cmp1d.VARS[var]]:
                 ax.axhline(eps, color="0.6", lw=0.8, ls=":", zorder=1)
             for s, k in (("static", "static"), ("luna", "luna"), ("moving", "moving-a04")):
-                if (s, p) == ("moving", "shu-osher"):  # issue #3: on the padded domain until inflow adds cells
-                    continue
                 r = rows[k, p]
                 loglog(ax, [x["wall_s"] for x in r], [x["L1"][var] for x in r], s)
             if j == 0:
