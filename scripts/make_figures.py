@@ -1205,7 +1205,7 @@ def ladder_rows():
     return rows, lad.orders(rows)
 
 
-LADDER_PANELS = [p for p in lad.ALL if p not in ("einfeldt-strong", "la-vacuum")]  # einfeldt-strong is Toro 2
+LADDER_PANELS = lad.ALL
 
 
 def fig_ladder():
@@ -1229,7 +1229,7 @@ def fig_ladder():
             if o["p_all"] is not None:
                 labels.append(f"{tag} {o['p_all']:.2f}")
         ax.set_xlim(150, 3e5)
-        ax.set_ylim(min(tops) / 3, max(tops) * 40)
+        ax.set_ylim(min(tops) / 40, max(tops) * 60)
         ax.tick_params(labelsize=LABEL)
         ax.yaxis.set_major_locator(matplotlib.ticker.LogLocator(numticks=4))
         ax.yaxis.set_minor_locator(matplotlib.ticker.NullLocator())
@@ -1241,21 +1241,21 @@ def fig_ladder():
         if ax.get_visible() and j + cols >= len(LADDER_PANELS):
             ax.set_xlabel(r"$N$")
             ax.tick_params(labelbottom=True)
-    axes[0, 0].legend(handles=[key("luna", "LUNA MC (L)", True), key("static", "static (S)", True), key("moving", "moving (M)", True), key("padded", "moving, wide line or fixed dt (W)", True)],
-                      loc="center right", fontsize=LABEL - 1, bbox_to_anchor=(1.0, 0.62))
+    axes.ravel()[LADDER_PANELS.index("la-streams")].legend(handles=[key("luna", "L LUNA"), key("static", "S static"), key("moving", "M moving"), key("padded", "W wide")],
+                      loc="upper right", bbox_to_anchor=(1.0, 0.86), fontsize=LABEL - 2, handlelength=1.2, labelspacing=0.1, borderpad=0, handletextpad=0.4)
     save(fig, "ladder_1d")
 
 
 def fig_hard():
     """Density of the hard cases at one N: LUNA, static, moving, exact; a zoom under each."""
-    cases = (("leblanc", "LeBlanc", "moving", True, (0.72, 0.8), [0.73, 0.75, 0.77, 0.79], "contact"),
-             ("einfeldt-strong", "Einfeldt strong", "moving-wide", False, (0.42, 0.58), [0.45, 0.50, 0.55], "near vacuum"),
-             ("noh", "Noh", "moving-fixed", False, (0.0, 0.03), [0.0, 0.01, 0.02], "wall heating"),
-             ("toro-3", "Toro 3", "moving", False, (0.76, 0.82), [0.77, 0.79, 0.81], "contact and shock"))
+    cases = (("leblanc", "LeBlanc", "moving", True, (0.70, 0.76), [0.71, 0.73, 0.75], "shock", None, (7e-4, 2.5)),
+             ("einfeldt-strong", "Einfeldt strong, moving: wide line", "moving-wide", False, (0.42, 0.58), [0.45, 0.50, 0.55], "near vacuum", None, (-0.03, 1.32)),
+             ("noh", "Noh, moving: fixed dt", "moving-fixed", False, (0.0, 0.03), [0.0, 0.01, 0.02], "wall heating", (2.9, 4.5), (0.5, 5.6)),
+             ("toro-3", "Toro 3", "moving", False, (0.76, 0.82), [0.77, 0.79, 0.81], "shock", (0.3, 8.8), (0, 10.5)))
     n = 1024
     fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.15))
     outer = fig.add_gridspec(2, 4, height_ratios=[2.2, 1.5], hspace=0.2, wspace=0.28)
-    for j, (p, title, moving, logy, xlim, ticks, label) in enumerate(cases):
+    for j, (p, title, moving, logy, xlim, ticks, label, zoom_y, main_y) in enumerate(cases):
         ax, low = fig.add_subplot(outer[0, j]), fig.add_subplot(outer[1, j])
         x_l = ldr.cells(f"{LAD_RUNS}/luna-mc_{p}_{n}.npz", p)
         xl, rl = 0.5 * (x_l[0] + x_l[1]), x_l[2][0]
@@ -1274,11 +1274,12 @@ def fig_hard():
         for x, r, s in runs:
             line(ax, x, r, s)
         ax.set_xlim(*lim)
+        ax.set_ylim(*main_y)
         if logy:
             ax.set_yscale("log")
         ax.tick_params(labelsize=LABEL)
-        corner(ax, f"{title}, N = {n}", 0.95, 0.95, "right")
-        zoom(ax, low, xlim, ticks, runs, [(fine, exact, REF)], "abcd"[j], label)
+        corner(ax, f"{title}\nN = {n}", 0.95, 0.95, "right")
+        zoom(ax, low, xlim, ticks, runs, [(fine, exact, REF)], "abcd"[j], label, zoom_y)
         low.set_xlabel(r"$x$")
         if j == 0:
             ax.set_ylabel(r"$\rho$")
