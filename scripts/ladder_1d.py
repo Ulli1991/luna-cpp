@@ -187,6 +187,10 @@ def orders(rows):
     return out
 
 
+def num(x):
+    return "-" if x is None else f"{x:.2f}"
+
+
 def table(runs, reports, refs_dir):
     refs = references(refs_dir)
     rows = []
@@ -203,8 +207,8 @@ def table(runs, reports, refs_dir):
     print("| test | variable | series | N | L1 first | L1 last | p all | p top | rungs |")
     print("|---|---|---|---|---|---|---|---|---|")
     for (p, s, k), o in sorted(res.items(), key=lambda kv: (ALL.index(kv[0][0]), kv[0][2], SERIES.index(kv[0][1]))):
-        print(f"| {p} | {VARS[k]} | {s} | {o['N'][0]}-{o['N'][-1]} | {o['L1'][0]:.3e} | {o['L1'][-1]:.3e} | {o['p_all']:.2f} | "
-              f"{o['p_top']:.2f} | {o['n_fit']}{' floor' if o['floor'] else ''} |")
+        print(f"| {p} | {VARS[k]} | {s} | {o['N'][0]}-{o['N'][-1]} | {o['L1'][0]:.3e} | {o['L1'][-1]:.3e} | {num(o['p_all'])} | "
+              f"{num(o['p_top'])} | {o['n_fit']}{' floor' if o['floor'] else ''} |")
     print("\n## Runs that did not reach t_end\n")
     for r in rows:
         if not r.get("reached", 1):

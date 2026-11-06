@@ -22,6 +22,8 @@ struct Problem {
     Walls walls;
     std::function<State<1>(double a, double b)> average;
     voronoi::Ends ends = voronoi::Ends::walls;
+    State<1> left{}, right{};  // a tube: the primitives either side of the jump at x0
+    double x0 = 0;
 };
 
 constexpr double pi = 3.141592653589793;
@@ -40,7 +42,7 @@ inline Problem tube(double L, double origin, double t_end, double gamma, State<1
     return {L, origin, t_end, gamma, walls, [=](double a, double b) {
                 const double f = fraction_below(x0, a, b);
                 return State<1>{f * l[0] + (1 - f) * r[0], f * l[1] + (1 - f) * r[1], f * l[2] + (1 - f) * r[2]};
-            }};
+            }, voronoi::Ends::walls, left, right, x0};
 }
 
 // A shock at x0 into 1 + amp sin(k x), LUNA's exact cell averages (shu_osher.py:26-46) on [a, b].
