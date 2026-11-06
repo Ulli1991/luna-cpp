@@ -5,8 +5,8 @@ the same code for checks), on the exact Voronoi meshes of
 [voronoi-cpp](https://github.com/Ulli1991/voronoi-cpp), which it includes as a git submodule.
 
 MUSCL-Hancock with HLLC or HLL on static meshes, AREPO next generation's two flux passes as the default on moving ones, AREPO-style least-squares
-gradients and mesh regularisation, on a static or moving mesh, bit-reproducible run to run, in 3D and 2D (periodic boxes) and 1D (with walls). On Sedov 3D the moving mesh is more
-accurate than the static mesh at the same resolution in 4.6x fewer steps (see "The hydro").
+gradients and mesh regularisation, on a static or moving mesh, bit-reproducible run to run, in 3D and 2D (periodic boxes) and 1D (with walls). On Sedov 3D at 256³ the moving mesh takes
+925 steps where the static mesh takes 5834 (see "The hydro").
 
 BSD 3-Clause, see [LICENSE](LICENSE).
 
@@ -118,20 +118,23 @@ Sedov blast (1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr) and writes HDF5
 snapshots. Measured on one A100, double, jittered points in Morton order,
 median of 40 steps. The 2.1M column is current (static job 31879405, moving jobs 31925156 and
 31925157, HLLC rows; the same code varies by about 10 % between GPU jobs). In the 16.8M
-column the moving rows are current (job 31925157, 1305 MHz); the static rows and the
-HLL and first-order rows are the earlier code (jobs 31699864, 31699865,
-31700852, kept until they are re-measured):
+column the moving rows are current (job 31925157, 1305 MHz), and so are static HLLC and LUNA
+(job 31953468, 1305 MHz); the HLL and first-order rows and the static memory row are the earlier
+code (jobs 31699864, 31699865, 31700852, kept until they are re-measured):
 
 | G cell updates per second | 2,097,152 cells | 16,777,216 cells |
 |---|---|---|
 | moving mesh, two passes (default), HLLC, per-face loop (mesh update and face lists included) | **0.066** | 0.068 (whole run) |
 | moving mesh, one pass, same | 0.084 | 0.088 (whole run) |
-| static mesh, MUSCL-Hancock HLLC, per-face loop | **0.152** | 0.105 |
+| static mesh, MUSCL-Hancock HLLC, per-face loop | **0.152** | 0.149 |
 | static mesh, MUSCL-Hancock HLL, per-face loop | 0.116 | 0.114 |
 | static mesh, first order HLLC, per-cell loop | 0.288 | 0.290 |
+| LUNA, MC, HLLC, Pallas, FP64 | 0.76 | 0.954 |
+| LUNA, same, FP32 | 1.37 | 2.133 |
 | device memory, mesh + hydro (static, per-face, second order) | 2434 B/cell | 2371 B/cell (41.2 GB in use) |
 | device memory, moving mesh + hydro, two passes (per-face) | 2319 B/cell | 2319 B/cell (40.5 GB in use, whole run); `--precision=mixed` 2445 B/cell, does not fit at 256³, see Limitations |
 | device memory, moving mesh + hydro, one pass (per-face) | 2298 B/cell | 2298 B/cell (40.1 GB in use, whole run); `--precision=mixed` 2334 B/cell (40.7 GB, job 31925336) |
+| device memory, LUNA, FP64 | 0.22 GB | 1.25 GB, 0.63 GB in FP32 |
 
 Sedov at 128³ (job 31699863; the moving numbers of this paragraph are one pass), HLLC: shock radius 0.978 of the
 Sedov-Taylor value at 1e4 yr, L1 density error 0.075 rho0 (first order:
@@ -247,6 +250,16 @@ Precision options against resolution on one A100, 32³ to 256³, the same Sedov,
 
 ![Throughput by precision](docs/figures/throughput_precision.png)
 
+| 256³, job 31953468 | double | `grad32` | `grad16` | LUNA FP64 | LUNA FP32 |
+|---|---|---|---|---|---|
+| hydro static, G cell updates/s | 0.149 | 0.166 | 0.170 | 0.954 | 2.133 |
+| whole two-pass step, G cell updates/s | 0.070 | 0.076 | 0.077 | | |
+| GPU GB, two passes | 40.5 | 39.4 | 38.9 | 1.25 | 0.63 |
+
+Throughput against resolution in 1D, 2D and 3D on one A100, HLLC, FP64, with LUNA (MC, Pallas) and peak memory. A blast in all three: LUNA's Sedov without units in 1D (gamma 1.4) and 2D (gamma 5/3), the Sedov above in 3D. 1D has no two-pass integrator, so its whole step is one pass. At the largest size the static hydro runs 2.66, 0.67 and 0.15 G cell updates/s, LUNA 2.96, 1.46 and 0.95: level in 1D, 2.2 times ahead in 2D, 6.4 times in 3D, in line with the faces per cell, not separated from other causes. Our 1D leads LUNA up to 4M cells, where LUNA's fixed cost per step rules. Two passes take the whole step to 0.29 in 2D and 0.07 in 3D. Jobs 31953276 and 31953278 at 1305 MHz, 31953467 at 1095 MHz; the 1D and 2D blast is not on main yet, runs at voronoi-cpp d077c41.
+
+![Throughput in 1D, 2D and 3D](docs/figures/throughput_dimensions.png)
+
 ## Limitations and open items
 
 - The hydro step is not yet at its target (0.3 G cell updates/s static, 0.15 G the whole two-pass step): on the A100 at 128³
@@ -254,7 +267,9 @@ Precision options against resolution on one A100, 32³ to 256³, the same Sedov,
   whole moving step at 0.084 G cell updates/s with one pass, 0.066 with two. Roofline at 1095 MHz (luna-cpp 28a647d, voronoi-cpp
   0b433f0, older than this tree): the step sits at about 1.9 flop/B, at 45 % of the sustained 1.40 TB/s and 16 % of the FP64 peak;
   only `update` is at the bandwidth roof, the gradient sweep is latency-bound. Bytes alone would allow 0.34 G static and 0.14 G for
-  the whole two-pass step, which achieved 0.059 there. Compile-time precision options (`--precision=`, default double): mixed +10 %, low +19 % on the
+  the whole two-pass step, which achieved 0.059 there. Below kernel level (research_notes/profile_2026-11-06.md, 128³, 1095 MHz) the
+  hydro kernels spend 61-98 % of their warp slots waiting for memory, not on flops: gradient sweep 0.268, fluxes 0.571, `update`
+  0.805 G cell updates/s static. The sweep is the slowest: 148 registers keep 17 % of its warps active. Compile-time precision options (`--precision=`, default double): mixed +10 %, low +19 % on the
   hydro static, +4 % / +7 % on the whole moving step with one pass (research_notes/hydro_speed_2026-11-04.md).
 - Moving 256³ on a 40 GB A100: two passes in double fit (2319 B/cell, 40484 of 42405 MB in use); with `--precision=mixed`
   they do not (2445 B/cell, about 42.6 GB needed): use `--integrator=one-pass` there, or `--precision=grad32`
@@ -273,7 +288,7 @@ Done: 3D, 2D and 1D hydro on the exact mesh, two passes as the default on moving
 
 1. `grad32` as the default.
 2. Inflow that adds cells ([#3](https://github.com/Ulli1991/luna-cpp/issues/3)), the 1D soft launch of refinement.
-3. Hydro speed: target 0.3 G cell updates/s static, 0.15 G the whole two-pass step.
+3. Hydro speed: target 0.3 G cell updates/s static, 0.15 G the whole two-pass step. Next: an owner bit in the list entries (estimate +8 % static, +5 % whole step), faces numbered by owner in the mesh (+8 % hydro measured with a copy, +5 % whole step estimated). Sorting cells by list length and reusing the half step between passes were measured and made it slower.
 4. A standing 3D test suite with LUNA coverage ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)), including a test that doesn't favour lattices.
 5. Time integration study ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)), accuracy scorecard.
 6. Local time stepping from AREPO-ng ([#9](https://github.com/Ulli1991/luna-cpp/issues/9)), a CPU path for few active cells ([#10](https://github.com/Ulli1991/luna-cpp/issues/10)).
@@ -282,14 +297,14 @@ Done: 3D, 2D and 1D hydro on the exact mesh, two passes as the default on moving
 9. Multigrid self-gravity.
 10. Autodiff in C++ with Enzyme ([#12](https://github.com/Ulli1991/luna-cpp/issues/12)).
 
-Open bugs: a forced rebuild beside two passes runs out of memory at 256³ ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)).
+Open bugs: a forced rebuild beside two passes runs out of memory at 256³ ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)); stuck flips at 256³ ([#8](https://github.com/Ulli1991/luna-cpp/issues/8)); NaN from zero-area faces on an exact lattice ([#6](https://github.com/Ulli1991/luna-cpp/issues/6)). Mesh bugs that reach the hydro are listed in the [voronoi-cpp README](https://github.com/Ulli1991/voronoi-cpp#limitations-and-open-items).
 
 ## Repository layout
 
 - `src/hydro/`: the hydro (header-only). `src/bench/`: `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`. `src/test/`: the tests,
   `exact_riemann.hpp`, `luna_1d_values.hpp`.
 - `extern/voronoi-cpp/`: the mesh library, pinned submodule.
-- `scripts/`: `hydro_a100.sh`, `hydro_speed_a100.sh`, `dim1d_a100.sh`, `dim2d_a100.sh`, `two_pass_a100.sh`, `snapshot_hash.sh`, `compare_1d.py`, `compare_kh.py`,
+- `scripts/`: `hydro_a100.sh`, `hydro_speed_a100.sh`, `dim1d_a100.sh`, `dim2d_a100.sh`, `dims_a100.sh`, `two_pass_a100.sh`, `snapshot_hash.sh`, `compare_1d.py`, `compare_kh.py`,
   `hydro_sedov_compare.py`, `sedov_field_l1.py`, `norm3d.py`, `luna_*.py`, `make_figures.py`, `figstyle.py`, `lint_cpp.sh`.
 - `docs/figures/`: the figures.
 - `research_notes/`, `reports/`: status notes.
