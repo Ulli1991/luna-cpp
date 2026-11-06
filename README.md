@@ -207,6 +207,10 @@ Kelvin-Helmholtz after McNally, Lyra & Passy (2012), N^2 cells, one A100 at 1305
 
 Sedov 3D, 1e51 erg, n = 1 cm^-3, 50 pc box, 1e4 yr: a shock test that cannot rank schemes, order below 1 for every code (0.66 LUNA minmod, 0.78 moving, n = 128 to 256). Left: volume-weighted shells at 128^3 with zooms on the shell and the shock front, markers are shells, not cells, branch dim-limiters, jobs 31918879 (moving), 31918880 (static), 31918732 (LUNA). Right: field L1 over r < 1.5 R_s of the piecewise-constant field, not sampled at generators; older code, jobs 31879294, 31879807 (LUNA minmod 128-448, moving 64-256, 256 with the per-cell loop, static 64-192), LUNA MC 128 and 256 from dim-limiters. Ours: HLLC, jittered, Courant 0.3, face limiter; moving is one pass in all these runs, older than the two-pass default.
 
+Throughput against resolution on one A100, 32³ to 256³, Sedov 3D, 1095 MHz, double, HLLC, 40 steps, with LUNA (MC, Pallas, FP64; median of the perf lines of three rounds) and peak memory. Hydro is flat from 96³ to 256³; below 64³ the fixed cost per step dominates. Job 31928911, mesh pin 0b433f0.
+
+![Throughput against resolution](docs/figures/throughput_scaling.png)
+
 ## Limitations and open items
 
 - The hydro step is not yet at its target (~300 M cell updates/s): on the A100 at 128^3 double precision runs at
