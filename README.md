@@ -149,6 +149,10 @@ passes): 128³ 0.0629, 0.0648; 256³ 0.0369, 0.0377 (research_notes/two_pass_202
 
 ![Kelvin-Helmholtz density](docs/figures/kh_2d_density.png)
 
+![Kelvin-Helmholtz Voronoi mesh](docs/figures/kh_2d_mesh.png)
+
+The moving mesh in Kelvin-Helmholtz: actual Voronoi cells coloured by density, N = 512, two passes, a roll-up at t = 1.0 and 1.5, and a zoom with the generators.
+
 Density of the smooth Kelvin-Helmholtz test of McNally, Lyra & Passy (2012), N = 1024, at t = 1.0 and 1.5, one colour scale:
 LUNA MC, static, moving (two passes, the Voronoi cells drawn as exact polygons), with a zoom on one roll-up, and
 the differences from LUNA MC at N = 2048. All HLLC, FP64; LUNA Pallas, CFL 0.8; ours face limiter, per-face, LUNA's rule 0.8.
