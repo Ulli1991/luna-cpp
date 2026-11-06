@@ -74,7 +74,7 @@ Details and run times are in [TESTING.md](TESTING.md). The mesh's own tests are 
 |---|---|
 | `hydro` | HLLC and HLL against reference fluxes and under rotation; uniform states stay uniform, conservation to rounding, bit-identical runs, the two update loops agree to rounding on jittered and uniform meshes; moving mesh: uniform state with a bulk velocity, conservation, Galilean invariance of a moving blast |
 | `hydro_wave` | the moving 3D step on smooth flow, both integrators: Yee's vortex (jitter 0.1) and a sound wave (jitter 0.25), L1 of rho, v, P and the rate of rho against measured bounds; two passes keep second order where one pass loses it |
-| `hydro1d` | the 1D hydro: uniform states, conservation, bit-identical runs, inflow; Sod against the exact solution, static and moving; LUNA's final states of Sod, Shu-Osher and Woodward-Colella at N = 16 to 1e-12 |
+| `hydro1d` | the 1D hydro: uniform states, conservation, bit-identical runs, inflow, cells from a wall with the budget through it; Sod against the exact solution, static and moving; LUNA's final states of Sod, Shu-Osher and Woodward-Colella at N = 16 to 1e-12 |
 
 ```sh
 ctest --test-dir build-cuda --output-on-failure
@@ -147,7 +147,8 @@ passes): 128^3 0.0629, 0.0648; 256^3 0.0369, 0.0377 (research_notes/two_pass_202
 ### 1D (`hydro_1d`, `finite_volume_1d.hpp`)
 
 `hydro::FiniteVolume<1, Exec, Riemann>` on `voronoi::Mesh<1>`, static or
-moving, with walls (reflective, zero gradient, inflow). The whole step is one
+moving, with walls (reflective, zero gradient, inflow); a wall that gas enters
+supplies cells, split conservatively from the end cell. The whole step is one
 kernel. Defaults: a static run uses Courant x V / (|v| + c) at 0.8, one launch
 per step that also finds the next time step (`step_and_time_step`); a moving
 run uses AREPO next generation's rule with its pair term at 0.4 (r = V / 2 in
@@ -181,7 +182,7 @@ Sod, t = 0.25, N = 512, cell means at centroids against the exact solution; the 
 
 ![Shu-Osher density](docs/figures/shu_osher.png)
 
-Shu-Osher, t = 1.8, N = 1024. LUNA and static on [-5, 5], job 31917208, 947946a, runs as for Sod. Moving on the domain [-15, 5], same cell width, default rule at 0.3 (0.4 was not run there), OpenMP, job 31920121, branch dim-1d-diag. Inflow on a moving mesh needs cells to be added at the wall, see [issue #3](https://github.com/Ulli1991/luna-cpp/issues/3); until then moving is shown on the padded domain. Zooms of the regions marked above, open markers a regular subset of the cells where they would touch. Curves: luna-reference-solutions 99a52d0, `luna/shu_osher/shu_osher_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/shu_osher/so_ppmx_rk4_16384.npz` (AthenaK c52f88f).
+Shu-Osher, t = 1.8, N = 1024 on [-5, 5]. LUNA and static, job 31917208, 947946a, runs as for Sod. Moving, default rule at 0.4, job 31953172: gas enters through the left wall, which supplies cells at the initial spacing, 1508 at the end ([research_notes/inflow_2026-11-06.md](research_notes/inflow_2026-11-06.md)). Zooms of the regions marked above, open markers a regular subset of the cells where they would touch. Curves: luna-reference-solutions 99a52d0, `luna/shu_osher/shu_osher_mc.npz` (LUNA b7b0d35, MC HLLC, 65536 on 8192 cells), `athenak/shu_osher/so_ppmx_rk4_16384.npz` (AthenaK c52f88f).
 
 ![Woodward-Colella density](docs/figures/woodward_colella.png)
 
@@ -189,11 +190,11 @@ Woodward-Colella, t = 0.038, N = 2048, reflecting walls, shown from x = 0.4 (fla
 
 ![Field L1 by N](docs/figures/convergence_1d.png)
 
-Field L1 of the reconstructed field (`scripts/compare_1d.py`), against the exact solution on Sod, LUNA MC 2^21 cells on Shu-Osher, LUNA MC 2^20 cells on Woodward-Colella. Sod: moving ahead of LUNA in rho, 2-13 % over it in P. Shu-Osher: LUNA and static on [-5, 5]; moving on the domain [-15, 5] (norm on [-5, 5], N per length 10): LUNA's rule 0.4, job 31919016, default rule at 0.3, job 31920121, branch dim-1d-diag. Woodward-Colella: ahead of LUNA, with a stall near 3.4e-4 in rho. Jobs 31917206/8/10, 947946a.
+Field L1 of the reconstructed field (`scripts/compare_1d.py`), against the exact solution on Sod, LUNA MC 2^21 cells on Shu-Osher, LUNA MC 2^20 cells on Woodward-Colella. Sod: moving ahead of LUNA in rho, 2-13 % over it in P. Shu-Osher: moving at or below LUNA in rho, v and P at every N to 2¹⁷ (ratios 0.39-0.81, 0.79-0.84, 0.83-0.99), N being the cells at the start; rho falls off order 1 above 2¹⁵, a second stall not chased; job 31953172, cell updates in the notes. Woodward-Colella: ahead of LUNA, with a stall near 3.4e-4 in rho. Jobs 31917206/8/10, 947946a.
 
 ![GPU time against field L1](docs/figures/time_to_target_1d.png)
 
-GPU seconds of the stepping loop, one A100, one point per N, dotted lines the targets of the notes; LUNA's compile not counted, below ~1e5 cells a step is launch latency. LUNA wins Sod. Shu-Osher shows LUNA and static on their domain. On Woodward-Colella it is close in rho and P, and only moving reaches rho 1e-3 in the ladder. One job per test: Sod 31917206, Shu-Osher 31917208 at 1095 MHz, Woodward-Colella 31917210 at 1305 MHz, 947946a.
+GPU seconds of the stepping loop, one A100, one point per N, dotted lines the targets of the notes; LUNA's compile not counted, below ~1e5 cells a step is launch latency. LUNA wins Sod and Shu-Osher, there by 7-16x in GPU time to the same error: moving takes 7.5x the steps and ends with 1.47x the cells. On Woodward-Colella it is close in rho and P, and only moving reaches rho 1e-3 in the ladder. One job per test: Sod 31917206, Shu-Osher 31953172 at 1095 MHz, Woodward-Colella 31917210 at 1305 MHz, 947946a.
 
 ![3D Yee vortex](docs/figures/vortex_3d.png)
 
@@ -223,7 +224,7 @@ Throughput against resolution on one A100, 32³ to 256³, Sedov 3D, 1095 MHz, do
 - On the CPU (gcc's default FP contraction) some hydro modes differ from the GPU in the last bits; the A100 runs are
   bit-identical run to run.
 - Periodic boxes only in 3D; only 1D has walls.
-- 1D moving mesh: inflow needs cells to be added at the wall, see [issue #3](https://github.com/Ulli1991/luna-cpp/issues/3).
+- 1D moving mesh: a wall supplies cells where gas enters, but nothing removes points where gas leaves: no test has points reach an open wall, and that path is not tested. A subsonic inflow keeps LUNA's zero-gradient wall, whose state drifts by about 1e-7 at N = 2¹⁷ (research_notes/inflow_2026-11-06.md).
 - 1D moving mesh: the error of Woodward-Colella stops falling near N = 2^15, at every Courant number tried
   (research_notes/stage1_1d_2026-11-04.md).
 
