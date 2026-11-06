@@ -61,16 +61,16 @@ spec.loader.exec_module(cmp1d)
 
 apply_style()
 LUNA_C, STATIC_C, MOVING_C = "C0", "C1", "C2"
-LW, THIN = 1.2, 0.8  # runs; static over LUNA and the references
+LW = 2.2  # every curve; connectors, zoom boxes, cell edges and guide lines stay thin
 STYLE = {"luna": dict(color=LUNA_C, ls="-", marker="o", lw=LW, zorder=2),
-         "static": dict(color=STATIC_C, ls="--", marker="s", lw=THIN, zorder=2.5),
+         "static": dict(color=STATIC_C, ls="--", marker="s", lw=LW, zorder=2.5),
          "moving": dict(color=MOVING_C, ls="-", marker="^", lw=LW, zorder=3),
          "two": dict(color=MOVING_C, ls="--", marker="D", lw=LW, zorder=3),
          "padded": dict(color=MOVING_C, ls="--", marker="v", lw=LW, zorder=3),
          "padded3": dict(color=MOVING_C, ls=":", marker="x", lw=LW, zorder=3)}
-REF = dict(color="k", lw=THIN, zorder=2.7)
-AK = dict(color="k", lw=THIN, ls=":", zorder=2.7)
-MS = 2.8      # open markers
+REF = dict(color="k", lw=LW, zorder=2.7)
+AK = dict(color="k", lw=LW, ls=":", zorder=2.7)
+MS = 6.5      # filled markers
 LABEL = 10    # letters and labels inside panels, as in LUNA's figures
 EDGE = "0.65"  # connectors
 CONNECTORS = []  # of the figure being drawn, figure coordinates
@@ -121,11 +121,11 @@ def line(ax, x, y, s, **over):
     return ax.plot(x, y, **{"color": k["color"], "ls": k["ls"], "lw": k["lw"], "zorder": k["zorder"], **over})[0]
 
 
-def cells(ax, x, y, s, xlim, most=32):
+def cells(ax, x, y, s, xlim, most=14):
     """Actual cells in a window: small open markers, every cell while they stay apart."""
     k = STYLE[s]
     keep = (x >= xlim[0]) & (x <= xlim[1])
-    ax.plot(x[keep], y[keep], color=k["color"], ls=k["ls"], lw=THIN, zorder=k["zorder"], marker=k["marker"], ms=MS, mew=0.6, mfc="white",
+    ax.plot(x[keep], y[keep], color=k["color"], ls=k["ls"], lw=LW, zorder=k["zorder"], marker=k["marker"], ms=MS, mew=0, mfc=k["color"],
             markevery=max(1, keep.sum() // most))
 
 
@@ -135,7 +135,7 @@ def corner(ax, text, x=0.04, y=0.95, ha="left", va="top"):
 
 def key(s, label, marker=False):
     k = STYLE[s]
-    return plt.Line2D([], [], color=k["color"], ls=k["ls"], lw=k["lw"], marker=k["marker"] if marker else None, ms=MS, mfc="none", label=label)
+    return plt.Line2D([], [], color=k["color"], ls=k["ls"], lw=k["lw"], marker=k["marker"] if marker else None, ms=MS + (1.5 if s == "static" else 0), mfc=k["color"], label=label)
 
 
 def rkey(label, kw=REF):
@@ -144,7 +144,8 @@ def rkey(label, kw=REF):
 
 def loglog(ax, x, y, s, **over):
     k = STYLE[s]
-    style = dict(color=k["color"], ls=k["ls"], lw=k["lw"], marker=k["marker"], ms=MS, mew=0.6, mfc="none", zorder=k["zorder"])
+    style = dict(color=k["color"], ls=k["ls"], lw=k["lw"], marker=k["marker"], ms=MS + (1.5 if s == "static" else 0), mfc=k["color"],
+                 zorder=1.9 if s == "static" else k["zorder"])  # static under LUNA: its squares show round LUNA's circles
     style.update(over)
     ax.plot(x, y, **style)
 
@@ -476,7 +477,7 @@ def fig_vortex():
     nx = (32, 64, 128, 256)
     for i, ax, ylabel, v in ((0, axes[0], r"$L_1(\rho)$", "rho"), (1, axes[1], r"$L_1(v)$", "v")):
         log_axes(ax)
-        ax.plot(nx, [rows["sta", n][1][i] for n in nx], color="k", ls=":", lw=THIN, zorder=1)
+        ax.plot(nx, [rows["sta", n][1][i] for n in nx], color="k", ls=":", lw=LW, zorder=1)
         for q, over in ((8, dict()), (1, dict(ls="--"))):
             s = pick & (d["ic_quad"] == q)
             o = np.argsort(d["nx"][s])
@@ -488,9 +489,9 @@ def fig_vortex():
         ax.set_xlim(26, 310)
         ax.set_xlabel(r"$n_x$")
         ax.set_ylabel(ylabel)
-    axes[0].legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=LW, marker="o", ms=MS, mfc="none", label="LUNA MC, point start"),
+    axes[0].legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=LW, marker="o", ms=MS, label="LUNA MC, point start"),
                             key("static", "static", True), key("moving", "moving, one pass", True), key("two", "moving, two passes", True),
-                            rkey(r"$O(h)$ floor", dict(color="k", ls=":", lw=THIN))], **LEGEND, ncol=2)
+                            rkey(r"$O(h)$ floor", dict(color="k", ls=":", lw=LW))], **LEGEND, ncol=2)
     axes[0].set_ylim(top=axes[0].get_ylim()[1] * 9)
     save(fig, "vortex_3d")
 
@@ -625,7 +626,7 @@ def fig_sedov():
     b.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
     b.set_xlabel(r"$n$")
     b.set_ylabel(r"$L_1(\rho)$")
-    b.legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=LW, marker="o", ms=MS, mfc="none", label="LUNA minmod"),
+    b.legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=LW, marker="o", ms=MS, label="LUNA minmod"),
                       key("static", "static", True), key("moving", "moving", True), rkey("Sedov-Taylor", REF)], **LEGEND)
     save(fig, "sedov_3d")
 
@@ -659,7 +660,7 @@ def fig_throughput():
     sides = sorted(k for k in {k[0] for k in ours} if k >= 32)
     x = [ours[s, "static"]["n"] for s in sides]
     fig, (top, low) = plt.subplots(2, 1, figsize=(WIDTH, FIGSIZE[1] * 1.45), sharex=True, gridspec_kw=dict(height_ratios=(3, 1.25), hspace=0))
-    style = dict(lw=LW, ms=MS + 1, mew=0.8, mfc="none")
+    style = dict(lw=LW, ms=MS)
     curves = (("static", "hydro", STATIC_C, "-", "s", "hydro, static"), ("two-pass", "hydro", MOVING_C, ":", "^", "hydro, two passes"),
               ("two-pass", "mesh", "0.5", "-", "v", "mesh only"), ("one-pass", "step", MOVING_C, "--", "o", "whole moving step, one pass"),
               ("two-pass", "step", MOVING_C, "-", "D", "whole moving step, two passes"))
@@ -717,7 +718,7 @@ def fig_throughput_precision():
     sides = sorted({k[0] for k in ours})
     cells = [s ** 3 for s in sides]
     fig, axes = plt.subplots(2, 2, figsize=(WIDTH, FIGSIZE[1] * 1.45), sharex=True, sharey="row", gridspec_kw=dict(height_ratios=(3, 1.25), hspace=0, wspace=0))
-    style = dict(lw=LW, ms=MS + 1, mew=0.8, mfc="none")
+    style = dict(lw=LW, ms=MS)
     for column, (mesh, field, title) in enumerate((("static", "hydro", "hydro, static"), ("two", "step", "whole moving step, two passes"))):
         top, low = axes[0, column], axes[1, column]
         for preset, label, color, ls, marker in presets:
