@@ -288,7 +288,7 @@ Done: 3D, 2D and 1D hydro on the exact mesh, two passes as the default on moving
 (0.107 -> 0.152 G cell updates/s static).
 
 1. `grad32` as the default.
-2. Inflow that adds cells ([#3](https://github.com/Ulli1991/luna-cpp/issues/3)), the 1D soft launch of refinement.
+2. Refinement beyond 1D inflow: a wall supplies cells in 1D ([#3](https://github.com/Ulli1991/luna-cpp/issues/3), research_notes/inflow_2026-11-06.md).
 3. Hydro speed: target 0.3 G cell updates/s static, 0.15 G the whole two-pass step. Next: an owner bit in the list entries (estimate +8 % static, +5 % whole step), faces numbered by owner in the mesh (+8 % hydro measured with a copy, +5 % whole step estimated). Sorting cells by list length and reusing the half step between passes were measured and made it slower.
 4. A standing 3D test suite with LUNA coverage ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)), including a test that doesn't favour lattices.
 5. Time integration study ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)), accuracy scorecard.
