@@ -3,7 +3,7 @@
 //   hydro_1d <sod|shu-osher|woodward-colella> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]
 //            [--dt=luna|arepo|fixed] [--courant=<c>] [--fixed-dt=<dt>] [--jitter=<spacings>]
 //            [--limiter=face|cell|none] [--steps=<max>] [--repeats=<r>] [--phases] [--memory]
-//            [--no-regularise] [--unfused] [--out=<file.npy>] [--series=<name>]
+//            [--no-regularise] [--unfused] [--inflow-spacing=<spacings>] [--out=<file.npy>] [--series=<name>]
 //
 // Setups are LUNA's (scripts/luna_1d_run.py has the file:line of each):
 // Sod (Toro 1: (1, 0, 1) | (0.125, 0, 0.1) at 0.5 on [0, 1], t = 0.25,
@@ -24,7 +24,11 @@
 // included). The state hash must be the same in every run. LUNA's rule runs
 // fused, one launch per step (--unfused: time_step() and step() apart).
 // --phases, always unfused, fences the phases of a step and prints their rates. --memory adds the peak of the device allocations.
-// --out writes an .npy of N rows (generator, centroid, V, rho, u, p) in x
+// --inflow-spacing (moving): the spacing of the cells a wall supplies when gas
+// enters, in initial spacings L / N (default 1; 0: none, the end cell grows). N
+// grows then: the summary gives the initial and final cells, and cell updates
+// are summed step by step.
+// --out writes an .npy of one row per cell (generator, centroid, V, rho, u, p) in x
 // order, x in the problem's coordinates; with --series also <file.npy>.json
 // (series, problem, N, steps, wall_s, peak_MB, file) for scripts/compare_1d.py.
 
@@ -93,7 +97,7 @@ bool has(int argc, char** argv, const char* name) {
 
 struct Options {
     int n = 0, order = 1;
-    double jitter = 0, courant = 0.8, fixed_dt = 0;
+    double jitter = 0, courant = 0.8, fixed_dt = 0, inflow_spacing = 1;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
     hydro::Motion motion = hydro::Motion::static_mesh;
     bool fixed = false, phases = false, regularise = true, fused = true;
@@ -102,7 +106,8 @@ struct Options {
 };
 
 struct Result {
-    long long steps = 0, sorts = 0;
+    long long steps = 0, sorts = 0, cell_updates = 0;
+    int cells = 0;
     double wall_s = 0, t = 0;
     std::uint64_t hash = 0;
     hydro::Timings timings;
@@ -110,8 +115,8 @@ struct Result {
 
 // FNV-1a over the bits of the state (and the positions of a moving run).
 template <class V>
-void hash_into(std::uint64_t& h, const V& host, int columns) {
-    for (std::size_t i = 0; i < host.extent(0); ++i)
+void hash_into(std::uint64_t& h, const V& host, int rows, int columns) {
+    for (int i = 0; i < rows; ++i)
         for (int c = 0; c < columns; ++c) {
             std::uint64_t bits;
             const double value = host(i, c);
@@ -148,6 +153,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
         mesh.update(x);
     }
     hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{gamma_gas}, o.order, o.limiter, o.motion, pb.walls, o.regularise);
+    fv.set_inflow_spacing(o.inflow_spacing * pb.L / n);
     {
         const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
         const auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
@@ -170,6 +176,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     while (t < pb.t_end * (1 - 1e-12) && (o.max_steps == 0 || r.steps < o.max_steps)) {
         double dt = fused ? next : o.fixed ? o.fixed_dt : fv.time_step(o.courant, o.rule, timings);
         dt = std::min(dt, pb.t_end - t);
+        r.cell_updates += fv.cells();
         if (fused)
             next = fv.step_and_time_step(dt, o.courant);
         else
@@ -181,19 +188,20 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     r.wall_s = timer.seconds();
     r.t = t;
     r.sorts = mesh.sorts();
+    r.cells = fv.cells();
     const auto q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
     r.hash = 14695981039346656037ull;
-    hash_into(r.hash, q, 3);
+    hash_into(r.hash, q, r.cells, 3);
     if (o.motion == hydro::Motion::moving)
-        hash_into(r.hash, Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.positions()), 1);
+        hash_into(r.hash, Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.positions()), r.cells, 1);
     if (!out.empty()) {
         mesh.update_cells();
         const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
         const auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
         const auto V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
         std::vector<std::array<double, 6>> rows;
-        rows.reserve(static_cast<std::size_t>(n));
-        for (int i = 0; i < n; ++i) {
+        rows.reserve(static_cast<std::size_t>(r.cells));
+        for (int i = 0; i < r.cells; ++i) {
             const State W = hydro::primitive(State{q(i, 0) / V(i), q(i, 1) / V(i), q(i, 2) / V(i)}, fv.gas());
             rows.push_back({x(i, 0) + pb.origin, x(i, 0) + c(i, 0) + pb.origin, V(i), W[0], W[1], W[2]});
         }
@@ -210,7 +218,7 @@ int main(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "usage: hydro_1d <sod|shu-osher|woodward-colella> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|cell|none]"
-                     " [--steps=max] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--out=file.npy] [--series=name]\n";
+                     " [--steps=max] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--inflow-spacing=s] [--out=file.npy] [--series=name]\n";
         return 1;
     }
     const std::string name = argv[1];
@@ -228,6 +236,7 @@ int main(int argc, char* argv[]) {
     const std::string courant_default = std::to_string(o.rule == hydro::TimeStep::arepo ? hydro::courant_moving_1d : hydro::courant_static_1d);
     o.courant = std::stod(flag(argc, argv, "--courant", courant_default.c_str()));
     o.jitter = std::stod(flag(argc, argv, "--jitter", "0"));
+    o.inflow_spacing = std::stod(flag(argc, argv, "--inflow-spacing", "1"));
     o.max_steps = std::stoll(flag(argc, argv, "--steps", "0"));
     o.phases = has(argc, argv, "--phases");
     o.regularise = !has(argc, argv, "--no-regularise");
@@ -244,21 +253,21 @@ int main(int argc, char* argv[]) {
     for (int run = 0; run < repeats; ++run) {
         const std::string file = run == repeats - 1 ? out : std::string();
         const Result r = riemann == "hll" ? simulate<hydro::HLL>(pb, o, file) : simulate<hydro::HLLC>(pb, o, file);
-        std::cout << "run: " << run << " wall_s=" << r.wall_s << " M_cell_updates_per_s=" << double(o.n) * r.steps / r.wall_s / 1e6
+        std::cout << "run: " << run << " wall_s=" << r.wall_s << " M_cell_updates_per_s=" << double(r.cell_updates) / r.wall_s / 1e6
                   << " hash=" << r.hash << "\n";
         same = same && (run == 0 || r.hash == best.hash);
         if (run == 0 || r.wall_s < best.wall_s) best = r;
     }
-    const double rate = double(o.n) * best.steps / best.wall_s;
+    const double rate = double(best.cell_updates) / best.wall_s;
     std::cout << "ours: problem=" << name << " N=" << o.n << " mesh=" << (moving ? "moving" : "static") << " riemann=" << riemann
               << " order=" << o.order << " dt=" << rule_name << " courant=" << o.courant << " jitter=" << o.jitter
               << " steps=" << best.steps << " t=" << best.t << " sorts=" << best.sorts << " wall_s=" << best.wall_s
-              << " cell_updates=" << double(o.n) * best.steps << " M_cell_updates_per_s=" << rate / 1e6 << " hash=" << best.hash
+              << " final_cells=" << best.cells << " cell_updates=" << double(best.cell_updates) << " M_cell_updates_per_s=" << rate / 1e6 << " hash=" << best.hash
               << " same_bits=" << (same ? 1 : 0) << " backend=" << Exec::name() << "\n";
     if (o.phases) {
         const hydro::Timings& t = best.timings;
         auto phase = [&](const char* label, double ms) {
-            if (ms > 0) std::cout << "phase: " << label << " M_cell_updates_per_s=" << double(o.n) * best.steps / (ms * 1e-3) / 1e6 << "\n";
+            if (ms > 0) std::cout << "phase: " << label << " M_cell_updates_per_s=" << double(best.cell_updates) / (ms * 1e-3) / 1e6 << "\n";
         };
         phase("time_step", t.sweep);
         phase("hydro", t.fluxes);
@@ -270,7 +279,7 @@ int main(int argc, char* argv[]) {
         std::ofstream json(out + ".json");
         json << "{\"series\": \"" << series << "\", \"problem\": \"" << name << "\", \"N\": " << o.n << ", \"steps\": " << best.steps
              << ", \"wall_s\": " << best.wall_s << ", \"peak_MB\": " << DeviceMemory::peak / 1e6 << ", \"sorts\": " << best.sorts
-             << ", \"file\": \"" << out.substr(out.find_last_of('/') + 1) << "\"}\n";
+             << ", \"final_cells\": " << best.cells << ", \"cell_updates\": " << best.cell_updates << ", \"file\": \"" << out.substr(out.find_last_of('/') + 1) << "\"}\n";
     }
     if (DeviceMemory::peak > 0)
         std::cout << "memory: peak_MB=" << DeviceMemory::peak / 1e6 << " peak_bytes_per_cell=" << double(DeviceMemory::peak) / o.n << "\n";

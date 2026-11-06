@@ -53,6 +53,26 @@
 //   a flat stencil, no half step); inflow, a fixed state, which LUNA does not
 //   have. The ghost is also the cell's outer neighbour in its gradient, at
 //   the mirrored centroid.
+// - gas entering (moving, through a wall of either open kind): points leave a
+//   fixed wall, so without new ones the end cell grows without bound, by v t
+//   whatever N is, and holds whatever passes through it in one cell
+//   (luna-cpp #3). So the wall supplies cells. With d the distance from the
+//   wall to the end point and V the end cell's volume, a cell is added when
+//   V > 2 delta and d >= 1.5 delta, delta = inflow_spacing() (default the initial
+//   spacing L / N): AREPO-ng splits above twice the target volume
+//   (voronoi_criteria_refine_and_derefine.cc:158-163). The new point goes at
+//   d - delta from the wall, so a steady inflow gets a lattice of spacing delta,
+//   with cells centred on their points and no regularisation; AREPO-ng's "most
+//   distant vertex" (voronoi_execute_refinements.cc:775-783) would be the wall
+//   itself here. The transfer is AREPO-ng's (same file, :504-516): the new cell
+//   takes the conserved quantities in the fraction of the old cell's volume it
+//   overlaps, and the old one loses them, so totals hold to rounding and both
+//   keep the old cell's primitives, so no extremum appears. Nothing is stored
+//   for a gradient: the next step computes them from the states.
+//   AREPO-ng has no such wall: its special boundary cells do not take part in
+//   refinement (no CellType in the two files above), which is therefore this
+//   code's reading. Nothing here runs unless a cell is added, and a reflective
+//   wall adds none: gas leaving it is a rarefaction, not inflow.
 namespace hydro {
 
 // The boundary of a wall of the 1D line.
@@ -102,8 +122,9 @@ public:
     FiniteVolume(const ExecSpace& exec, Mesh& mesh, const Gas& gas, int order, Limiter limiter = Limiter::face_centroid,
                  Motion motion = Motion::static_mesh, const Walls& walls = {}, bool regularise = true)
         : exec_(exec), mesh_(&mesh), gas_(gas), order_(order), limiter_(limiter), motion_(motion), walls_(walls),
-          regularise_(regularise), n_(mesh.particles()) {
+          regularise_(regularise), n_(mesh.particles()), capacity_(n_) {
         if (order != 0 && order != 1) throw std::invalid_argument("hydro::FiniteVolume<1>: order 0 or 1");
+        set_inflow_spacing(mesh.box() / n_);
         q_ = Cells("hydro_Q", n_);
         next_ = Cells(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_Q_next")), n_);
         if (motion == Motion::moving) {
@@ -112,8 +133,19 @@ public:
         }
     }
 
+    // Both views may be longer than cells(): cells can be added.
     Cells state() const { return q_; }
     Points positions() const { return x_; }
+    int cells() const { return n_; }
+    long long cells_added() const { return added_; }
+    // delta of the head of this file; 0: a wall supplies no cells.
+    double inflow_spacing() const { return spacing_; }
+    void set_inflow_spacing(double spacing) {
+        const auto open = [&](Wall wall) { return motion_ == Motion::moving && mesh_->line().periodic == false && wall != Wall::reflective && spacing > 0; };
+        supply_left_ = open(walls_.left);
+        supply_right_ = open(walls_.right);
+        spacing_ = spacing;
+    }
     int order() const { return order_; }
     Motion motion() const { return motion_; }
     const Gas& gas() const { return gas_; }
@@ -127,7 +159,20 @@ public:
         Gas gas;
         Walls walls;
         Limiter limiter;
-        bool regularise;
+        bool regularise, supply_left, supply_right;
+        double spacing;
+
+        // Whether end slot s has room for a cell from its wall (see the head
+        // of this file), d grid steps from it.
+        KOKKOS_INLINE_FUNCTION bool room_at(double volume, i64 d) const {
+            return volume > 2 * spacing && static_cast<double>(d) * line.step >= 1.5 * spacing;
+        }
+        KOKKOS_INLINE_FUNCTION int wants_cell(int s) const {
+            int wants = 0;
+            if (s == 0 && supply_left) wants += room_at(line.volume(0), static_cast<i64>(line.key(0)));
+            if (s == line.n - 1 && supply_right) wants += room_at(line.volume(s), line.period - static_cast<i64>(line.key(s)));
+            return wants;
+        }
 
         // A cell of a stencil: its primitives, its centroid relative to the
         // generator; real = false for a ghost behind a wall.
@@ -268,9 +313,7 @@ public:
         const bool moving = motion_ == Motion::moving, luna = rule == TimeStep::luna;
         const bool second_order = order_ == 1;
         double dt = 0;
-        Kokkos::parallel_reduce(
-            "hydro1::time_step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_),
-            KOKKOS_LAMBDA(int s, double& smallest) {
+        const auto rule_at = KOKKOS_LAMBDA(int s, double& smallest) {
                 typename Stencil::Cell cell[3];
                 double gap[2] = {0, 0};
                 if (moving && s >= 2 && s <= st.line.n - 3)
@@ -302,8 +345,20 @@ public:
                     if (vsig > 0) step = Kokkos::fmin(step, (dist + r) / vsig);
                 }
                 smallest = Kokkos::fmin(smallest, courant * step);
-            },
-            Kokkos::Min<double>(dt));
+        };
+        const Kokkos::RangePolicy<ExecSpace> slots(exec_, 0, n_);
+        if (supply_left_ || supply_right_) {
+            Kokkos::parallel_reduce(
+                "hydro1::time_step_ends", slots,
+                KOKKOS_LAMBDA(int s, double& smallest, int& wants) {
+                    rule_at(s, smallest);
+                    wants += st.wants_cell(s);
+                },
+                Kokkos::Min<double>(dt), Kokkos::Sum<int>(wants_));
+            looked_ = true;
+        } else {
+            Kokkos::parallel_reduce("hydro1::time_step", slots, rule_at, Kokkos::Min<double>(dt));
+        }
         phase_end(timings, &Timings::sweep);
         return dt;
     }
@@ -319,9 +374,11 @@ public:
         phase_end(timings, &Timings::fluxes);
         std::swap(q_, next_);
         if (motion_ == Motion::moving) {
-            const voronoi::Report report = mesh_->order(x_);
+            const voronoi::Report report = mesh_->order(live_points());
             mesh_stats_.updates += 1;
             mesh_stats_.rebuilds += report.rebuilt;
+            if ((supply_left_ || supply_right_) && (!looked_ || wants_ > 0)) supply_cells();
+            looked_ = false;
             phase_end(timings, &Timings::mesh);
         }
     }
@@ -331,10 +388,62 @@ public:
     // number. Static: time_step(courant, luna) after step(dt), to rounding.
     double step_and_time_step(double dt, double courant) {
         if (x_.extent(0) > 0 && x_next_.extent(0) == 0)
-            x_next_ = Points(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_x_next")), n_);
+            x_next_ = Points(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_x_next")), capacity_);
         const bool moving = motion_ == Motion::moving;
         if (order_ == 1) return moving ? run_fused<1, true>(dt, courant) : run_fused<1, false>(dt, courant);
         return moving ? run_fused<0, true>(dt, courant) : run_fused<0, false>(dt, courant);
+    }
+
+    // Adds the cells the walls have room for (see the head of this file), for
+    // the end cells as they are now. Runs only when one is due. Public only because
+    // CUDA device lambdas may not be defined in private member functions.
+    bool supply_cells() {
+        const Stencil st = stencil();
+        const auto ends = ends_;
+        Kokkos::parallel_for(
+            "hydro1::ends", Kokkos::RangePolicy<ExecSpace>(exec_, 0, 1), KOKKOS_LAMBDA(int) {
+                const int last = st.line.n - 1;
+                ends(0) = static_cast<double>(st.line.key(0)) * st.line.step;
+                ends(1) = st.wants_cell(0);
+                ends(2) = static_cast<double>(st.line.period - static_cast<i64>(st.line.key(last))) * st.line.step;
+                ends(3) = st.wants_cell(last);
+            });
+        Kokkos::deep_copy(exec_, ends_host_, ends);
+        int requests = 0;
+        const auto points_host = points_host_;
+        if (ends_host_(1) > 0) points_host(requests++, 0) = ends_host_(0) - spacing_;
+        if (ends_host_(3) > 0) points_host(requests++, 0) = st.line.side() - (ends_host_(2) - spacing_);
+        if (requests == 0) return false;
+        reserve_cells(n_ + requests);
+        Kokkos::deep_copy(exec_, points_, points_host_);
+        const auto wanted = Kokkos::subview(points_, std::make_pair(0, requests), Kokkos::ALL);
+        const typename Mesh::Changes& change = mesh_->insert(wanted);
+        const auto q = q_;
+        const auto x = x_;
+        const auto id = change.id;
+        const auto neighbour = change.neighbour;
+        const auto overlap = change.overlap;
+        const auto volume = change.volume;
+        Kokkos::parallel_for(
+            "hydro1::split", Kokkos::RangePolicy<ExecSpace>(exec_, 0, change.requested), KOKKOS_LAMBDA(int r) {
+                const int i = id(r);
+                if (i < 0) return;
+                for (int v = 0; v < V; ++v) q(i, v) = 0;
+                for (int side = 0; side < 2; ++side) {
+                    const int old = neighbour(r, side);
+                    if (old < 0) continue;
+                    const double fraction = overlap(r, side) / volume(r, side);
+                    for (int v = 0; v < V; ++v) {
+                        const double part = fraction * q(old, v);
+                        q(old, v) -= part;
+                        q(i, v) += part;
+                    }
+                }
+                x(i, 0) = wanted(r, 0);
+            });
+        n_ += change.done;
+        added_ += change.done;
+        return change.done > 0;
     }
 
     // Ends a timed phase (fenced) when timings are wanted.
@@ -386,6 +495,11 @@ public:
                 body<true>(s, smallest, descents);
             else
                 body<false>(s, smallest, descents);
+        }
+        // Moving and fused, with the end cells' wish for a new one.
+        KOKKOS_INLINE_FUNCTION void operator()(int s, double& smallest, int& descents, int& wants) const {
+            (*this)(s, smallest, descents);
+            if (s == 0 || s == st.line.n - 1) wants += st.wants_cell(s);
         }
 
         // The point at x0 after this step.
@@ -502,24 +616,50 @@ public:
         grid.step = line.step;
         const Kernel<Order, Moving, true> kernel{stencil(), next_, x_, x_next_, mesh_->spare_keys(), grid, dt, courant};
         double smallest = 0;
-        int descents = 0;
-        Kokkos::parallel_reduce("hydro1::step_fused", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), kernel,
-                                Kokkos::Min<double>(smallest), Kokkos::Sum<int>(descents));
+        int descents = 0, wants = 0;
+        const Kokkos::RangePolicy<ExecSpace> slots(exec_, 0, n_);
+        if constexpr (Moving)
+            Kokkos::parallel_reduce("hydro1::step_fused", slots, kernel, Kokkos::Min<double>(smallest), Kokkos::Sum<int>(descents),
+                                    Kokkos::Sum<int>(wants));
+        else
+            Kokkos::parallel_reduce("hydro1::step_fused", slots, kernel, Kokkos::Min<double>(smallest), Kokkos::Sum<int>(descents));
         std::swap(q_, next_);
         if constexpr (Moving) {
             std::swap(x_, x_next_);
             mesh_->swap_keys();
             mesh_stats_.updates += 1;
+            bool again = false;
             if (descents != (line.periodic ? 1 : 0)) {
-                mesh_stats_.rebuilds += mesh_->order(x_).rebuilt;
-                return time_step(courant, TimeStep::luna);
+                mesh_stats_.rebuilds += mesh_->order(live_points()).rebuilt;
+                again = true;
             }
+            if (wants > 0) again = supply_cells() || again;
+            if (again) return time_step(courant, TimeStep::luna);
         }
         return smallest;
     }
 
 private:
-    Stencil stencil() const { return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_}; }
+    Stencil stencil() const {
+        return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_};
+    }
+    auto live_points() const { return Kokkos::subview(x_, std::make_pair(0, n_), Kokkos::ALL); }
+
+    // Room for `count` cells, by a quarter more when full.
+    void reserve_cells(int count) {
+        if (count <= capacity_) return;
+        capacity_ = std::max(count, capacity_ + capacity_ / 4);
+        const auto used = std::make_pair(0, n_);
+        const Cells q(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_Q")), capacity_);
+        const Points x(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_x")), capacity_);
+        Kokkos::deep_copy(exec_, Kokkos::subview(q, used, Kokkos::ALL), Kokkos::subview(q_, used, Kokkos::ALL));
+        Kokkos::deep_copy(exec_, Kokkos::subview(x, used, Kokkos::ALL), Kokkos::subview(x_, used, Kokkos::ALL));
+        q_ = q;
+        x_ = x;
+        next_ = Cells(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_Q_next")), capacity_);
+        if (x_next_.extent(0) > 0)
+            x_next_ = Points(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_x_next")), capacity_);
+    }
 
     ExecSpace exec_;
     Mesh* mesh_;
@@ -529,10 +669,20 @@ private:
     Motion motion_;
     Walls walls_;
     bool regularise_;
-    int n_;
+    int n_, capacity_;
     Cells q_, next_;
     Points x_, x_next_;
     MeshStats mesh_stats_;
+    // Cells from the walls: what the last time_step() saw at the ends, and
+    // a request at each wall at most.
+    bool supply_left_ = false, supply_right_ = false, looked_ = false;
+    double spacing_ = 0;
+    int wants_ = 0;
+    long long added_ = 0;
+    Kokkos::View<double[4], Memory> ends_{"hydro_ends"};
+    typename Kokkos::View<double[4], Memory>::host_mirror_type ends_host_ = Kokkos::create_mirror_view(ends_);
+    Points points_{"hydro_new_points", 2};
+    typename Points::host_mirror_type points_host_ = Kokkos::create_mirror_view(points_);
     Kokkos::Timer timer_;
 };
 
