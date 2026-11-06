@@ -600,6 +600,61 @@ void two_pass_refused(Check& check) {
     check.expect(refused(1, hydro::Motion::static_mesh) && refused(0, hydro::Motion::moving), "two passes: a static mesh and order 0 are refused");
 }
 
+// An exact lattice: cospherical corners, so faces of zero area, which carry
+// no flux. Every loop, both orders, static and moving with both integrators:
+// finite, a uniform state stays uniform, a rough state is conserved.
+template <class Riemann>
+void lattice_tests(Check& check, const std::string& solver) {
+    using FV = hydro::FiniteVolume<3, Exec, Riemann>;
+    const hydro::Gas gas{5.0 / 3.0};
+    const Points points = make_points("lattice", 4096);
+    const int n = static_cast<int>(points.size());
+    for (const auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving})
+        for (int order = 0; order <= 1; ++order)
+            for (const auto update : {hydro::Update::per_cell, hydro::Update::per_face})
+                for (const auto integrator : {hydro::Integrator::one_pass, hydro::Integrator::two_pass}) {
+                const bool moving = motion == hydro::Motion::moving;
+                if (moving && order == 0) continue;  // the moving mesh is second order
+                if (integrator != hydro::default_integrator(motion, order) && !moving) continue;
+                const std::string what = solver + ", lattice, " + (moving ? "moving" : "static") + ", order " +
+                                         std::to_string(order) + ", " + name(update) + (integrator == hydro::Integrator::two_pass ? ", two passes" : "");
+                typename FV::Mesh mesh(Exec{}, 1.0);
+                mesh.update(to_device(points));
+                mesh.update_cells();
+                const auto area = to_host(mesh.area());
+                int zero = 0;
+                for (int f = 0; f < mesh.faces(); ++f)
+                    zero += area(f, 0) == 0 && area(f, 1) == 0 && area(f, 2) == 0;
+                check.expect(zero > 0, what + ": the mesh has faces of exactly zero area (" + std::to_string(zero) + " of " +
+                                           std::to_string(mesh.faces()) + ")");
+                FV fv(Exec{}, mesh, gas, order, update, hydro::Limiter::face_centroid, motion, integrator);
+                const State W{1.3, 0.3, -0.2, 0.1, 0.7};
+                const State U = hydro::conserved(W, gas);
+                HostCells h("uniform", n);
+                for (int i = 0; i < n; ++i)
+                    for (int v = 0; v < 5; ++v) h(i, v) = U[v];
+                set_state(fv, mesh, h);
+                for (int s = 0; s < 3; ++s) fv.step(fv.time_step(0.3));
+                HostCells after = host_state(fv, mesh);
+                double worst = 0;
+                bool finite = true;
+                for (int i = 0; i < n; ++i) {
+                    worst = std::max(worst, relative({after(i, 0), after(i, 1), after(i, 2), after(i, 3), after(i, 4)}, U));
+                    for (int v = 0; v < 5; ++v) finite = finite && std::isfinite(after(i, v));
+                }
+                // Moving: positions off the snapping grid, cells a little off closure.
+                check.expect(finite && worst < (moving ? 1e-8 : 1e-12), what + ": a uniform state stays finite and uniform over 3 steps (" + sci(worst) + ")");
+
+                set_state(fv, mesh, rough_state(n, gas));
+                for (int s = 0; s < 10; ++s) fv.step(fv.time_step(0.3));
+                after = host_state(fv, mesh);
+                finite = true;
+                for (int i = 0; i < n; ++i)
+                    for (int v = 0; v < 5; ++v) finite = finite && std::isfinite(after(i, v));
+                check.expect(finite, what + ": a rough state stays finite over 10 steps");
+            }
+}
+
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     Check check;
@@ -618,5 +673,7 @@ int main(int argc, char** argv) {
     two_pass_tests<hydro::Precision<float, void, float, float>>(check, "mixed", 1e-6);
     two_pass_tests<hydro::Precision<float, void, hydro::Half, float, float>>(check, "low", 1e-6);
     two_pass_refused(check);
+    lattice_tests<hydro::HLLC>(check, "HLLC");
+    lattice_tests<hydro::HLL>(check, "HLL");
     return check.failed() != 0;
 }
