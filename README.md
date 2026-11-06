@@ -99,7 +99,7 @@ sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode> (see
 | device memory, moving, one pass (per-face) | 2298 B/cell | 2298 B/cell |
 | device memory, LUNA, FP64 | 0.22 GB | 1.25 GB, 0.63 GB in FP32 |
 
-LUNA has the higher cell update rate in every row; the moving mesh takes far fewer steps.
+LUNA has the higher cell update rate in every row. At 256³ the moving mesh takes 925 steps against LUNA's 4035, about 4.4 times fewer, but its whole step is 14 times slower.
 
 Accuracy on Sedov at 128³ (HLLC): shock radius 0.978 of the Sedov-Taylor value at 1e4 yr, L1 density error 0.075 rho0 (first order: 0.104), mass and energy conserved to 2e-16. The moving mesh needs 354 steps instead of 1642 for an L1 of 0.058 rho0. These L1 values are sampled at the mesh generators, which flatters a moving mesh. The field L1 is the fair norm: for density within r < 1.5 R_s it is 0.0629 (one pass) and 0.0648 (two passes) at 128³, and 0.0369 and 0.0377 at 256³.
 
