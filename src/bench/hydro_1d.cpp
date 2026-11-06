@@ -153,7 +153,8 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
         Kokkos::deep_copy(x, h);
         mesh.update(x);
     }
-    hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{gamma_gas}, o.order, o.limiter, o.motion, pb.walls, o.regularise);
+    hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{gamma_gas}, o.order, o.limiter, o.motion,
+                                             o.motion == hydro::Motion::moving ? pb.moving_walls : pb.walls, o.regularise);
     fv.set_inflow_spacing(o.inflow_spacing * pb.L / n);
     {
         const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());

@@ -14,10 +14,16 @@ constexpr double gamma_gas = 1.4;
 
 // One of LUNA's problems: the line, its walls, t_end, and the exact average
 // of the conserved initial state over [a, b] (in the problem's coordinates).
+// moving_walls, of a moving mesh: LUNA's, unless gas enters supersonically,
+// where the wall holds the known state. A zero-gradient wall would take it
+// from the end cell, whose state creeps: a volume on the grid is low by half a
+// step on average, each split passes that on, and the relative drift goes as
+// N^2 (1.8e-7 at N = 2^17, research_notes/inflow_2026-11-06.md).
 struct Problem {
     double L, origin, t_end;
     Walls walls;
     State<1> (*average)(double a, double b);
+    Walls moving_walls;
 };
 
 inline State<1> conserved(double rho, double u, double p) { return {rho, rho * u, p / (gamma_gas - 1) + 0.5 * rho * u * u}; }
@@ -52,11 +58,16 @@ inline State<1> woodward_colella(double a, double b) {
 
 inline Problem problem(const std::string& name) {
     const Walls outflow{Wall::outflow, Wall::outflow};
-    if (name == "sod") return {1.0, 0.0, 0.25, outflow, sod};
-    if (name == "shu-osher") return {10.0, -5.0, 1.8, outflow, shu_osher};
-    if (name == "titarev-toro") return {10.0, -5.0, 5.0, outflow, titarev_toro};
+    if (name == "sod") return {1.0, 0.0, 0.25, outflow, sod, outflow};
+    if (name == "shu-osher") {
+        Walls inflow = outflow;
+        inflow.left = Wall::inflow;
+        inflow.left_inflow = {3.857143, 2.629369, 10.33333};
+        return {10.0, -5.0, 1.8, outflow, shu_osher, inflow};
+    }
+    if (name == "titarev-toro") return {10.0, -5.0, 5.0, outflow, titarev_toro, outflow};  // subsonic: the wall must let waves out
     if (name == "woodward-colella")
-        return {1.0, 0.0, 0.038, Walls{Wall::reflective, Wall::reflective}, woodward_colella};
+        return {1.0, 0.0, 0.038, Walls{Wall::reflective, Wall::reflective}, woodward_colella, Walls{Wall::reflective, Wall::reflective}};
     throw std::invalid_argument("hydro_1d: unknown problem " + name);
 }
 

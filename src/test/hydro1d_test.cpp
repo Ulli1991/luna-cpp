@@ -445,14 +445,10 @@ int main(int argc, char* argv[]) {
         std::vector<std::vector<Cell>> ends;
         std::vector<int> counts;
         for (int pass = 0; pass < 4; ++pass) {
-            const bool mirrored = pass == 2, fixed = pass == 3;  // fixed: the inflow wall holds the state, not the end cell
+            const bool mirrored = pass == 2, fixed = pass == 3;  // fixed: the wall holds the state, not the end cell
             Mesh mesh(exec, problem.L, voronoi::Ends::walls);
             build(mesh, points(n, problem.L, 0.0, 1));
-            hydro::Walls walls = mirrored ? hydro::Walls{problem.walls.right, problem.walls.left} : problem.walls;
-            if (fixed) {
-                walls.left = hydro::Wall::inflow;
-                walls.left_inflow = State{rhoL, uL, pL};
-            }
+            hydro::Walls walls = mirrored ? hydro::Walls{problem.walls.right, problem.walls.left} : fixed ? problem.moving_walls : problem.walls;
             FV<> fv(exec, mesh, gamma14, 1, hydro::Limiter::face_centroid, Motion::moving, walls);
             set(fv, mesh, [&](double a, double b) {
                 const double l = mirrored ? problem.L - b : a, r = mirrored ? problem.L - a : b;
