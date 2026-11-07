@@ -20,12 +20,15 @@ struct Problem {
     double L, origin, t_end;
     Walls walls;
     State<1> (*average)(double a, double b);
-    Walls moving_walls;  // used when Motion::moving; differs from `walls` only where gas enters supersonically (the end cell's state would drift as N^2)
+    // Used when Motion::moving; differs from `walls` only where gas enters supersonically (the end cell's state would drift as N^2).
+    Walls moving_walls;
 };
 
 // The conserved density {rho, rho u, E} of the primitive state (rho, u, p) at gamma_gas.
 // Used by: sod, shock_into_wave, woodward_colella.
-inline State<1> conserved(double rho, double u, double p) { return {rho, rho * u, p / (gamma_gas - 1) + 0.5 * rho * u * u}; }
+inline State<1> conserved(double rho, double u, double p) {
+    return {rho, rho * u, p / (gamma_gas - 1) + 0.5 * rho * u * u};
+}
 // Fraction of [a, b] that lies below x. Used by: sod, shock_into_wave, woodward_colella.
 inline double fraction_below(double x, double a, double b) { return std::clamp((x - a) / (b - a), 0.0, 1.0); }
 
