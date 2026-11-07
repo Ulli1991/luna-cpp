@@ -3,13 +3,13 @@
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${1:-$repo_root/build}"
-python3 "$repo_root/scripts/check_comments.py" "$repo_root/src"
+python3 "$repo_root/scripts/check_comments.py"
 if [[ ! -f "$build_dir/compile_commands.json" ]]; then
     echo "Missing compile_commands.json; configure a host build with -DCMAKE_EXPORT_COMPILE_COMMANDS=ON" >&2
     exit 1
 fi
 for source in "$repo_root"/src/test/*.cpp "$repo_root"/src/bench/*.cpp; do
-    # Programs not configured in this build (hydro_sedov without HDF5) have no compile command.
+    # Programs not configured in this build have no compile command.
     if ! grep -q "/${source#"$repo_root"/}\"" "$build_dir/compile_commands.json"; then
         echo "skipped (not in this build): ${source#"$repo_root"/}"
         continue

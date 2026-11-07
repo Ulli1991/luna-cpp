@@ -1,7 +1,6 @@
 // Sedov-Taylor blast (LUNA's sedov3d_run.py). Usage: hydro_sedov <side> <jittered|uniform> [flags] (docs/design.md).
 // Drives: main -> run_precision -> run: Mesh::update/update_cells -> FiniteVolume (set Q) -> loop time_step, step -> write_snapshot.
 
-
 #include "finite_volume.hpp"
 #include "snapshot.hpp"
 #include "support.hpp"
