@@ -31,11 +31,8 @@ set(BUILD_TESTING OFF)
 add_subdirectory(extern/voronoi-cpp EXCLUDE_FROM_ALL)
 set(BUILD_TESTING ${luna_build_testing})
 
-# The pinned voronoi-cpp still defines hydro_library, hydro_1d and hydro_sedov,
-# so the targets here carry a luna_ prefix; the programs keep their names. Never
-# link the submodule's targets: they build its copy of the hydro. Until the hydro
-# leaves voronoi-cpp, `--target hydro_1d` means that copy, `--target luna_hydro_1d`
-# this one (research_notes/split_2026-11-05.md).
+# voronoi-cpp is the mesh library only: this repository owns the solver. The targets keep their luna_ prefix
+# from the split (the programs keep their names); only voronoi_library is linked from the submodule.
 add_library(luna_hydro_library INTERFACE)
 target_link_libraries(luna_hydro_library INTERFACE voronoi_library)
 target_include_directories(luna_hydro_library INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src/hydro)
