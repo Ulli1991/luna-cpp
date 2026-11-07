@@ -1,5 +1,5 @@
-// The finite-volume hydro on the 2D Voronoi mesh: uniform states, conservation, same bits, no NaN on ties, sound-wave order,
-// Sod along an axis, Noh, a blast with a bulk velocity equals the blast at rest; moving meshes run both integrators.
+// Checks 2D hydro (uniform, conservation, determinism, sound-wave order, Sod, Noh, Galilean invariance) on static and moving meshes.
+// Drives FiniteVolume<2>::time_step and step, and hydro::default_integrator (src/hydro/finite_volume.hpp).
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -24,6 +24,7 @@ using Box = exact_predicates::BoxN<2>;
 using X = Kokkos::View<double* [2], Memory>;
 using State = hydro::State<2>;
 
+// Copy of a device view on the host. Used by: most checks below.
 template <class V>
 auto host(const V& v) {
     auto h = Kokkos::create_mirror_view(v);
@@ -31,7 +32,7 @@ auto host(const V& v) {
     return h;
 }
 
-// nx x ny points on cell centres, moved by up to jitter / 2 spacings.
+// nx x ny points on cell centres, moved by up to jitter / 2 spacings. Used by: every check below.
 X lattice(int nx, int ny, const Box& box, double jitter) {
     X x("x", nx * ny);
     auto h = Kokkos::create_mirror_view(x);
@@ -48,7 +49,7 @@ X lattice(int nx, int ny, const Box& box, double jitter) {
     return x;
 }
 
-// Primitive state W(x, y) into the cells, from their centroids.
+// Primitive state W(x, y) into the cells, from their centroids. Used by: uniform, conservation, sod, noh, galilean.
 void fill(Fv& fv, const Mesh& mesh, const hydro::Gas& gas, const std::function<State(double, double)>& W) {
     auto q = Kokkos::create_mirror_view(fv.state());
     const auto volume = host(mesh.volume());
@@ -92,6 +93,7 @@ std::vector<double> cell_averages(const Mesh& mesh, const std::function<double(d
     return averages;
 }
 
+// Steps fv with time_step(courant) until t_end or `most` steps. Used by: every check below.
 struct Run {
     int steps = 0;
     double t = 0;
@@ -107,6 +109,7 @@ Run advance(Fv& fv, double t_end, double courant = 0.3, int most = 100000) {
     return run;
 }
 
+// FNV-1a-style hash of the state's 64-bit words. Used by: conservation (same bits across runs).
 std::uint64_t hash_of(const Fv& fv) {
     const auto q = host(fv.state());
     std::uint64_t hash = 14695981039346656037ull;
@@ -125,6 +128,7 @@ std::vector<hydro::Integrator> integrators(hydro::Motion motion) {
     return {hydro::Integrator::one_pass};
 }
 
+// A short name for a motion and integrator, for check messages. Used by: every check below.
 std::string label(hydro::Motion motion, hydro::Integrator integrator) {
     if (motion != hydro::Motion::moving) return "static";
     return integrator == hydro::Integrator::two_pass ? "moving, two passes" : "moving, one pass";

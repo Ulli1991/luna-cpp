@@ -10,15 +10,19 @@
 #include <string>
 #include <vector>
 
+// Output stage of hydro_sedov: it fills SnapshotData from FiniteVolume state + Mesh and calls write_snapshot (--out).
 // HDF5 snapshots in LUNA's layout: <dir>/snapdir_NNN/snapshot_NNN.0.hdf5, groups `cells` and `units`.
 namespace hydro {
 
+// Unit system of a run: cgs value of the length, mass and velocity units (all 1 = no units group).
+// Used by: Sedov (hydro_sedov), SnapshotData, write_snapshot.
 struct Units {
     double length_cm = 1, mass_g = 1, velocity_cm_s = 1;
     bool enabled() const { return !(length_cm == 1 && mass_g == 1 && velocity_cm_s == 1); }
 };
 
-// What a snapshot holds, on the host: per cell the generator x[3], the volume and the conserved state U[5].
+// What a snapshot holds, on the host: per cell the generator x[3], the volume and the conserved state U[5] (U[v][i] = conserved density, Q / volume).
+// index: snapshot number NNN, also the `step` attribute; order: the hydro order. Filled by hydro_sedov run; Used by: write_snapshot.
 struct SnapshotData {
     int index = 0;
     double time = 0;
@@ -31,6 +35,7 @@ struct SnapshotData {
 };
 
 namespace detail {
+// Scalar HDF5 attributes on `group`; the typed overloads below pick the HDF5 type. Used by: write_snapshot.
 inline void attribute(hid_t group, const char* name, hid_t type, const void* value) {
     const hid_t space = H5Screate(H5S_SCALAR);
     const hid_t attr = H5Acreate2(group, name, type, space, H5P_DEFAULT, H5P_DEFAULT);
@@ -46,6 +51,7 @@ inline void attribute(hid_t group, const char* name, const std::string& value) {
     attribute(group, name, type, value.c_str());
     H5Tclose(type);
 }
+// One dataset on `group`: `values` as `rows` equal rows (rows == 1: a 1D dataset). Used by: write_snapshot.
 inline void dataset(hid_t group, const char* name, const std::vector<double>& values, hsize_t rows = 1) {
     const hsize_t dims[2] = {rows, values.size() / rows};
     const hid_t space = H5Screate_simple(rows == 1 ? 1 : 2, rows == 1 ? dims + 1 : dims, nullptr);
@@ -56,7 +62,8 @@ inline void dataset(hid_t group, const char* name, const std::vector<double>& va
 }
 }  // namespace detail
 
-// Writes the snapshot; returns the file name.
+// Writes the snapshot under dir, converting U to primitives (rho, v, P, e); returns the file name.
+// Used by: hydro_sedov run (once per output time, --out=dir).
 inline std::string write_snapshot(const std::string& dir, const SnapshotData& s) {
     char number[16];
     std::snprintf(number, sizeof number, "%03d", s.index);

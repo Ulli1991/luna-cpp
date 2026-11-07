@@ -1,5 +1,5 @@
-// 3D problems with an exact solution (problems_3d.hpp) on the hydro's default paths; prints steps, GPU seconds and cell updates/s.
-// Usage: hydro_wave3d <sound|simple|vortex|tube> <nx> [flags]; the flags are in docs/design.md.
+// 3D problems with an exact solution; prints steps, wall seconds and cell updates/s. Usage: hydro_wave3d <sound|simple|vortex|tube> <nx> [flags].
+// Drives: main -> run<P>: problem_3d -> jittered_points -> Mesh::update/update_cells -> FiniteVolume<3> (wave_initial) -> time_step, step -> --out npy.
 
 #include "finite_volume.hpp"
 #include "problems_3d.hpp"
@@ -17,19 +17,22 @@ namespace {
 using namespace support;
 using State = hydro::State<3>;
 
+// The value of `--name=value` among argv[3..], else `fallback`. Used by: run, main.
 std::string flag(int argc, char** argv, const char* name, const char* fallback) {
     const std::size_t length = std::strlen(name);
     for (int a = 3; a < argc; ++a)
         if (std::strncmp(argv[a], name, length) == 0 && argv[a][length] == '=') return argv[a] + length + 1;
     return fallback;
 }
+// Whether the bare flag `name` is among argv[3..]. Used by: run.
 bool has(int argc, char** argv, const char* name) {
     for (int a = 3; a < argc; ++a)
         if (std::strcmp(argv[a], name) == 0) return true;
     return false;
 }
 
-// One run with the gradient policy P (--precision, as in hydro_sedov).
+// One run with the precision policy P (--precision, as in hydro_sedov); argv[1] problem, argv[2] nx.
+// Used by: main.
 template <class P>
 int run(int argc, char** argv) {
     using FV = hydro::FiniteVolume<3, Exec, hydro::HLLC, P>;

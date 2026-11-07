@@ -9,17 +9,22 @@
 #include <string>
 #include <vector>
 
+// Stage 1 of hydro_wave3d (and hydro_wave_test): problem_3d -> jittered_points -> mesh -> wave_initial seeds FiniteVolume<3>.
 // 3D problems with an exact solution, gamma 1.4: sound, simple, vortex, tube; boxes and end times: docs/design.md.
 namespace hydro {
 
 constexpr double wave_gamma = 1.4;
 
+// The box of a problem. cells: lattice size per axis; side: box edge lengths; origin: coordinates of the box corner; t_end: end time.
+// Used by: problem_3d (builds it), jittered_points (cells, side), hydro_wave3d run (side for the Box, origin, t_end).
 struct Problem3D {
     std::array<int, 3> cells;
     std::array<double, 3> side, origin;
     double t_end;
 };
 
+// The Problem3D of `name` with `nx` cells along x (the other axes follow from the box shape); throws on an unknown name.
+// Used by: hydro_wave3d run, hydro_wave_test.
 inline Problem3D problem_3d(const std::string& name, int nx) {
     if (name == "vortex") return {{nx, nx, nx / 4}, {10, 10, 2.5}, {-5, -5, 0}, 10};
     if (name == "tube") return {{2 * nx, nx / 4, nx / 4}, {2, 0.25, 0.25}, {0, 0, 0}, 0.25};
@@ -29,6 +34,7 @@ inline Problem3D problem_3d(const std::string& name, int nx) {
 }
 
 // The lattice of the problem, each point moved by up to `jitter` spacings along each axis, in the box [0, side).
+// Next: the points go to Mesh::update. Used by: hydro_wave3d run, hydro_wave_test.
 inline std::vector<std::array<double, 3>> jittered_points(const Problem3D& p, double jitter) {
     std::vector<std::array<double, 3>> points;
     std::mt19937_64 rng(1);
@@ -47,7 +53,8 @@ inline std::vector<std::array<double, 3>> jittered_points(const Problem3D& p, do
     return points;
 }
 
-// The primitive state at t = 0 at (x, y), box coordinates plus the origin.
+// The primitive state at t = 0 at (x, y), box coordinates plus the origin; amp: wave amplitude (--amp).
+// Used by: hydro_wave3d run (initial Q = conserved(...) * volume), hydro_wave_test (also as the exact solution).
 inline State<3> wave_initial(const std::string& name, double x, double y, double amp) {
     constexpr double G = wave_gamma, two_pi = 6.283185307179586;
     if (name == "simple") {
