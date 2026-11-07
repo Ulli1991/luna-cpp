@@ -248,7 +248,14 @@ Open bugs: a forced rebuild beside two passes runs out of memory at 256³ ([#11]
 
 ## Repository layout
 
-- `src/hydro/`: the hydro (header-only). `src/bench/`: `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`. `src/test/`: the tests.
+- `src/hydro/` (header-only, in the order a step uses it):
+  - `precision.hpp`: `Precision`, the type of each stage (geometry, gradient, flux, state) that the other files are templated on.
+  - `euler.hpp`: the gas, conversions between conserved and primitive states, and the HLLC and HLL fluxes.
+  - `finite_volume.hpp`: `hydro::FiniteVolume<D>` for D = 2, 3; `time_step()`, then `step()`, which runs `advance()` or `step_two_pass()`, calling `voronoi::Mesh` for the mesh.
+  - `finite_volume_1d.hpp`: the same scheme in 1D, on `voronoi::Mesh<1>`.
+  - `problems_1d.hpp`, `problems_3d.hpp`: initial conditions. `snapshot.hpp`: output.
+- `src/bench/`: `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`, each a `main` that builds a mesh, sets initial conditions and steps.
+- `src/test/`: the tests, each driving `src/hydro/`; `exact_riemann.hpp` and `luna_1d_values.hpp` are test-only references.
 - `extern/voronoi-cpp/`: the mesh library, pinned submodule.
 - `scripts/`: A100 run scripts, comparison and figure scripts (`make_figures.py`, `figstyle.py`), `lint_cpp.sh`.
 - `docs/figures/`: the figures.

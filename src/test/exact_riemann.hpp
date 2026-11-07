@@ -1,6 +1,7 @@
 #pragma once
 
 // The exact solution of the 1D Riemann problem of an ideal gas (Toro 2009, ch. 4), with LUNA's cell_average (sub-sample averages).
+// Test-only reference; it calls no src/hydro code. Used by: hydro1d_test.cpp (Sod), hydro2d_test.cpp (sod).
 
 #include <algorithm>
 #include <array>

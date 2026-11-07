@@ -1,4 +1,5 @@
 // CTest `hydro_wave`: L1 accuracy of the moving 3D step on smooth flow with a known end state, both integrators.
+// Drives FiniteVolume<3>::time_step and step on hydro::wave_initial problems (src/hydro/finite_volume.hpp, problems_3d.hpp).
 // Bounds are measured plus 10 %; rates sit just below measured: two passes rho 2.2 and 1.7, one pass 1.1 and 0.
 
 #include "check.hpp"
@@ -17,13 +18,14 @@ namespace {
 using namespace support;
 using State = hydro::State<3>;
 
-// One end state: L1 of rho, |v|, P against the exact state at the centroids, and W of each cell (id order).
+// One end state: L1 of rho, |v|, P against the exact state at the centroids, and W of each cell (id order). Used by: gate, against_double.
 struct Result {
     std::array<double, 3> l1{};
     std::vector<State> W;
     std::vector<double> V;
 };
 
+// Runs the problem to t_end with FiniteVolume<3> and returns its L1 errors. Used by: gate, against_double.
 template <class Precision, class Exact>
 Result run(const std::string& problem, int nx, hydro::Motion motion, hydro::Integrator integrator, double amp, double jitter, double t_end, Exact exact) {
     using FV = hydro::FiniteVolume<3, Exec, hydro::HLLC, Precision>;
@@ -77,7 +79,7 @@ Result run(const std::string& problem, int nx, hydro::Motion motion, hydro::Inte
     return out;
 }
 
-// The largest allowed L1 of rho, v, P at both resolutions, and the smallest rate of rho between them.
+// The largest allowed L1 of rho, v, P at both resolutions, and the smallest rate of rho between them. Used by: main (via gate).
 struct Gate {
     const char* name;
     hydro::Integrator integrator;
@@ -85,6 +87,7 @@ struct Gate {
     double rate;
 };
 
+// Bounds one problem at nx and 2 nx against a Gate. Used by: main.
 void gate(Check& check, const std::string& problem, const Gate& g, int nx, double amp, double jitter, double t_end) {
     auto exact = [&](double x, double y) { return hydro::wave_initial(problem, x, y, amp); };
     const auto a = run<hydro::DefaultPrecision<3>>(problem, nx, hydro::Motion::moving, g.integrator, amp, jitter, t_end, exact).l1;
