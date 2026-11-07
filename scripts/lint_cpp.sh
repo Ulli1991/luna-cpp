@@ -3,7 +3,7 @@
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${1:-$repo_root/build}"
-python3 "$repo_root/scripts/check_comments.py" "$repo_root/src"
+python3 "$repo_root/scripts/check_comments.py"
 if [[ ! -f "$build_dir/compile_commands.json" ]]; then
     echo "Missing compile_commands.json; configure a host build with -DCMAKE_EXPORT_COMPILE_COMMANDS=ON" >&2
     exit 1
