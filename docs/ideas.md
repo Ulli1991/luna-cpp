@@ -1,28 +1,43 @@
-# Ideas: what we will try, and why
+# Ideas for a faster and more accurate hydro
 
-A review of research ideas for the hydro, 2026-11-09, checked against how the code works today. Mesh ideas are in voronoi-cpp's `docs/ideas.md`.
+Every idea from the research review of 2026-11-08, checked on 2026-11-09 against the code. Nothing is dismissed: each idea has what it could buy, a first test, and a status. Mesh ideas are in voronoi-cpp's `docs/ideas.md`.
 
-## Already done
+Where we stand: one A100, 128³ Sedov, `grad32`: static hydro 0.170 G cell updates/s, whole two-pass moving step 0.072; LUNA 0.47 to 0.76 FP64 in the same jobs. Memory 2255 B/cell moving. The profile says the hydro waits on memory, not flops: the gradient sweep at 0.268 G/s with 17 % of warps active, fluxes 0.571, update 0.805.
 
-| Idea | Where it is |
-|---|---|
-| Uniform state preserved on a moving mesh | `hydro` and `hydro2d` tests: a uniform state with a bulk velocity stays uniform |
-| Conservation across faces | tested to rounding; the totals of the inflow wall match the budget through it |
-| Comparing schemes by time to a target error | the 1D and Kelvin-Helmholtz time-to-target figures |
-| Deterministic sums | every cell sums its faces in a fixed order; runs give the same bits |
-| Mixed precision where it is safe | `grad32` is the 3D default, checked against double |
+Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 
-## Planned, in order
+## Speed and memory of the step
 
-1. **A geometric conservation check.** Compare each cell's volume change over a step from the two meshes with the volume swept by its moving faces. It needs no AD and tells us whether the two-pass faces are time-centred correctly, including steps with flips.
-2. **Derivative checks of one step (Enzyme).** Forward-mode derivatives of reconstruction, half step, Riemann flux and update against finite differences, on a fixed mesh and branch pattern. Enzyme has no Kokkos support yet, so this runs on the host build with clang (versions 18 to 21 are on Raven) and Enzyme built from source. It is the first step of autodiff (#12), following LUNA's `docs/AUTODIFF.md`.
+| ID | Idea | Buys | First test | Status |
+|---|---|---|---|---|
+| — | Owner bit in list entries; faces numbered by owner in the mesh | +8 % static, +5 % whole step (estimate, partly measured) | from the profile notes | next |
+| — | Fewer registers in the gradient sweep (148 now, 3 of 16 warps) | sweep +30 to +50 % (estimate) | the fluxes kernel at 80 registers is the model | open |
+| R4 | Reuse last step's gradients, limiter state or wave speeds where a conservative test says it is safe | less work per step | how often the test passes, and what a missed change costs | open |
+| R3 | Read only the geometry the scheme needs | memory | the array reader list, with voronoi-cpp's R3 | next |
+| R6 | Precision by condition | memory, speed | `grad32` is done in 3D; 2D next (#19) | next |
+| #9 | Local time steps from AREPO-ng | fewer cell updates | Sedov, as in the issue | open |
+| #10 | A CPU path for few active cells | speed with local steps | after #9 | research |
 
-## Worth trying later
+## Accuracy and checks
 
-- **Mesh motion that avoids needless flips,** steering the regularisation away from near-degenerate configurations, judged by error per GPU second.
-- **Sensitivities of the final state** to initial conditions or parameters, the adjoint part of #12.
+| ID | Idea | Buys | First test | Status |
+|---|---|---|---|---|
+| O4, L4 | Geometric conservation: each cell's volume change over a step against the volume swept by its moving faces; uniform flow, and steps with flips | tests the two-pass time-centring | endpoint volumes against swept faces, no AD needed | next |
+| L1 | Derivatives of reconstruction, half step, Riemann flux and update against finite differences on a fixed mesh and branch pattern | finds wrong derivatives and silent bugs | Enzyme on the host build: clang 18 to 21 on Raven, Enzyme built from source; no Kokkos support in Enzyme yet | next |
+| L2 | Differentiable Riemann solver | verification, sensitivity | after L1 | open |
+| L7 | Limiter sensitivity, piecewise | understanding the Sod ringing and stalls | after L1 | open |
+| L6 | Time-step control sensitivity | stable larger steps | smooth surrogates of the CFL rule | research |
+| T1 | Metamorphic tests: uniform state on a moving mesh, conservation, Galilean invariance, frame changes | robustness | the first three exist; add rotations and frames | done, extend |
+| T3, O5 | Herbie and stochastic arithmetic on conserved-to-primitive conversion, energies and fluxes | accuracy | one expression first | open |
+| O6 | Deterministic sums | reproducible bits | fixed order of every cell's faces | done |
+| R9 | Time to solution at fixed error | right decisions | the 1D and Kelvin-Helmholtz figures | done |
 
-## Not now, and why
+## Mesh motion and beyond
 
-- **Reusing last step's limiter or wave speeds to skip work.** The saving is small next to the risk of missing a shock.
-- **Space-time finite volumes.** A research project of its own.
+| ID | Idea | Buys | First test | Status |
+|---|---|---|---|---|
+| L3, O3, J1 | Mesh velocity optimised for accuracy, cell quality and fewer flips, with a smooth barrier near flips | fewer repairs, better cells | flips per step and error with and without the barrier | research |
+| J2, J3 | Regularisation aware of hydro error and of mesh cost | accuracy per GPU second | after L1 | research |
+| L8 | Mesh adaptation from error sensitivities | resolution where it matters | with refinement | research |
+| L5, L9, T8 | Adjoints over many steps; calibration of EOS and source terms | inverse problems | #12, after L1 | research |
+| O2, J4 | Space-time control volumes swept by moving cells; a differentiable moving mesh | exact time-centring, gradients through the mesh | a 2D prototype with one flip | research |
