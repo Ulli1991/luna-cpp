@@ -17,6 +17,8 @@ Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 | R6 | Precision by condition | memory, speed | `grad32` is done in 3D; 2D next (#19) | next |
 | #9 | Local time steps from AREPO-ng | fewer cell updates | Sedov, as in the issue | open |
 | #10 | A CPU path for few active cells | speed with local steps | after #9 | research |
+| R14 | Fuse face geometry from the mesh with the flux kernel, so faces are not stored and read back | memory and memory traffic | see voronoi-cpp's R14 | research |
+| R15 | Memory order of cells by Morton, Hilbert or the graph, on a long run | locality in the sweep and fluxes | with voronoi-cpp's #34 | next |
 
 ## Accuracy and checks
 
@@ -31,6 +33,7 @@ Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 | T3, O5 | Herbie and stochastic arithmetic on conserved-to-primitive conversion, energies and fluxes | accuracy | one expression first | open |
 | O6 | Deterministic sums | reproducible bits | fixed order of every cell's faces | done |
 | R9 | Time to solution at fixed error | right decisions | the 1D and Kelvin-Helmholtz figures | done |
+| R17 | Local fault finding: per cell and face, area-vector closure, shared-face orientation, volume change against swept volume, uniform-state preservation, flux cancellation, positivity; reported by cell, not as a global total | turns a conservation failure into the failing cell, and a small regression case | inject known face and time-centring errors and check they are found | next |
 
 ## Mesh motion and beyond
 
@@ -41,3 +44,5 @@ Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 | L8 | Mesh adaptation from error sensitivities | resolution where it matters | with refinement | research |
 | L5, L9, T8 | Adjoints over many steps; calibration of EOS and source terms | inverse problems | #12, after L1 | research |
 | O2, J4 | Space-time control volumes swept by moving cells; a differentiable moving mesh | exact time-centring, gradients through the mesh | a 2D prototype with one flip | research |
+| R11 | Give the mesh the hydro's acceleration so it can predict flips better | fewer surprises in repair | see voronoi-cpp's R11 | research |
+| R19 | Recompute only what a step invalidated | less work per step | see voronoi-cpp's R19 | research |
