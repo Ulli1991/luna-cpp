@@ -1173,6 +1173,7 @@ def ladder_rows():
 
 
 LADDER_PANELS = lad.ALL
+STYLE.setdefault("padded", dict(color=MOVING_C, ls="--", marker="v", lw=LW, zorder=3))  # moving on a wide line or at a fixed dt
 
 
 def fig_ladder():
@@ -1189,7 +1190,7 @@ def fig_ladder():
         tops = []
         for series, style, tag in (("static", "static", "S"), ("luna-mc", "luna", "L"), ("moving", "moving", "M"), ("moving-wide", "padded", "W"), ("moving-fixed", "padded", "W")):
             o = res.get((p, series, 0))
-            if o is None:
+            if o is None or (series != "moving" and series.startswith("moving") and res.get((p, "moving", 0)) and res[(p, "moving", 0)]["N"][-1] > 1024):
                 continue
             loglog(ax, o["N"], o["L1"], style, ms=MS * 0.7)
             tops += o["L1"]
@@ -1255,6 +1256,102 @@ def fig_hard():
     save(fig, "hard_1d")
 
 
+def case_run(series, p, n):
+    """(cell centres, rho) of a ladder run."""
+    a, b, W = lad.cells(f"{LAD_RUNS}/{series}_{p}_{n}" + (".npz" if series.startswith("luna") else ".npy"), p)
+    return 0.5 * (a + b), W[0]
+
+
+def fig_case(p, n, moving, moving_label, views, ylim, name, refs=None, logy=False, xlim=None, scale=None, ylabel=r"$\rho$", residual=None, legend=LEGEND, zoom_residual=False, res_scale=1.0, res_label=r"$\rho-\rho_{\rm exact}$"):
+    """One test in the style of the Sod figure: density at t_end, LUNA, static, moving, exact or reference; zooms below."""
+    pb = pr1d.problem(p)
+    lim = xlim or pb["box"]
+    scale = scale or (lambda r: r)
+    if refs is None:
+        e = np.linspace(lim[0], lim[1], 20001)
+        refs = [(0.5 * (e[:-1] + e[1:]), scale(pr1d.exact(p, e[:-1], e[1:])[0]), REF)]
+    runs = [(x, scale(r), s) for (x, r), s in ((case_run("luna-mc", p, n), "luna"), (case_run("static", p, n), "static"), (case_run(moving, p, n), "moving"))]
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * (2 if residual else 1.8)))
+    outer = fig.add_gridspec(2, 1, height_ratios=[4 if residual else 1.5, 2.2 if residual else 1], hspace=0.16)
+    if residual:
+        top = outer[0].subgridspec(2, 1, height_ratios=[3.2, 1], hspace=0)
+        ax = fig.add_subplot(top[0])
+        res = fig.add_subplot(top[1], sharex=ax)
+    else:
+        ax = fig.add_subplot(outer[0])
+    refs = [(x, y, {k: v for k, v in kw.items() if k != "label"}, kw.get("label", "exact")) for x, y, kw in refs]
+    for x, y, kw, _ in refs:
+        ax.plot(x, y, **kw)
+    for x, y, s in runs:
+        line(ax, x, y, s)
+    ax.set_xlim(*lim)
+    ax.set_ylim(*ylim)
+    if logy:
+        ax.set_yscale("log")
+    ax.set_ylabel(ylabel)
+    ax.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", moving_label)] + [rkey(r[3], r[2]) for r in refs], **legend)
+    if residual:
+        ax.tick_params(labelbottom=False)
+        res.axhline(0, color="k", lw=0.6)
+        rx, ry = refs[0][0], refs[0][1]
+        for x, y, s in runs:
+            line(res, x, res_scale * (y - np.interp(x, rx, ry)), s)
+        res.set_ylim(*residual)
+        res.set_ylabel(res_label)
+    z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
+    if zoom_residual:  # the error itself, where the curves cannot show it
+        rx, ry = refs[0][0], refs[0][1]
+        runs = [(x, res_scale * (y - np.interp(x, rx, ry)), s) for x, y, s in runs]
+        refs = [(rx, 0 * ry, REF, "exact")]
+    for a, (vx, ticks, letter, label, vy) in zip(np.atleast_1d(z), views):
+        zoom(res if zoom_residual else ax, a, vx, ticks, runs, [r[:3] for r in refs], letter, label, vy)
+        a.set_xlabel(r"$x$")
+    np.atleast_1d(z)[0].set_ylabel(res_label if zoom_residual else ylabel)
+    save(fig, p.replace("-", "_"))
+
+
+def fig_titarev_toro():
+    lr = reference_file("luna/titarev_toro/titarev_toro_mc.npz")["rho"]
+    ar = reference_file("athenak/titarev_toro/tt_ppmx_rk4_65536.npz")["ref_rho"]
+    refs = [(centres(-5, 5, lr.size), np.asarray(lr, float), dict(REF, label="LUNA, high resolution")), (centres(-5, 5, ar.size), np.asarray(ar, float), dict(AK, label="AthenaK PPMX"))]
+    views = (((-4.6, -4.2), [-4.5, -4.4, -4.3], "a", "behind the shock", None), ((0.4, 0.9), [0.5, 0.7, 0.9], "b", "entropy waves", None),
+             ((2.3, 2.6), [2.35, 2.45, 2.55], "c", "waves near the shock", None), ((3.12, 3.32), [3.15, 3.2, 3.25, 3.3], "d", "shock", None))
+    fig_case("titarev-toro", 8192, "moving", "moving", views, (0.8, 2.25), "Titarev-Toro", refs=refs, legend=dict(LEGEND, loc="upper left"))
+
+
+def fig_toro5():
+    views = (((0.50, 0.56), [0.51, 0.53, 0.55], "a", "left shock", (3, 17)), ((0.62, 0.70), [0.63, 0.66, 0.69], "b", "plateau", (3, 16)),
+             ((0.78, 0.83), [0.79, 0.81, 0.83], "c", "contact", (10, 37)), ((0.91, 0.95), [0.92, 0.93, 0.94], "d", "right shock", (3, 37)))
+    fig_case("toro-5", 1024, "moving", "moving", views, (0, 42), "Toro 5", residual=(-4, 4), legend=dict(LEGEND, loc="upper left"))
+
+
+def fig_toro2():
+    views = (((0.06, 0.12), [0.07, 0.09, 0.11], "a", "fan head", (0.9, 1.04)), ((0.37, 0.44), [0.38, 0.40, 0.42], "b", "fan tail", (0.0, 0.11)),
+             ((0.45, 0.55), [0.46, 0.50, 0.54], "c", "near vacuum", (0.0, 0.05)), ((0.88, 0.94), [0.89, 0.91, 0.93], "d", "fan head", (0.9, 1.04)))
+    fig_case("toro-2", 1024, "moving-wide", "moving, wide line (#14)", views, (-0.05, 1.35), "Toro 2", residual=(-0.02, 0.02),
+             legend=dict(LEGEND, loc="upper center"))
+
+
+def fig_leblanc():
+    views = (((0.11, 0.16), [0.12, 0.14], "a", "fan head", (0.85, 1.06)), ((0.52, 0.57), [0.53, 0.55, 0.57], "b", "fan tail", (0.03, 0.09)),
+             ((0.59, 0.63), [0.60, 0.61, 0.62], "c", "contact", (2e-3, 0.08)), ((0.70, 0.73), [0.705, 0.715, 0.725], "d", "shock", (5e-4, 0.0062)))
+    fig_case("leblanc", 4096, "moving", "moving", views, (4e-4, 30), "LeBlanc", logy=True, residual=(-0.03, 0.03))
+
+
+def fig_noh():
+    views = (((0.0, 0.02), [0.0, 0.01, 0.02], "a", "wall heating", (3.2, 4.6)), ((0.08, 0.12), [0.09, 0.10, 0.11], "b", "post-shock gas", (3.96, 4.04)),
+             ((0.19, 0.21), [0.19, 0.20, 0.21], "c", "shock", (0.5, 4.8)), ((0.25, 0.35), [0.27, 0.30, 0.33], "d", "inflow", (0.996, 1.004)))
+    fig_case("noh", 1024, "moving-fixed", "moving, fixed dt (#15)", views, (0.5, 6.2), "Noh", xlim=(0.0, 0.4), residual=(-1.0, 1.0))
+
+
+def fig_sound():
+    views = (((0.248, 0.252), [0.249, 0.250, 0.251], "a", "crest", (-9, 12)), ((0.498, 0.502), [0.499, 0.500, 0.501], "b", "node", (-9, 12)),
+             ((0.748, 0.752), [0.749, 0.750, 0.751], "c", "trough", (-9, 12)), ((0.995, 0.999), [0.996, 0.997, 0.998], "d", "near the seam", (-9, 12)))
+    fig_case("sound-right", 8192, "moving", "moving (#23)", views, (-1.35, 2.2), "sound right", scale=lambda r: (r - 1.0) / pr1d.EPS,
+             ylabel=r"$(\rho-1)/10^{-6}$", residual=(-9, 12), zoom_residual=True, res_scale=1e5,
+             res_label=r"error $[10^{-5}]$")
+
+
 GRID_N = 4096
 GRID_LIM = {"noh": (0.0, 0.4), "titarev-toro": (1.0, 2.0)}
 GRID_LOG = ("leblanc",)
@@ -1290,7 +1387,7 @@ def fig_grid():
             x_e, r_e = 0.5 * (edges[:-1] + edges[1:]), refs[p].average(edges[:-1], edges[1:])[0]
         else:
             x_e, r_e = 0.5 * (edges[:-1] + edges[1:]), scale(pr1d.exact(p, edges[:-1], edges[1:])[0])
-        ax.plot(x_e, r_e, **REF)
+        ax.plot(x_e, r_e, **dict(REF, zorder=1.5))  # under the runs: it shows where they leave it
         shown = [r_e]
         for path, style in ((f"{LAD_RUNS}/luna-mc_{p}_{n}.npz", "luna"), (f"{LAD_RUNS}/static_{p}_{n}.npy", "static"), (moving_of(p, n)[0], "moving")):
             if path and os.path.exists(path + ".json") and json.load(open(path + ".json")).get("reached", 1):
@@ -1321,7 +1418,8 @@ def fig_grid():
 FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_woodward_colella, "convergence_1d": fig_convergence,
            "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput,
            "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "kh_2d_evolution": fig_kh_evolution, "sedov3d_mesh": fig_sedov_mesh, "throughput_precision": fig_throughput_precision, "throughput_dimensions": fig_throughput_dims,
-           "ladder_1d": fig_ladder, "hard_1d": fig_hard, "grid_1d": fig_grid}
+           "ladder_1d": fig_ladder, "hard_1d": fig_hard, "grid_1d": fig_grid, "titarev_toro": fig_titarev_toro,
+           "toro_5": fig_toro5, "toro_2": fig_toro2, "leblanc": fig_leblanc, "noh": fig_noh, "sound_right": fig_sound}
 
 
 def main():

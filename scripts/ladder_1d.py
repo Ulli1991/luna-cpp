@@ -243,9 +243,8 @@ def table(runs, reports, refs_dir):
 
 
 # Moving runs that cannot run yet: the issue of each (a failure must stay measured), and those waiting for the inflow fix.
-KNOWN = {"toro-2": 14, "einfeldt-strong": 14, "einfeldt-shear": 14, "la-peak": 14, "la-rcvcr": 14, "la-stationary": 14, "la-slow": 14, "noh": 15, "la-streams": 16,
-         "la-vacuum": 17}
-WAITS = ("shu-osher", "titarev-toro", "toro-5")
+KNOWN = {"toro-2": 14, "einfeldt-strong": 14, "einfeldt-shear": 14, "la-peak": 14, "la-rcvcr": 14, "la-stationary": 14, "la-slow": 14, "noh": 15, "la-vacuum": 17}
+WAITS = ()
 GATE_N = {"titarev-toro": (1024, 2048, 4096)}
 BINS = {"shu-osher": 256, "woodward-colella": 256, "titarev-toro": 1024}
 FLOOR = 1e-7

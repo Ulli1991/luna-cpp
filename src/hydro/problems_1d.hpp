@@ -24,6 +24,7 @@ struct Problem {
 };
 
 constexpr double pi = 3.141592653589793;
+constexpr double gamma_gas = 1.4;  // the gamma of most of LUNA's 1D tests
 constexpr double monatomic = 5.0 / 3.0;
 constexpr double linear_amplitude = 1e-6;  // LUNA's EPS
 
