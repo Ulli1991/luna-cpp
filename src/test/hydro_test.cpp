@@ -1,4 +1,5 @@
-// The finite-volume hydro on the Voronoi mesh: HLL and HLLC against LUNA, uniform state, conservation, same bits, Galilean invariance.
+// Checks the 3D Riemann fluxes, mesh hydro (uniform, conservation, determinism, moving mesh, Galilean invariance), two-pass and lattice cases.
+// Drives HLL/HLLC::flux and FiniteVolume<3>::time_step, step (src/hydro/euler.hpp, finite_volume.hpp).
 
 #include "check.hpp"
 #include "finite_volume.hpp"
@@ -18,6 +19,7 @@ using State = hydro::State<3>;
 using HydroMesh = hydro::FiniteVolume<3, Exec>::Mesh;
 using Vec3 = hydro::Vec<3>;
 
+// Max-norm difference of a and b over the 5 variables, relative to the largest |b|. Used by: flux_tests and the mesh/moving/lattice checks.
 double relative(const State& a, const State& b) {
     double diff = 0, scale = 0;
     for (int v = 0; v < 5; ++v) {
@@ -27,7 +29,7 @@ double relative(const State& a, const State& b) {
     return diff / scale;
 }
 
-// The exact Euler flux of W along the unit normal n.
+// The exact Euler flux of W along the unit normal n. Used by: flux_tests.
 State exact_flux(const State& W, Vec3 n, const hydro::Gas& gas) {
     const State U = hydro::conserved(W, gas);
     const double vn = W[1] * n[0] + W[2] * n[1] + W[3] * n[2];
@@ -74,7 +76,7 @@ const LunaCase luna_hllc[] = {
     {2, {1.0, 0.1, 0.5, -0.3, 1.0}, {1.0, -0.1, -0.4, 0.2, 1.0}, {-0.04188835494491575, 0.004188835494491576, 0.016755341977966305, 0.6793458055632945, -0.09350533845911954}},
 };
 
-// v rotated by the angle |a| about the axis a (Rodrigues).
+// v rotated by the angle |a| about the axis a (Rodrigues). Used by: flux_tests.
 Vec3 rotate(Vec3 v, Vec3 a) {
     const double angle = std::sqrt(hydro::dot(a, a));
     const Vec3 k = a * (1.0 / angle);
@@ -86,6 +88,7 @@ State rotate(const State& s, Vec3 a) {
     return {s[0], v[0], v[1], v[2], s[4]};
 }
 
+// Checks one Riemann solver against LUNA's reference fluxes, the exact flux, symmetry and rotation. Used by: main.
 template <class Riemann, std::size_t N>
 void flux_tests(Check& check, const std::string& name, const LunaCase (&cases)[N]) {
     const hydro::Gas gas{5.0 / 3.0};
@@ -127,7 +130,7 @@ void flux_tests(Check& check, const std::string& name, const LunaCase (&cases)[N
 
 using HostCells = Kokkos::View<double* [5], Kokkos::LayoutRight, Kokkos::HostSpace>;
 
-// The extensive state Q of each cell (mass, momentum, energy).
+// The extensive state Q of each cell (mass, momentum, energy). Used by: host_state and the conservation checks.
 template <class FV>
 HostCells host_extensive(const FV& fv) {
     HostCells h("extensive", fv.state().extent(0));
@@ -137,7 +140,7 @@ HostCells host_extensive(const FV& fv) {
     return h;
 }
 
-// The state per unit volume, Q / V with the mesh's current volumes.
+// The state per unit volume, Q / V with the mesh's current volumes. Used by: mesh_tests, moving_tests, two_pass_tests, lattice_tests.
 template <class FV>
 HostCells host_state(const FV& fv, const typename FV::Mesh& mesh) {
     HostCells h = host_extensive(fv);
@@ -147,7 +150,7 @@ HostCells host_state(const FV& fv, const typename FV::Mesh& mesh) {
     return h;
 }
 
-// Sets Q = U V from the state per unit volume.
+// Sets Q = U V from the state per unit volume. Used by: mesh_tests, moving_tests, two_pass_tests, lattice_tests.
 template <class FV>
 void set_state(FV& fv, const typename FV::Mesh& mesh, const HostCells& h) {
     auto m = Kokkos::create_mirror_view(fv.state());
@@ -157,7 +160,7 @@ void set_state(FV& fv, const typename FV::Mesh& mesh, const HostCells& h) {
     Kokkos::deep_copy(fv.state(), m);
 }
 
-// A blast in the corner plus random perturbations of every variable.
+// A blast in the corner plus random perturbations of every variable. Used by: mesh_tests, moving_tests, two_pass_tests, lattice_tests.
 HostCells rough_state(int n, const hydro::Gas& gas) {
     std::mt19937_64 rng(11);
     std::uniform_real_distribution<double> unit(-1.0, 1.0);
@@ -171,6 +174,7 @@ HostCells rough_state(int n, const hydro::Gas& gas) {
     return h;
 }
 
+// Display name of an update loop. Used by: mesh_tests, two_pass_tests, lattice_tests.
 const char* name(hydro::Update u) { return u == hydro::Update::per_cell ? "per cell" : "per face"; }
 
 // Precision: a hydro policy; with float face rows a cell's areas close only to ~1e-7, so a uniform state stays uniform only to that.
@@ -268,7 +272,7 @@ struct MovingRun {
     }
 };
 
-// A blast at the box centre (pressure 100 within r < 0.15, else 1), moving with velocity (bulk, 0, 0).
+// A blast at the box centre (pressure 100 within r < 0.15, else 1), moving with velocity (bulk, 0, 0). Used by: moving_tests, two_pass_tests.
 template <class AnyMesh>
 HostCells blast(const AnyMesh& mesh, double bulk, const hydro::Gas& gas) {
     const auto x = to_host(mesh.positions());
@@ -282,7 +286,7 @@ HostCells blast(const AnyMesh& mesh, double bulk, const hydro::Gas& gas) {
     return h;
 }
 
-// The density in 8 radial bins (r < 0.4) around centre (cx, 0.5, 0.5), by generator.
+// The density in 8 radial bins (r < 0.4) around centre (cx, 0.5, 0.5), by generator. Used by: moving_tests (Galilean).
 std::array<double, 8> profile(const HydroMesh& mesh, const HostCells& u, double cx) {
     const auto x = to_host(mesh.positions());
     std::array<double, 8> sum{}, count{};
@@ -301,7 +305,7 @@ std::array<double, 8> profile(const HydroMesh& mesh, const HostCells& u, double 
     return sum;
 }
 
-// profile_within: the bound of the Galilean test on the radial profiles.
+// Checks FiniteVolume<3>::step on a moving mesh; profile_within: the bound of the Galilean test on the radial profiles. Used by: main.
 template <class Precision>
 void moving_tests(Check& check, const std::string& name_of_precision, hydro::Integrator integrator, double profile_within) {
     std::cout << "moving tests, " << name_of_precision << ", " << (integrator == hydro::Integrator::two_pass ? "two passes (the default)" : "one pass") << ":\n";

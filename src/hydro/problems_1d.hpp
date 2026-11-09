@@ -9,6 +9,7 @@
 #include <string>
 
 // The 1D problems, each with its gamma: LUNA's setups (scripts/problems_1d.py has the same table, sources, exact solutions) and two it lacks.
+// Used by: hydro_1d (problem(name) -> simulate), hydro1d_test, hydro1d_cases_test.
 namespace hydro::problems_1d {
 
 // One problem: the line [origin, origin + L], its ends, t_end, gamma, and the conserved initial state of a cell [a, b].
@@ -49,6 +50,7 @@ inline State<1> shock_into_wave(double a, double b, const State<1>& left, double
 }
 
 // Woodward-Colella, LUNA's exact cell averages (woodward_colella.py:14-27).
+// Used by: problem ("woodward-colella"), as Problem::average.
 inline State<1> woodward_colella(double a, double b) {
     const double f1 = fraction_below(0.1, a, b), f2 = fraction_below(0.9, a, b);
     const double p = f1 * 1000 + (f2 - f1) * 0.01 + (1 - f2) * 100;

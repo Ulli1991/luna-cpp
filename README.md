@@ -16,7 +16,7 @@ BSD 3-Clause, see [LICENSE](LICENSE).
 git clone --recursive https://github.com/Ulli1991/luna-cpp.git
 ```
 
-In an existing clone, run `git submodule update --init --recursive`. A build stops if `extern/voronoi-cpp` is behind voronoi-cpp `main`: update the pin and commit it. `-DLUNA_ALLOW_OLD_PIN=ON` only warns, to reproduce an old result.
+In an existing clone, run `git submodule update --init --recursive`. `extern/voronoi-cpp` holds the library's full source at a pinned commit, so it can be edited and committed from here. A build warns if the pin is behind voronoi-cpp `main`; the pin moves when luna-cpp needs a newer library (`git submodule update --remote extern/voronoi-cpp`, then commit). `-DLUNA_STRICT_PIN=ON` makes that warning stop the build.
 
 Dependencies:
 
@@ -45,7 +45,7 @@ cmake --build build-omp -j4
 
 Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the backend you want. On Raven, build with at most `-j4` on the login node, or inside a Slurm job, and run GPU work through Slurm.
 
-`cmake --build` with no target gives `hydro_sedov`, `hydro_1d`, `hydro_wave3d` and the tests. The pinned voronoi-cpp still holds its own copy of the hydro, so the CMake targets here are `luna_hydro_library`, `luna_hydro_sedov` and `luna_hydro_1d`. To build one program use those names: `--target hydro_1d` would build the submodule's copy.
+`cmake --build` with no target gives `hydro_sedov`, `hydro_1d`, `hydro_wave3d` and the tests. voronoi-cpp (the submodule) is the mesh library only, so the solver lives here. The CMake targets keep the `luna_` prefix from the split: `luna_hydro_library`, `luna_hydro_sedov`, `luna_hydro_1d`; build one with `--target luna_hydro_1d`.
 
 ### Compiler flags in use
 
@@ -234,20 +234,28 @@ Throughput against resolution in 1D, 2D and 3D, with LUNA, on a blast problem in
 
 Done: 3D, 2D and 1D hydro on the exact mesh, two passes as the default on moving meshes, a first round of hydro speed (0.107 to 0.152 G cell updates/s static), `grad32` as the 3D default (0.170).
 
-1. Hydro speed: target 0.3 G cell updates/s static, 0.15 G the whole two-pass step. Next: an owner bit in the list entries (estimate +8 % static, +5 % whole step), faces numbered by owner in the mesh (+8 % hydro measured with a copy, +5 % whole step estimated). Sorting cells by list length and reusing the half step between passes were measured and made it slower.
-2. A standing 3D test suite with LUNA coverage ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)), including a test that doesn't favour lattices.
-3. Time integration study ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)), accuracy scorecard.
-4. Local time stepping from AREPO-ng ([#9](https://github.com/Ulli1991/luna-cpp/issues/9)), a CPU path for few active cells ([#10](https://github.com/Ulli1991/luna-cpp/issues/10)).
-5. Multi-GPU.
-6. Refinement.
-7. Multigrid self-gravity.
-8. Autodiff in C++ with Enzyme ([#12](https://github.com/Ulli1991/luna-cpp/issues/12)).
+1. One `main` and one general runner in 1D, 2D and 3D ([#18](https://github.com/Ulli1991/luna-cpp/issues/18)): the runner reads a LUNA-style parameter file, reads or sets up the ICs, sets the run parameters and loops until `t_end`.
+2. Hydro speed: target 0.3 G cell updates/s static, 0.15 G the whole two-pass step. Next: an owner bit in the list entries (estimate +8 % static, +5 % whole step), faces numbered by owner in the mesh (+8 % hydro measured with a copy, +5 % whole step estimated). Sorting cells by list length and reusing the half step between passes were measured and made it slower.
+3. A standing 3D test suite with LUNA coverage ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)), including a test that doesn't favour lattices.
+4. Time integration study ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)), accuracy scorecard.
+5. Local time stepping from AREPO-ng ([#9](https://github.com/Ulli1991/luna-cpp/issues/9)), a CPU path for few active cells ([#10](https://github.com/Ulli1991/luna-cpp/issues/10)).
+6. Multi-GPU.
+7. Refinement.
+8. Multigrid self-gravity.
+9. Autodiff in C++ with Enzyme ([#12](https://github.com/Ulli1991/luna-cpp/issues/12)).
 
 Open bugs: a forced rebuild beside two passes runs out of memory at 256³ ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)); stuck flips at 256³ ([#8](https://github.com/Ulli1991/luna-cpp/issues/8)); NaN from zero-area faces on an exact lattice ([#6](https://github.com/Ulli1991/luna-cpp/issues/6)). Mesh bugs that reach the hydro are listed in the [voronoi-cpp README](https://github.com/Ulli1991/voronoi-cpp#limitations-and-open-items).
 
 ## Repository layout
 
-- `src/hydro/`: the hydro (header-only). `src/bench/`: `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`. `src/test/`: the tests.
+- `src/hydro/` (header-only, in the order a step uses it):
+  - `precision.hpp`: `Precision`, the type of each stage (geometry, gradient, flux, state) that the other files are templated on.
+  - `euler.hpp`: the gas, conversions between conserved and primitive states, and the HLLC and HLL fluxes.
+  - `finite_volume.hpp`: `hydro::FiniteVolume<D>` for D = 2, 3; `time_step()`, then `step()`, which runs `advance()` or `step_two_pass()`, calling `voronoi::Mesh` for the mesh.
+  - `finite_volume_1d.hpp`: the same scheme in 1D, on `voronoi::Mesh<1>`.
+  - `problems_1d.hpp`, `problems_3d.hpp`: initial conditions. `snapshot.hpp`: output.
+- `src/bench/`: `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`, each a `main` that builds a mesh, sets initial conditions and steps.
+- `src/test/`: the tests, each driving `src/hydro/`; `exact_riemann.hpp` and `luna_1d_values.hpp` are test-only references.
 - `extern/voronoi-cpp/`: the mesh library, pinned submodule.
 - `scripts/`: A100 run scripts, comparison and figure scripts (`make_figures.py`, `figstyle.py`), `lint_cpp.sh`.
 - `docs/figures/`: the figures.

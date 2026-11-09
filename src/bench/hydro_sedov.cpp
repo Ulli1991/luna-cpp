@@ -1,7 +1,8 @@
-// The Sedov-Taylor blast of LUNA's sedov3d_run.py on the Voronoi mesh (hydro::FiniteVolume), static or moving, with phase timings.
-// Usage: hydro_sedov <side> <jittered|uniform> [flags]; the flags and the set-up are in docs/design.md.
+// Sedov-Taylor blast (LUNA's sedov3d_run.py). Usage: hydro_sedov <side> <jittered|uniform> [flags] (docs/design.md).
+// Drives: main -> run_precision -> run: Mesh::update/update_cells -> FiniteVolume (set Q) -> loop time_step, step -> write_snapshot.
 
 
+#include "pin_notice.hpp"
 #include "finite_volume.hpp"
 #include "snapshot.hpp"
 #include "support.hpp"
@@ -24,6 +25,7 @@ namespace {
 using namespace support;
 
 // Device memory through the Kokkos Tools allocation callbacks: now and at the phase peak, with the live allocations there.
+// Used by: main (start, with --memory), run (phase("mesh"), phase("hydro_setup"), ...).
 struct DeviceMemory {
     static inline bool on = false;
     static inline std::unordered_map<const void*, std::pair<std::string, std::uint64_t>> live;
@@ -71,6 +73,7 @@ struct DeviceMemory {
     }
 };
 
+// The value of `--name=value` ("1" for a bare `--name`), else `fallback`. Used by: main.
 std::string flag(int argc, char** argv, const std::string& name, const std::string& fallback) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -81,6 +84,7 @@ std::string flag(int argc, char** argv, const std::string& name, const std::stri
 }
 
 // The points in Morton order (21 bits per coordinate), so neighbouring cells sit close in memory.
+// box: the periodic box that scales the coordinates to [0, 1). Used by: run (before Mesh::update, unless --input-order).
 Points morton_order(Points points, const Box& box) {
     auto spread = [](std::uint64_t v) {  // the 21 bits of v to every third bit
         v &= 0x1fffff;
@@ -103,13 +107,15 @@ Points morton_order(Points points, const Box& box) {
     return sorted;
 }
 
+// Median of the per-step phase times. Used by: run (the phases_ms_median and throughput lines).
 double median(std::vector<double> v) {
     if (v.empty()) return 0;
     std::sort(v.begin(), v.end());
     return v[v.size() / 2];
 }
 
-// The Sedov set-up of LUNA (sedov3d_run.py, sedov3d.py).
+// The Sedov set-up of LUNA (sedov3d_run.py, sedov3d.py): units, box edge (kpc), gas and the blast/background state in code units.
+// Used by: run (initial state, t_end, snapshot units), main (box edge).
 struct Sedov {
     static constexpr double year_s = 3.15576e7, kpc_cm = 3.08568e21, msun_g = 1.98892e33;
     static constexpr double proton_g = 1.6726219e-24, boltzmann = 1.380649e-16;
@@ -126,10 +132,12 @@ struct Sedov {
     double energy() const { return 1.0e51 / energy_cgs(); }
 };
 
+// Sums of the conserved Q over all cells. Used by: totals, run (before/after the loop, for the conservation report).
 struct Totals {
     double mass = 0, px = 0, py = 0, pz = 0, energy = 0;
 };
 
+// Sums mass, momenta and energy of fv.state() on the device. Used by: run.
 template <class FV>
 Totals totals(const FV& fv) {
     const auto q = fv.state();
@@ -147,7 +155,8 @@ Totals totals(const FV& fv) {
     return t;
 }
 
-// FNV-1a over the bits of every value of a host view (2D, rows x columns).
+// FNV-1a over the bits of every value of a host view (2D, rows x columns); h chains several views into one hash.
+// Used by: run (the final checksum line of Q, positions and volume).
 template <class View>
 std::uint64_t bits_hash(const View& v, std::uint64_t h = 1469598103934665603ULL) {
     for (std::size_t i = 0; i < v.extent(0); ++i)
@@ -163,6 +172,7 @@ std::uint64_t bits_hash(const View& v, std::uint64_t h = 1469598103934665603ULL)
     return h;
 }
 
+// Parsed command line. Filled by: main; Used by: run_precision, run.
 struct Options {
     int side = 0, order = 1, snapshots = 10;
     std::string kind, loop, limit, riemann, out, precision;
@@ -177,6 +187,7 @@ struct Options {
 };
 
 // The whole run with the hydro's precision policy P (the mesh carries float face rows if P asks for them) and Riemann solver R.
+// points: the generators in the periodic box o.box. Used by: run_precision.
 template <class P, class R>
 void run(const Options& o, Points points) {
     using FV = hydro::FiniteVolume<3, Exec, R, P>;
@@ -253,8 +264,8 @@ void run(const Options& o, Points points) {
     snap.order = o.order;
     snap.gas = gas;
     snap.units = sedov.units;
-    // The radius of the disturbed region: the farthest cell from the blast centre whose rho or P differs from the background by > 1e-6;
-    // a uniform stream: the largest relative deviation of rho, P, v.
+    // Writes snapshot `index` at time t (copies state to the host, prints the disturbed radius: the farthest cell whose rho or P
+    // differs from the background by > 1e-6; --no-blast: the largest deviation) and calls write_snapshot if --out is set.
     auto write = [&](int index, double t) {
         const auto Q = to_host(fv.state());
         const auto x = to_host(mesh.positions());
@@ -398,7 +409,8 @@ void run(const Options& o, Points points) {
 }
 
 // The precision policies of --precision, as <name>: geometry / gradient weights / gradients / face fluxes / Riemann.
-// default: the hydro's default; double: double throughout, what older logs call `default`.
+// default: the hydro's default; double: double throughout, what older logs call `default`. R: the Riemann solver from --riemann.
+// Used by: main (picks R); calls run<P, R>.
 template <class R>
 void run_precision(const Options& o, const Points& points) {
     using hydro::Half;
@@ -426,6 +438,7 @@ void run_precision(const Options& o, const Points& points) {
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::pin_notice();
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);

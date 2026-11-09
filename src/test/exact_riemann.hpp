@@ -1,6 +1,7 @@
 #pragma once
 
 // The exact solution of the 1D Riemann problem of an ideal gas (Toro 2009, ch. 4), with LUNA's cell_average (sub-sample averages).
+// Test-only reference; it calls no src/hydro code. Used by: hydro1d_test, hydro2d_test, hydro1d_cases_test.
 // Data that generate vacuum, or have it on one side, have fans and empty space (Toro sec. 4.6).
 
 #include <algorithm>

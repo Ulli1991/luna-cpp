@@ -1,6 +1,7 @@
-// LUNA's 1D tests on the 1D Voronoi mesh (hydro::FiniteVolume<1>), timed.
-// Usage: hydro_1d <problem of problems_1d.hpp> <N> [flags]; the flags and set-ups are in docs/design.md.
+// LUNA's 1D tests, timed. Usage: hydro_1d <problem of problems_1d.hpp> <N> [flags] (docs/design.md).
+// Drives: main -> problem() -> simulate: Mesh::update -> FiniteVolume<1> (set state) -> loop time_step / step[_and_time_step] -> --out npy.
 
+#include "pin_notice.hpp"
 #include "finite_volume_1d.hpp"
 #include "problems_1d.hpp"
 
@@ -26,7 +27,7 @@ using State = hydro::State<1>;
 using hydro::problems_1d::Problem;
 using hydro::problems_1d::problem;
 
-// Peak of the device allocations, through the Kokkos Tools callbacks.
+// Peak of the device allocations, through the Kokkos Tools callbacks. Used by: main (start, with --memory; peak in the report).
 struct DeviceMemory {
     static inline std::map<const void*, std::uint64_t> live;
     static inline std::uint64_t current = 0, peak = 0;
@@ -51,18 +52,21 @@ struct DeviceMemory {
     }
 };
 
+// The value of `--name=value` among argv[3..], else `fallback`. Used by: main.
 std::string flag(int argc, char** argv, const char* name, const char* fallback) {
     const std::size_t length = std::strlen(name);
     for (int a = 3; a < argc; ++a)
         if (std::strncmp(argv[a], name, length) == 0 && argv[a][length] == '=') return argv[a] + length + 1;
     return fallback;
 }
+// Whether the bare flag `name` is among argv[3..]. Used by: main.
 bool has(int argc, char** argv, const char* name) {
     for (int a = 3; a < argc; ++a)
         if (std::strcmp(argv[a], name) == 0) return true;
     return false;
 }
 
+// Parsed flags. Filled by: main; Used by: simulate.
 struct Options {
     int n = 0, order = 1;
     double jitter = 0, courant = 0.8, fixed_dt = 0, inflow_spacing = 1, max_wall = 0;
@@ -73,6 +77,7 @@ struct Options {
     long long max_steps = 0;
 };
 
+// What one simulate() run reports (steps, sorts, final cell count, wall time, state hash). Used by: main.
 struct Result {
     long long steps = 0, sorts = 0, cell_updates = 0;
     int cells = 0;
@@ -82,7 +87,8 @@ struct Result {
     hydro::Timings timings;
 };
 
-// FNV-1a over the bits of the state (and the positions of a moving run).
+// FNV-1a over the bits of the state (and the positions of a moving run): `h` accumulates, host(i, c) for rows x columns.
+// Used by: simulate (the final hash, compared across --repeats in main).
 template <class V>
 void hash_into(std::uint64_t& h, const V& host, int rows, int columns) {
     for (int i = 0; i < rows; ++i)
@@ -94,6 +100,7 @@ void hash_into(std::uint64_t& h, const V& host, int rows, int columns) {
         }
 }
 
+// Writes rows of (x, x + centroid, volume, rho, u, p) as a .npy file. Used by: simulate (--out).
 void write_npy(const std::string& path, const std::vector<std::array<double, 6>>& rows) {
     char header[128];
     int length = std::snprintf(header, sizeof header, "{'descr': '<f8', 'fortran_order': False, 'shape': (%zu, 6), }", rows.size());
@@ -107,6 +114,8 @@ void write_npy(const std::string& path, const std::vector<std::array<double, 6>>
     file.write(reinterpret_cast<const char*>(rows.data()), static_cast<std::streamsize>(rows.size() * sizeof rows[0]));
 }
 
+// One run: pb is the problem from problem(), o the flags, `out` the .npy path (empty: none). Riemann: HLLC or HLL.
+// Used by: main (once per --repeats).
 template <class Riemann>
 Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     const Exec exec;
@@ -187,6 +196,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
 
 int main(int argc, char* argv[]) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::pin_notice();
     if (argc < 3) {
         std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|cell|none|minmod|vanleer]"

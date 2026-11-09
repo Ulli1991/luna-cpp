@@ -5,10 +5,11 @@
 #include <cstddef>
 #include <utility>
 
-// The Euler equations of an ideal gas in D = 1, 2, 3: conversions, MUSCL-Hancock half step, HLL and HLLC; bit-identity: docs/design.md.
-// Primitives W = (rho, v_1 .. v_D, P), conserved U = (rho, rho v_1 .. rho v_D, E) per unit volume, as LUNA.
+// Physics kernels of the solver (D = 1, 2, 3), called per cell/face by FiniteVolume<D> (finite_volume.hpp, finite_volume_1d.hpp).
+// Per face: primitive() -> half_step() -> Riemann::flux() (HLL/HLLC). W = (rho, v_1 .. v_D, P), U = (rho, rho v_1 .. rho v_D, E) per volume.
 namespace hydro {
 
+// Used by: everything in the solver. A state of D + 2 entries: W or U.
 template <int D, class T = double>
 using StateT = Kokkos::Array<T, D + 2>;
 template <int D>
@@ -17,6 +18,7 @@ using State = StateT<D, double>;
 template <std::size_t N>
 constexpr int dimension_of = static_cast<int>(N) - 2;
 
+// Used by: dot(), velocity(), Gradient, the Riemann solvers (positions, normals, velocities).
 template <int D, class T = double>
 struct Vec {
     T v[D];
@@ -25,11 +27,12 @@ struct Vec {
 };
 using Vec3 = Vec<3>;
 
-// T{f(0), f(1), .., f(N - 1)}: a brace initializer for any N.
+// T{f(0), f(1), .., f(N - 1)}: a brace initializer for any N. Used by: braced().
 template <class T, class F, std::size_t... I>
 KOKKOS_INLINE_FUNCTION T braced_from(const F& f, std::index_sequence<I...>) {
     return T{f(static_cast<int>(I))...};
 }
+// Used by: make_vec(), make_state().
 template <class T, std::size_t N, class F>
 KOKKOS_INLINE_FUNCTION T braced(const F& f) {
     return braced_from<T>(f, std::make_index_sequence<N>{});
@@ -55,7 +58,7 @@ template <int D, class T>
 KOKKOS_INLINE_FUNCTION Vec<D, T> operator*(Vec<D, T> a, T s) {
     return make_vec<D, T>([&](int k) { return a[k] * s; });
 }
-// Element-wise conversion to the real type T.
+// Element-wise conversion to the real type T. Used by: FiniteVolume<D> reduced-precision paths.
 template <class T, int D, class S>
 KOKKOS_INLINE_FUNCTION Vec<D, T> cast(Vec<D, S> a) {
     return make_vec<D, T>([&](int k) { return static_cast<T>(a[k]); });
@@ -67,19 +70,20 @@ KOKKOS_INLINE_FUNCTION T dot(Vec<D, T> a, Vec<D, T> b) {
     if constexpr (D == 2) return a[0] * b[0] + a[1] * b[1];
     if constexpr (D == 3) return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
-// The velocity (or momentum) entries 1 .. D of a state.
+// The velocity (or momentum) entries 1 .. D of a state. Used by: primitive(), conserved(), half_step_rate(), the solvers.
 template <class T, std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION Vec<D, T> velocity(const Kokkos::Array<T, N>& W) {
     return make_vec<D, T>([&](int k) { return W[1 + k]; });
 }
 
 // Ideal gas with LUNA's RAMSES floors (density >= smallr, internal energy >= smallc^2 / (gamma (gamma - 1))), on primitives only.
+// Used by: every function below taking `gas`.
 struct Gas {
     double gamma = 5.0 / 3.0;
     double smallr = 1e-10, smallc = 1e-10;
 };
 
-// U -> W with the floors (LUNA's cons_to_prim_floored).
+// U -> W with the floors (LUNA's cons_to_prim_floored). Used by: FiniteVolume<D>::primitives(), side(), 1D primitive_of(), snapshot.
 template <std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION State<D> primitive(const Kokkos::Array<double, N>& U, const Gas& gas) {
     const double rho = Kokkos::fmax(U[0], gas.smallr);
@@ -91,6 +95,7 @@ KOKKOS_INLINE_FUNCTION State<D> primitive(const Kokkos::Array<double, N>& U, con
     return make_state<D>([&](int k) { return k == 0 ? rho : k == D + 1 ? (gas.gamma - 1.0) * e : v[k - 1]; });
 }
 
+// W -> U, the inverse of primitive() without floors. Used by: initial conditions of the benches and tests.
 template <std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION State<D> conserved(const Kokkos::Array<double, N>& W, const Gas& gas) {
     const double rho = W[0];
@@ -100,16 +105,18 @@ KOKKOS_INLINE_FUNCTION State<D> conserved(const Kokkos::Array<double, N>& W, con
         [&](int k) { return k == 0 ? rho : k == D + 1 ? W[D + 1] / (gas.gamma - 1.0) + kinetic : rho * W[k]; });
 }
 
+// Used by: time-step rules in FiniteVolume<D>, the 1D drift. c = sqrt(gamma P / rho).
 template <std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION double sound_speed(const Kokkos::Array<double, N>& W, const Gas& gas) {
     return Kokkos::sqrt(gas.gamma * W[D + 1] / W[0]);
 }
 
-// Gradients of the primitives: g[v] = grad W[v].
+// Gradients of the primitives: g[v] = grad W[v]. Written by the sweep, used by: half_step(), half_step_rate().
 template <int D, class T = double>
 using Gradient = Kokkos::Array<Vec<D, T>, D + 2>;
 
 // The rate of the MUSCL-Hancock half step, sum_d A_d(W) dW/dx_d, with the primitive Jacobians summed over the axes in order.
+// Used by: half_step(), FaceFlux::side() (reduced precision).
 template <class T, std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION StateT<D, T> half_step_rate(const Kokkos::Array<T, N>& W, const Gradient<D, T>& g,
                                                    const Gas& gas) {
@@ -130,7 +137,7 @@ KOKKOS_INLINE_FUNCTION StateT<D, T> half_step_rate(const Kokkos::Array<T, N>& W,
     return A;
 }
 
-// MUSCL-Hancock half step: W - dt/2 sum_d A_d(W) dW/dx_d.
+// MUSCL-Hancock half step: W - dt/2 sum_d A_d(W) dW/dx_d. Used by: FaceFlux::side(), 1D Kernel::face_state(); feeds Riemann::flux().
 template <std::size_t N, int D = dimension_of<N>>
 KOKKOS_INLINE_FUNCTION State<D> half_step(const Kokkos::Array<double, N>& W, const Gradient<D>& g, double dt,
                                           const Gas& gas) {
@@ -140,10 +147,11 @@ KOKKOS_INLINE_FUNCTION State<D> half_step(const Kokkos::Array<double, N>& W, con
     return half;
 }
 
-// Riemann solvers along the unit normal n of a face moving with velocity w: states are taken relative to w, the lab-frame flux is per area, L to R.
-// Vectors stay in box axes, not LUNA's (normal, tangents) rotation; equal up to rounding (docs/design.md).
+// Riemann solvers (Riemann parameter of FiniteVolume<D>): flux(L, R, n, w, gas) along unit normal n of a face moving with w.
+// States are taken relative to w, the lab-frame flux is per area, L to R. Vectors stay in box axes, not LUNA's (normal, tangents) rotation; equal up to rounding (docs/design.md).
 namespace detail {
 
+// One side of a face in the face frame. Used by: HLL::flux(), HLLC::flux().
 template <int D, class T>
 struct Side {
     Vec<D, T> v;
@@ -151,6 +159,7 @@ struct Side {
     StateT<D, T> F, U;  // flux along n and conserved state
 };
 
+// Used by: HLL::flux(), HLLC::flux(). n, w: face normal and velocity.
 template <int D, class T>
 KOKKOS_INLINE_FUNCTION Side<D, T> side(const StateT<D, T>& W, Vec<D, T> n, Vec<D, T> w, const Gas& gas) {
     constexpr int P = D + 1;
@@ -166,7 +175,7 @@ KOKKOS_INLINE_FUNCTION Side<D, T> side(const StateT<D, T>& W, Vec<D, T> n, Vec<D
     return s;
 }
 
-// From the face frame to the lab frame (AREPO next generation's flux_convert_to_lab_frame).
+// From the face frame to the lab frame (AREPO next generation's flux_convert_to_lab_frame). Used by: HLL::flux(), HLLC::flux(), FaceFlux::solve().
 template <int D, class T>
 KOKKOS_INLINE_FUNCTION StateT<D, T> to_lab(StateT<D, T> F, Vec<D, T> w) {
     if constexpr (D == 1) F[2] += w[0] * F[1] + T(0.5) * dot(w, w) * F[0];
@@ -178,7 +187,7 @@ KOKKOS_INLINE_FUNCTION StateT<D, T> to_lab(StateT<D, T> F, Vec<D, T> w) {
 
 }  // namespace detail
 
-// HLL, LUNA's _hll_core.
+// HLL, LUNA's _hll_core. Used by: FaceFlux::solve() / 1D Kernel as the Riemann parameter.
 struct HLL {
     template <int D, class T>
     KOKKOS_INLINE_FUNCTION static StateT<D, T> flux(const StateT<D, T>& L, const StateT<D, T>& R, Vec<D, T> n,
@@ -199,8 +208,9 @@ struct HLL {
     }
 };
 
-// HLLC, LUNA's _hllc_core with its guards: c^2 < 0 on either side takes F_R, divisions are kept off zero by 1e-20.
+// HLLC (the default Riemann), LUNA's _hllc_core with its guards: c^2 < 0 on either side takes F_R, divisions are kept off zero by 1e-20.
 struct HLLC {
+    // Used by: flux().
     template <class T>
     KOKKOS_INLINE_FUNCTION static T nonzero(T d) {
         constexpr T eps = T(1e-20);

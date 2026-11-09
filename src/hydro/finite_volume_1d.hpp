@@ -2,17 +2,18 @@
 
 #include "finite_volume.hpp"
 
-// Finite volumes on the 1D mesh (voronoi::Mesh<1>), static or moving, with walls: FiniteVolume<D>'s scheme in one fused kernel per step.
-// A wall that gas enters supplies cells, split conservatively from the end cell. Design: docs/design.md.
+// Solver stage (D = 1): the driver calls time_step() then step() (or step_and_time_step()); one fused kernel per step on voronoi::Mesh<1>.
+// Same scheme as FiniteVolume<D> in finite_volume.hpp; an inflow wall supplies cells split from the end cell. Design: docs/design.md.
 namespace hydro {
 
 enum class Wall { reflective, outflow, inflow };
+// Used by: Stencil (ghost cells), set_inflow_spacing().
 struct Walls {
     Wall left = Wall::outflow, right = Wall::outflow;
     State<1> left_inflow{}, right_inflow{};  // primitives (rho, v, P) of an inflow
 };
 
-// The global time step's rule: arepo is AREPO next generation's, luna the RAMSES rule (docs/design.md).
+// Used by: time_step(), run_fused(). The global time step's rule: arepo is AREPO next generation's, luna the RAMSES rule (docs/design.md).
 enum class TimeStep { arepo, luna };
 
 // The defaults of a 1D run: static, LUNA's rule at 0.8 (reproduces LUNA); moving, AREPO's rule at 0.4 (not 3D's 0.3).
@@ -32,6 +33,10 @@ public:
     using i64 = exact_predicates::i64;
     using Keys = Kokkos::View<sorted_mesh::Key*, Memory>;
 
+    // Call order of one step (driver):
+    //  1. time_step(courant, rule) -> dt
+    //  2. step(dt): advance() -> run() Kernel<..., false>, swap Q, mesh_->order(), supply_cells() if due()
+    //  or: step_and_time_step(dt, courant): run_fused() does 2. and 1. of the next step in one launch
     // mesh: built (update()); walls exactly when the mesh has them. Moving: this object owns the positions.
     FiniteVolume(const ExecSpace& exec, Mesh& mesh, const Gas& gas, int order, Limiter limiter = Limiter::face_centroid,
                  Motion motion = Motion::static_mesh, const Walls& walls = {}, bool regularise = true)
@@ -66,6 +71,8 @@ public:
     const MeshStats& mesh_stats() const { return mesh_stats_; }
     long long fallbacks() const { return -1; }  // not counted (as the per-cell loop of finite_volume.hpp)
 
+    // Read-only view of the line (mesh, Q, walls) for the kernels; stencil() rebuilds it per call.
+    // Used by: time_step(), supply_cells(), Kernel.
     struct Stencil {
         Line line;
         Cells q;
@@ -75,10 +82,11 @@ public:
         bool regularise, supply_left, supply_right;
         double spacing;
 
-        // Whether end slot s has room for a cell from its wall, d grid steps from it.
+        // Used by: wants_cell(). Whether end slot s has room for a cell from its wall, d grid steps from it.
         KOKKOS_INLINE_FUNCTION bool room_at(double volume, i64 d) const {
             return volume > 2 * spacing && static_cast<double>(d) * line.step >= 1.5 * spacing;
         }
+        // 0..2 cells an end slot asks its wall for. Used by: time_step(), supply_cells(), Kernel::operator().
         KOKKOS_INLINE_FUNCTION int wants_cell(int s) const {
             int wants = 0;
             if (s == 0 && supply_left) wants += room_at(line.volume(0), static_cast<i64>(line.key(0)));
@@ -86,14 +94,16 @@ public:
             return wants;
         }
 
-        // A cell of a stencil: its primitives and centroid relative to the generator; real = false for a ghost behind a wall.
+        // Used by: load(), load_inner(). A cell of a stencil: its primitives and centroid relative to the generator; real = false for a ghost behind a wall.
         struct Cell {
             State W{};
             double c = 0, V = 0;
             bool real = true;
         };
 
+        // Used by: load(), time_step(). Distance between the generators of slots s and s + 1.
         KOKKOS_INLINE_FUNCTION double length(int s) const { return static_cast<double>(line.gap(s)) * line.step; }
+        // W of slot s. Used by: load(), time_step(), supply_cells().
         KOKKOS_INLINE_FUNCTION State primitive_of(int s) const {
             const int i = line.order(s);
             const double inv = 1.0 / line.volume(s);
@@ -103,14 +113,14 @@ public:
             W[1] = -W[1];
             return W;
         }
-        // The ghost cell behind wall `left` of the end slot whose state is W.
+        // The ghost cell behind wall `left` of the end slot whose state is W. Used by: load(), ghost_face().
         KOKKOS_INLINE_FUNCTION State ghost(const State& W, bool left) const {
             const Wall wall = left ? walls.left : walls.right;
             if (wall == Wall::reflective) return mirror(W);
             if (wall == Wall::inflow) return left ? walls.left_inflow : walls.right_inflow;
             return W;
         }
-        // The ghost's face state at the wall for end cell W and face state Wf: mirror of Wf if reflective, else the ghost's own W.
+        // The ghost's face state at the wall for end cell W and face state Wf: mirror of Wf if reflective, else the ghost's own W. Used by: Kernel::body().
         KOKKOS_INLINE_FUNCTION State ghost_face(const State& Wf, const State& W, bool left) const {
             const Wall wall = left ? walls.left : walls.right;
             if (wall == Wall::reflective) return mirror(Wf);
@@ -118,6 +128,7 @@ public:
         }
 
         // Cells s - R .. s + R into cell[] (a ghost behind a wall) and their generator distances into gap[] (twice the wall's to a mirror).
+        // Used by: time_step() (moving), Kernel::body<false>().
         template <int R>
         KOKKOS_INLINE_FUNCTION void load(int s, Cell (&cell)[2 * R + 1], double (&gap)[2 * R]) const {
             constexpr int M = 2 * R + 1;
@@ -145,6 +156,7 @@ public:
         }
 
         // load<R> far from the ends of the arrays (R + 1 <= s <= n - R - 2): the same bits from whole-step gaps read once.
+        // Used by: time_step() (moving), Kernel::body<true>().
         template <int R>
         KOKKOS_INLINE_FUNCTION void load_inner(int s, Cell (&cell)[2 * R + 1], double (&gap)[2 * R]) const {
             constexpr int M = 2 * R + 1;
@@ -167,6 +179,7 @@ public:
         }
 
         // The limited gradient of variable v of the cell at *cell, its neighbours at distances gapL and gapR.
+        // Used by: time_step(), Kernel::body().
         KOKKOS_INLINE_FUNCTION double gradient(const Cell* cell, double gapL, double gapR, int v) const {
             const Cell& me = *cell;
             const double dL = -gapL + cell[-1].c - me.c, dR = gapR + cell[1].c - me.c;
@@ -193,6 +206,7 @@ public:
         }
 
         // The point velocity's difference from the fluid's (AREPO-ng's regularisation) for primitives W, density gradient g, centroid c, volume.
+        // Used by: time_step(), Kernel::body().
         KOKKOS_INLINE_FUNCTION double drift(const State& W, double g, double c, double volume) const {
             const double r = 0.5 * volume;
             if (!regularise || Kokkos::fabs(c) <= 0.5 * r) return 0.0;
@@ -211,6 +225,7 @@ public:
     };
 
     // The global time step (see TimeStep). |v - w| is the regularisation's.
+    // Used by: the driver before step(); run_fused() when cells were added or the order changed.
     double time_step(double courant, TimeStep rule = TimeStep::arepo, Timings* timings = nullptr) {
         timer_.reset();
         const Stencil st = stencil();
@@ -267,7 +282,7 @@ public:
         return dt;
     }
 
-    // One step of length dt (moving: the points then drift and the mesh's order is updated).
+    // One step of length dt (moving: the points then drift and the mesh's order is updated). Used by: the driver after time_step().
     void step(double dt, Timings* timings = nullptr) {
         timer_.reset();
         if (order_ == 1)
@@ -287,6 +302,7 @@ public:
     }
 
     // One step of length dt in one launch; returns the next time step by LUNA's rule at this Courant number.
+    // Used by: the driver instead of step() + time_step().
     // Static: time_step(courant, luna) after step(dt), to rounding.
     double step_and_time_step(double dt, double courant) {
         if (x_.extent(0) > 0 && x_next_.extent(0) == 0)
@@ -296,7 +312,7 @@ public:
         return moving ? run_fused<0, true>(dt, courant) : run_fused<0, false>(dt, courant);
     }
 
-    // Adds the cells the walls have room for; runs only when one is due. Public because CUDA lambdas cannot be in private members.
+    // Adds the cells the walls have room for; runs only when one is due. Used by: step(), run_fused(). Public because CUDA lambdas cannot be in private members.
     bool supply_cells() {
         const Stencil st = stencil();
         const auto ends = ends_;
@@ -349,6 +365,7 @@ public:
         return change.done > 0;
     }
 
+    // Fences and adds the elapsed time to Timings::*part. Used by: time_step(), step().
     void phase_end(Timings* timings, double Timings::*part) {
         if (!timings) return;
         exec_.fence();
@@ -357,6 +374,7 @@ public:
     }
 
     // The fused step, one thread per slot, also giving the next time step and the slots out of order; public for CUDA lambdas.
+    // Fused: also snap the moved points to keys and reduce the next dt. Used by: run(), run_fused().
     template <int Order, bool Moving, bool Fused>
     struct Kernel {
         Stencil st;
@@ -366,7 +384,7 @@ public:
         sorted_mesh::Grid grid;
         double dt, courant;
 
-        // A cell's state at a face at offset r from its centroid (moving: where the face is at the half step).
+        // Used by: body(). A cell's state at a face at offset r from its centroid (moving: where the face is at the half step).
         KOKKOS_INLINE_FUNCTION State face_state(const State& W, const State& g, double r) const {
             if constexpr (Order == 0) {
                 (void)g;
@@ -399,13 +417,15 @@ public:
             if (s == 0 || s == st.line.n - 1) wants += st.wants_cell(s);
         }
 
+        // Where a point at x0 ends up after dt. Used by: body().
         KOKKOS_INLINE_FUNCTION double moved(double x0, double velocity) const {
             const double side = st.line.side();
             const double y = x0 + dt * velocity;
             return st.line.periodic ? y - side * Kokkos::floor(y / side) : Kokkos::fmin(Kokkos::fmax(y, 0.0), side);
         }
 
-        // Inner: no ghost in reach, nothing to wrap.
+        // Per slot: load, gradients, point velocities, two face fluxes, Q update (then, fused: new keys, next dt).
+        // Inner: no ghost in reach, nothing to wrap. Used by: operator().
         template <bool Inner>
         KOKKOS_INLINE_FUNCTION void body(int s, double& smallest, int& descents) const {
             const Line& line = st.line;
@@ -490,6 +510,7 @@ public:
         }
     };
 
+    // Picks the Moving instantiation. Used by: step().
     template <int Order>
     void advance(double dt) {
         if (motion_ == Motion::moving)
@@ -497,11 +518,13 @@ public:
         else
             run<Order, false>(dt);
     }
+    // Launches the unfused Kernel. Used by: advance().
     template <int Order, bool Moving>
     void run(double dt) {
         const Kernel<Order, Moving, false> kernel{stencil(), next_, x_, x_next_, {}, {}, dt, 0.0};
         Kokkos::parallel_for("hydro1::step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), kernel);
     }
+    // Launches the fused Kernel, then reorders/supplies cells; returns the next dt. Used by: step_and_time_step().
     template <int Order, bool Moving>
     double run_fused(double dt, double courant) {
         const Line& line = mesh_->line();
@@ -537,10 +560,11 @@ public:
     }
 
 private:
+    // Used by: time_step(), supply_cells(), run(), run_fused().
     Stencil stencil() const {
         return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_};
     }
-    // Whether to look at the end cells after this step: as the kernels asked while gas enters, else every 64 steps.
+    // Whether to look at the end cells after this step: as the kernels asked while gas enters, else every 64 steps. Used by: step(), run_fused().
     bool due() {
         if (!supply_left_ && !supply_right_) return false;
         if (watching_) return !looked_ || wants_ > 0;
@@ -548,9 +572,10 @@ private:
         until_look_ = 64;
         return true;
     }
+    // Used by: step(), run_fused() for mesh_->order().
     auto live_points() const { return Kokkos::subview(x_, std::make_pair(0, n_), Kokkos::ALL); }
 
-    // Room for `count` cells, by a quarter more when full.
+    // Room for `count` cells, by a quarter more when full. Used by: supply_cells().
     void reserve_cells(int count) {
         if (count <= capacity_) return;
         capacity_ = std::max(count, capacity_ + capacity_ / 4);

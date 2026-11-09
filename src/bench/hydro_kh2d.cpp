@@ -1,6 +1,7 @@
-// Smooth Kelvin-Helmholtz after McNally, Lyra & Passy 2012 on the 2D Voronoi mesh, static or moving, timed.
-// Usage: hydro_kh2d <N> [flags]; the flags, set-up and outputs are in docs/design.md.
+// Smooth Kelvin-Helmholtz (McNally, Lyra & Passy 2012), timed. Usage: hydro_kh2d <N> [flags] (docs/design.md).
+// Drives: main -> run<Riemann>: Mesh::update/update_cells -> FiniteVolume<2> (profile, seed) -> loop time_step, step -> mode_amplitude.
 
+#include "pin_notice.hpp"
 #include "device_memory.hpp"
 #include "finite_volume.hpp"
 
@@ -25,18 +26,21 @@ using Memory = Exec::memory_space;
 using Box = exact_predicates::BoxN<2>;
 constexpr double gas_gamma = 5.0 / 3.0, layer = 0.025, pressure = 2.5, seed_amplitude = 0.01;
 
+// The value of `--name=value` among argv[2..], else `fallback`. Used by: main.
 std::string flag(int argc, char** argv, const char* name, const char* fallback) {
     const std::size_t length = std::strlen(name);
     for (int a = 2; a < argc; ++a)
         if (std::strncmp(argv[a], name, length) == 0 && argv[a][length] == '=') return argv[a] + length + 1;
     return fallback;
 }
+// Whether the bare flag `name` is among argv[2..]. Used by: main.
 bool has(int argc, char** argv, const char* name) {
     for (int a = 2; a < argc; ++a)
         if (std::strcmp(argv[a], name) == 0) return true;
     return false;
 }
 
+// Parsed flags. Filled by: main; Used by: run.
 struct Options {
     int n = 0, order = 1, steps = 0, repeats = 1;
     double jitter = 0, bulk = 0, courant = 0.8, fixed_dt = 0, t_end = 1.5, stop_after = 0;
@@ -49,12 +53,14 @@ struct Options {
     std::string out, riemann = "hllc", dt = "luna";
 };
 
-// McNally eq. 1 for y in [0, 1), mirrored about 1/2.
+// McNally eq. 1 for y in [0, 1), mirrored about 1/2; f1, f2: the values in the outer and inner stripes.
+// Used by: run (initial density and velocity_x).
 double profile(double y, double f1, double f2) {
     const double h = y < 0.5 ? y : 1.0 - y, fm = 0.5 * (f1 - f2);
     return h < 0.25 ? f1 - fm * std::exp((h - 0.25) / layer) : f2 + fm * std::exp((0.25 - h) / layer);
 }
 
+// Morton key of lattice cell (x, y). Used by: run (orders the generators in memory).
 std::uint64_t morton(std::uint32_t x, std::uint32_t y) {
     auto spread = [](std::uint64_t v) {
         v = (v | v << 16) & 0x0000ffff0000ffffull;
@@ -66,10 +72,13 @@ std::uint64_t morton(std::uint32_t x, std::uint32_t y) {
     return spread(x) << 1 | spread(y);
 }
 
+// Amplitude M of the sin/cos(4 pi x) mode of v_y and the peak kinetic energy density K. Used by: mode_amplitude, run.
 struct Mode {
     double M, K;
 };
 
+// The Mode of the current state, weighted by exp(-4 pi |h - 1/4|) around the shear layer; moving: use fv.positions().
+// Used by: run (at the start and at each output time).
 template <class Fv, class Mesh>
 Mode mode_amplitude(const Exec& exec, const Fv& fv, const Mesh& mesh, bool moving) {
     const auto q = fv.state();
@@ -95,6 +104,8 @@ Mode mode_amplitude(const Exec& exec, const Fv& fv, const Mesh& mesh, bool movin
     return {2 * std::hypot(s / d, c / d), K};
 }
 
+// The whole benchmark for one Riemann solver (HLLC or HLL); returns 0, or 2 if --repeats gave different hashes.
+// Used by: main.
 template <class Riemann>
 int run(const Options& o) {
     using Fv = hydro::FiniteVolume<2, Exec, Riemann>;
@@ -315,6 +326,7 @@ int run(const Options& o) {
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard guard(argc, argv);
+    luna::pin_notice();
     if (argc < 2) {
         std::puts("usage: hydro_kh2d <N> [--moving] [--dt=luna|arepo|fixed] [--courant=c] ... (see the top of the source)");
         return 2;

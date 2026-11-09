@@ -1,5 +1,5 @@
-// The 1D hydro on the 1D mesh: uniform states, conservation, same bits twice, inflow, Sod against exact averages within LUNA's bounds,
-// LUNA's final states at N = 16, Shu-Osher on a moving mesh; cells from a wall: docs/design.md.
+// Checks 1D hydro (uniform, conservation, determinism, inflow, Sod, Shu-Osher, wall cell supply) against exact and LUNA references.
+// Drives FiniteVolume<1>::time_step, step, step_and_time_step, supply_cells, set_inflow_spacing (src/hydro/finite_volume_1d.hpp).
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -25,6 +25,7 @@ template <class Riemann = hydro::HLLC>
 using FV = hydro::FiniteVolume<1, Exec, Riemann>;
 using Primitives = std::function<State(double)>;
 
+// n cell centres on [0, L], each moved by up to jitter / 2 spacings. Used by: main.
 std::vector<double> points(int n, double L, double jitter, unsigned seed) {
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> unit(-0.5, 0.5);
@@ -33,6 +34,7 @@ std::vector<double> points(int n, double L, double jitter, unsigned seed) {
     return x;
 }
 
+// Loads the points x into mesh. Used by: main.
 void build(Mesh& mesh, const std::vector<double>& x) {
     Kokkos::View<double* [1], Memory> v("x", x.size());
     auto h = Kokkos::create_mirror_view(v);
@@ -41,7 +43,7 @@ void build(Mesh& mesh, const std::vector<double>& x) {
     mesh.update(v);
 }
 
-// Q of each cell from W at its centroid (smooth W) or cell averages.
+// Sets Q of each cell from extensive(a, b), its integral over the cell [a, b]. Used by: main.
 template <class F>
 void set(F& fv, Mesh& mesh, const std::function<State(double, double)>& extensive) {
     mesh.update_cells();
@@ -55,7 +57,7 @@ void set(F& fv, Mesh& mesh, const std::function<State(double, double)>& extensiv
     }
     Kokkos::deep_copy(fv.state(), q);
 }
-// From primitives at the centroid.
+// Overload: Q from the primitive state W at each cell's midpoint. Used by: main.
 template <class F>
 void set(F& fv, Mesh& mesh, const Primitives& W, const hydro::Gas& gas) {
     set(fv, mesh, [&](double a, double b) {
@@ -64,10 +66,12 @@ void set(F& fv, Mesh& mesh, const Primitives& W, const hydro::Gas& gas) {
     });
 }
 
+// A cell's centroid, volume and primitive state, as returned by cells().
 struct Cell {
     double x, V;
     State W;
 };
+// The primitive state of every cell on the host. Used by: main.
 template <class F>
 std::vector<Cell> cells(const F& fv, Mesh& mesh) {
     mesh.update_cells();
@@ -80,6 +84,7 @@ std::vector<Cell> cells(const F& fv, Mesh& mesh) {
         out.push_back({x(i, 0) + c(i, 0), V(i), hydro::primitive(State{q(i, 0) / V(i), q(i, 1) / V(i), q(i, 2) / V(i)}, fv.gas())});
     return out;
 }
+// Sums of mass, momentum and energy over all cells, in long double. Used by: main (conservation checks).
 template <class F>
 std::array<long double, 3> totals(const F& fv) {
     const auto q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
@@ -89,7 +94,7 @@ std::array<long double, 3> totals(const F& fv) {
     return t;
 }
 
-// Runs to time t_end (the last step shortened to land on it).
+// Runs to time t_end (the last step shortened to land on it); returns the step count. Used by: main.
 template <class F>
 int run(F& fv, double t_end, double courant, hydro::TimeStep rule) {
     double t = 0;

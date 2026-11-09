@@ -1,6 +1,7 @@
 #pragma once
 
 // LUNA's final states at N = 16 (MC, HLLC, CFL 0.8, FP64; scripts/luna_1d_run.py on the CPU, XLA kernel).
+// Reference for the hydro1d test of FiniteVolume<1>::step (src/hydro/finite_volume_1d.hpp); columns are rho, v, P.
 const int luna_steps_sod = 10;
 const double luna_sod[16][3] = {
     {0.99988911927342106, 0.00013120598061590043, 0.9998447777150421},
