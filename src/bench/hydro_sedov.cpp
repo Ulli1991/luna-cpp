@@ -2,6 +2,7 @@
 // Drives: main -> run_precision -> run: Mesh::update/update_cells -> FiniteVolume (set Q) -> loop time_step, step -> write_snapshot.
 
 
+#include "pin_notice.hpp"
 #include "finite_volume.hpp"
 #include "snapshot.hpp"
 #include "support.hpp"
@@ -437,6 +438,7 @@ void run_precision(const Options& o, const Points& points) {
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::pin_notice();
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);

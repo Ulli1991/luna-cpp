@@ -1,6 +1,7 @@
 // LUNA's 1D tests, timed. Usage: hydro_1d <sod|shu-osher|titarev-toro|woodward-colella> <N> [flags] (docs/design.md).
 // Drives: main -> problem() -> simulate: Mesh::update -> FiniteVolume<1> (set state) -> loop time_step / step[_and_time_step] -> --out npy.
 
+#include "pin_notice.hpp"
 #include "finite_volume_1d.hpp"
 #include "problems_1d.hpp"
 
@@ -193,6 +194,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
 
 int main(int argc, char* argv[]) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::pin_notice();
     if (argc < 3) {
         std::cerr << "usage: hydro_1d <sod|shu-osher|titarev-toro|woodward-colella> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|cell|none]"

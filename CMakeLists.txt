@@ -18,11 +18,12 @@ if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/extern/voronoi-cpp/CMakeLists.txt)
     message(FATAL_ERROR "extern/voronoi-cpp is empty: git submodule update --init --recursive")
 endif()
 
-# The pin must be voronoi-cpp's newest main, at configure and at every build.
-option(LUNA_ALLOW_OLD_PIN "Warn only when extern/voronoi-cpp is behind voronoi-cpp main" OFF)
+# Warns, loudly, when the pinned voronoi-cpp is behind its main, at configure, at every build and when a program starts.
+option(LUNA_STRICT_PIN "Stop the build when extern/voronoi-cpp is behind voronoi-cpp main" OFF)
 set(LUNA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 include(cmake/check_pin.cmake)
-add_custom_target(luna_check_pin ALL COMMAND ${CMAKE_COMMAND} -DLUNA_ALLOW_OLD_PIN=${LUNA_ALLOW_OLD_PIN}
+add_compile_definitions(LUNA_VORONOI_PIN="${pin}" LUNA_VORONOI_LATEST="${latest}" LUNA_VORONOI_BEHIND=${luna_pin_behind})
+add_custom_target(luna_check_pin ALL COMMAND ${CMAKE_COMMAND} -DLUNA_STRICT_PIN=${LUNA_STRICT_PIN}
                   -DLUNA_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_pin.cmake)
 
 # voronoi_library. The submodule's tests and programs stay out of this build.

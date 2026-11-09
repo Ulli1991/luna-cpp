@@ -16,7 +16,7 @@ BSD 3-Clause, see [LICENSE](LICENSE).
 git clone --recursive https://github.com/Ulli1991/luna-cpp.git
 ```
 
-In an existing clone, run `git submodule update --init --recursive`. A build stops if `extern/voronoi-cpp` is behind voronoi-cpp `main`: update the pin and commit it. `-DLUNA_ALLOW_OLD_PIN=ON` only warns, to reproduce an old result.
+In an existing clone, run `git submodule update --init --recursive`. `extern/voronoi-cpp` holds the library's full source at a pinned commit, so it can be edited and committed from here. A build warns if the pin is behind voronoi-cpp `main`; the pin moves when luna-cpp needs a newer library (`git submodule update --remote extern/voronoi-cpp`, then commit). `-DLUNA_STRICT_PIN=ON` makes that warning stop the build.
 
 Dependencies:
 

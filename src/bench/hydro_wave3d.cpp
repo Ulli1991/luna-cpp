@@ -1,6 +1,7 @@
 // 3D problems with an exact solution; prints steps, wall seconds and cell updates/s. Usage: hydro_wave3d <sound|simple|vortex|tube> <nx> [flags].
 // Drives: main -> run<P>: problem_3d -> jittered_points -> Mesh::update/update_cells -> FiniteVolume<3> (wave_initial) -> time_step, step -> --out npy.
 
+#include "pin_notice.hpp"
 #include "finite_volume.hpp"
 #include "problems_3d.hpp"
 #include "support.hpp"
@@ -122,6 +123,7 @@ int run(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::pin_notice();
     const std::string precision = flag(argc, argv, "--precision", "default");
     if (precision == "default") return run<hydro::DefaultPrecision<3>>(argc, argv);
     if (precision == "double") return run<hydro::Precision<>>(argc, argv);
