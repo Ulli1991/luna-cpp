@@ -38,12 +38,13 @@ struct Run {
     long steps = 0;
     double t = 0;
     bool reached = false;
+    double smallest = std::numeric_limits<double>::infinity();  // with watch: the smallest inner cell over all steps, (x_{i+1} - x_{i-1}) / 2
 };
 
 // The problem on n uniform cells to t (default its t_end), LUNA's rule at 0.8
 // on a static line, AREPO's at 0.4 on a moving one, the bench's defaults.
 template <class Riemann = hydro::HLLC>
-Run simulate(const std::string& name, int n, Motion motion, Limiter limiter = Limiter::face_centroid, double amp = 0, double stop = 0) {
+Run simulate(const std::string& name, int n, Motion motion, Limiter limiter = Limiter::face_centroid, double amp = 0, double stop = 0, bool watch = false, long max_steps = 0) {
     const Exec exec;
     const pr::Problem pb = pr::problem(name, amp);
     const double t_end = stop > 0 ? stop : pb.t_end;
@@ -78,12 +79,18 @@ Run simulate(const std::string& name, int n, Motion motion, Limiter limiter = Li
     const bool moving = motion == Motion::moving;
     const double courant = moving ? hydro::courant_moving_1d : hydro::courant_static_1d;
     const hydro::TimeStep rule = moving ? hydro::TimeStep::arepo : hydro::TimeStep::luna;
-    while (r.t < t_end * (1 - 1e-12) && r.steps < steps_per_cell * n) {
+    while (r.t < t_end * (1 - 1e-12) && r.steps < (max_steps > 0 ? max_steps : steps_per_cell * n)) {
         const double dt = std::min(fv.time_step(courant, rule), t_end - r.t);
         if (!(dt > 1e-15 * t_end)) break;
         fv.step(dt);
         r.t += dt;
         ++r.steps;
+        if (watch) {
+            const auto p = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.positions());
+            std::vector<double> at(p.data(), p.data() + fv.cells());
+            std::sort(at.begin(), at.end());
+            for (std::size_t i = 1; i + 1 < at.size(); ++i) r.smallest = std::min(r.smallest, 0.5 * (at[i + 1] - at[i - 1]));
+        }
     }
     exec.fence();
     r.reached = r.t >= t_end * (1 - 1e-12);
@@ -456,6 +463,13 @@ int main(int argc, char* argv[]) {
         bool finite = true;
         for (const Cell& c : r.cells) finite = finite && std::isfinite(c.W[0]) && std::isfinite(c.W[1]) && std::isfinite(c.W[2]);
         check.expect(r.reached && finite, "la-vacuum N=768 static: rho = 0 runs to t_end, finite, " + std::to_string(r.steps) + " steps");
+    }
+    // Stage E of the super-hard tube alone at the spacing of N = 32768 (#25): at the cells' mean velocity the tube stalled at t = 0.134 (2.7e-10 h),
+    // a limited-gradient velocity here at t = 0.118 (6e-6 h); the fixed run's smallest cell is 1.85e-2 h in 9781 steps.
+    {
+        const double h = pr::super_tube_length / 32768;
+        const Run r = simulate("super-tube-e", 2960, Motion::moving, Limiter::face_centroid, 0, 0.125, true, 30000);
+        check.expect(r.reached && r.smallest > 5e-3 * h, "super-tube-e N=2960 moving to t = 0.125: smallest cell " + sci(r.smallest / h) + " h (> 5e-3 h), " + std::to_string(r.steps) + " steps");
     }
     // Teeth: a run stopped at 0.9 t misses the bound (LUNA's test_bound_catches_a_short_run).
     {

@@ -334,12 +334,14 @@ int main(int argc, char* argv[]) {
                 }
             const auto after = totals(fused);
             const double mass = double(std::abs(after[0] - before[0]) / before[0]), energy = double(std::abs(after[2] - before[2]) / before[2]);
-            check.expect(same && mass < 1e-14 && energy < 1e-14 && difference < 1e-9,
+            // Moving: the fused next dt takes w - v of t^n, the separate one of t^n+1; w has the gas velocity at the generator (#25), measured 5.6e-4.
+            check.expect(same && mass < 1e-14 && energy < 1e-14 && difference < (motion == Motion::moving ? 1.5e-3 : 1e-9),
                          "fused step, " + name + ": differs from time_step() + step() by " + sci(difference) + ", mass " + sci(mass) +
                              ", energy " + sci(energy) + ", the same bits twice");
         }
 
-    // Shu-Osher on a moving mesh without a cell supply: unregularised, the grown end cell runs into its neighbour; regularised, no points cross.
+    // Shu-Osher on a moving mesh without a cell supply: no points cross, regularised or not (unregularised, the grown end cell's neighbour ran into it
+    // while points moved with their cells' mean velocity; at the generator's velocity it no longer does, #25).
     {
         namespace pr = hydro::problems_1d;
         const pr::Problem problem = pr::problem("shu-osher");
@@ -357,7 +359,7 @@ int main(int argc, char* argv[]) {
             run(fv, problem.t_end, 0.8, hydro::TimeStep::luna);
             sorts[regularise] = mesh.sorts();
         }
-        check.expect(sorts[1] == 0 && sorts[0] > 0, "Shu-Osher, moving, N = 1024: points crossed " + std::to_string(sorts[0]) +
+        check.expect(sorts[1] == 0 && sorts[0] == 0, "Shu-Osher, moving, N = 1024: points crossed " + std::to_string(sorts[0]) +
                                                         " times unregularised, " + std::to_string(sorts[1]) + " regularised");
     }
 

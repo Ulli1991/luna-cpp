@@ -180,6 +180,11 @@ inline Problem table(const std::string& name, double amplitude) {
                 }};
     if (name == "woodward-colella") return {1.0, 0.0, 0.038, 1.4, closed, woodward_colella};
     if (name == "super-tube") return {super_tube_length, 0.0, 2.0, gamma_gas, {Wall::outflow, Wall::reflective}, super_tube};
+    // Stage E alone (luna-cpp #25), [13.60, 16.60]: on 370 k cells, the cells of the tube at N = 4096 k from 1678 k on.
+    if (name == "super-tube-e") {
+        constexpr double h = super_tube_length / 4096;
+        return {370 * h, 1678 * h, 0.2, gamma_gas, outflow, super_tube};
+    }
     // Linear waves, one period, periodic.
     const double eps = amplitude != 0 ? amplitude : linear_amplitude;
     const auto wave = [&](double t, double v0, double drho, double dv, double dp) {
