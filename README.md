@@ -116,6 +116,48 @@ The error of the reconstructed field against resolution on the three tests. Movi
 
 GPU seconds needed to reach a given error. LUNA wins Sod and Shu-Osher, by 7 to 16 times on Shu-Osher, where the moving mesh takes 7.5 times the steps and ends with 1.47 times the cells. Woodward-Colella is close, and only the moving mesh reaches a density error of 1e-3 in the ladder.
 
+### Titarev-Toro
+
+![Titarev-Toro density](docs/figures/titarev_toro.png)
+
+A shock running into a high-frequency entropy wave, whose short waves are hard to keep behind the shock. Moving, static and LUNA all follow the high-resolution LUNA and AthenaK references through the waves and at the shock.
+
+### Toro test 5
+
+![Toro 5 density](docs/figures/toro_5.png)
+
+Two shocks with a strong contact between them that barely moves. The moving mesh holds the contact in about two cells, where LUNA and static smear it over about ten.
+
+### Toro test 2: near vacuum
+
+![Toro 2 density](docs/figures/toro_2.png)
+
+Two rarefactions running apart leave gas close to vacuum in the middle. All three follow the exact fans; the moving mesh, run on a wide line because its walls cannot yet let gas leave ([#14](https://github.com/Ulli1991/luna-cpp/issues/14)), has few cells left in the near-vacuum middle and misses its depth by a similar amount as the others.
+
+### LeBlanc
+
+![LeBlanc density](docs/figures/leblanc.png)
+
+An extreme shock tube, with a pressure ratio of 10⁹ across the start. Moving, static and LUNA are close to each other everywhere, and all three put the final shock slightly ahead of the exact one, a known difficulty of this test.
+
+### Noh
+
+![Noh density](docs/figures/noh.png)
+
+Gas streaming into a wall builds a shock that moves back out, with a well-known dip in density at the wall. The moving mesh avoids the dip, but behind the shock it shows small cell-to-cell noise; it runs at a fixed step here ([#15](https://github.com/Ulli1991/luna-cpp/issues/15)).
+
+### Sound wave
+
+![Sound wave density](docs/figures/sound_right.png)
+
+A small sound wave travelling once across a periodic line, the cleanest test of order on smooth flow. Static and LUNA are second order; the moving mesh has noise from cell to cell instead, and its error stops falling and then grows with resolution ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)).
+
+### All 30 tests against resolution
+
+![1D ladder](docs/figures/ladder_1d.png)
+
+The density error against the number of cells for every 1D test, with the order at the bottom of each panel (S static, L LUNA, M moving, W moving on a wide line). Static and LUNA agree everywhere. The moving mesh is ahead on most shock tests, often by an order of magnitude, behind on Noh, and fails to converge on the sound and entropy waves (#23).
+
 ## Results in 2D
 
 ### Kelvin-Helmholtz instability
