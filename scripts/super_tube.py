@@ -8,7 +8,7 @@ Run with LUNA's environment. Runs: <series>_super-tube_<N>_t<t>.npz (LUNA) or .n
 the references luna_super-tube_<2^k>_t<t>.npz with the largest N. The norm is ladder_1d.py's: sum over cells of V |W_i - exact_i|,
 exact_i the reference's conservative average over the same cell. At t = 0.1, A to G against the exact superposition of their
 Riemann solutions (problems_1d.super_exact), S and H against the LUNA reference; at t_end every region against the LUNA reference.
-A stage's region: from the middle of the buffer on its left to the middle of the one on its right.
+A stage's region: from the middle of the buffer on its left to the middle of the one on its right (S | G: of the quiet line at 0.1).
 """
 import glob
 import json
@@ -33,6 +33,7 @@ def regions():
     """{stage: (lo, hi)}: the stage's line between the middles of its buffers."""
     st = pr.SUPER_STAGES
     cuts = [0.0] + [0.5 * (a[2] + b[1]) for a, b in zip(st, st[1:])] + [pr.SUPER_LENGTH]
+    cuts[8] = 25.9   # S | G: S reaches 24.69 by t = 0.1, G 27.02 (static N = 32768): the middle of the quiet line between
     return {s[0]: (lo, hi) for s, lo, hi in zip(st, cuts, cuts[1:])}
 
 
@@ -108,17 +109,27 @@ def score(runs, out):
 
 
 def npz(runs, out, s, n, t, meta):
-    """One final state, keys as luna-reference-solutions' luna/shu_osher/shu_osher_mc.npz plus the cells of a moving mesh."""
-    a, b, W = lad.cells(run_file(runs, s, int(n), t), P)
+    """One final state, keys of luna-reference-solutions' luna/shu_osher/shu_osher_mc.npz plus provenance (meta: a JSON of code, commit,
+    build, settings) and the run's own JSON; a moving mesh adds its cells' edges. meta "coarse": conservative averages on that many cells."""
+    f = run_file(runs, s, int(n), t)
+    a, b, W = lad.cells(f, P)
     info = json.load(open(meta))
-    keys = dict(rho=W[0], u=W[1], p=W[2], problem="super-tube", lx=pr.SUPER_LENGTH, t=float(t), gamma=pr.G14, limiter=1, riemann_solver="hllc",
-                precision="fp64", n_run=int(n), boundary="left outflow (zero gradient), right reflecting", **info)
+    run = json.load(open(f + ".json"))
+    coarse = int(info.pop("coarse", 0))
+    keys = dict(problem="super-tube", lx=pr.SUPER_LENGTH, t=float(t), gamma=pr.G14, limiter=1, riemann_solver="hllc", precision="fp64",
+                n_run=int(n), boundary="left outflow (zero gradient), right reflecting", ic="problems_1d.super_initial: exact cell averages",
+                steps=int(run["steps"]), wall_s=float(run["wall_s"]), reached=int(run.get("reached", 1)), **info)
+    if coarse:
+        e = np.linspace(0.0, pr.SUPER_LENGTH, coarse + 1)
+        W = np.stack(lad.Reference(np.concatenate([a, b[-1:]]), *W).average(e[:-1], e[1:]))
+        keys["n_coarse"] = coarse
+    keys.update(rho=W[0], u=W[1], p=W[2])
     if s == "moving":
         keys.update(x_left=a, x_right=b)
     os.makedirs(out, exist_ok=True)
-    name = f"{out}/{info.get('code', s)}_{s}_super_tube_{n}_t{t}.npz".replace("luna-cpp_", "")
+    name = f"{out}/super_tube_{s}_{n}_t{t}.npz"
     np.savez(name, **keys)
-    print(name)
+    print(name, {k: v for k, v in keys.items() if np.ndim(v) == 0})
 
 
 if __name__ == "__main__":

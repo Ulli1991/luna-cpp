@@ -140,40 +140,46 @@ def super_initial(a, b):
 
 
 def super_fans(t):
-    """(x0, WL, WR, lo, hi) of every interface of the segments, lo and hi its outermost fronts at t."""
+    """(x0, WL, WR, lo, hi) of every interface of the segments, [lo, hi] its waves at t (a contact alone: lo = hi)."""
     out = []
     for (_, WL), (x0, WR) in zip(SUPER_SEGMENTS, SUPER_SEGMENTS[1:]):
         w = er.waves(tuple(map(float, WL)), tuple(map(float, WR)), G14)
-        left = min(w["left"]) if abs(w["p"] / WL[2] - 1) > 1e-12 else w["u"]   # no wave on a side whose pressure stays: a contact
+        left = min(w["left"]) if abs(w["p"] / WL[2] - 1) > 1e-12 else w["u"]   # no wave on a side whose pressure stays
         right = max(w["right"]) if abs(w["p"] / WR[2] - 1) > 1e-12 else w["u"]
         out.append((x0, WL, WR, x0 + left * t, x0 + right * t))
     return out
 
 
 def super_meets(t):
-    """Pairs of neighbouring fans that overlap at t, with the stages they belong to: [] when every stage is still on its own."""
+    """Pairs of neighbouring interfaces whose waves overlap at t, by x0: [] while each stays a single Riemann problem."""
     fans = super_fans(t)
     return [(A[0], B[0]) for A, B in zip(fans, fans[1:]) if A[4] > B[3]]
 
 
+SUPER_EXACT = 22.6   # A to F; G's interfaces too. S and H interact within themselves at once: not exact
+SUPER_G = (27.2, 27.7, 28.2)
+
+
 def super_exact(a, b, t, sub=256):
-    """(rho, u, p) averages of the cells at t <= 0.129: the segments, each interface's Riemann solution in its fan, stage B linear."""
+    """(rho, u, p) averages of the cells at t < 0.129 on A to G: each interface's Riemann solution inside its waves, between them
+    the segment's state, stage B linear. Cells of S and H: not exact (each interface's Riemann solution alone)."""
     f = (np.arange(sub) + 0.5) / sub
     out = np.empty((3, a.size))
     fans = super_fans(t)
+    his = np.array([hi for *_, hi in fans])
+    states = [np.array([w[i] for _, w in SUPER_SEGMENTS], float) for i in range(3)]
     for s in range(0, a.size, 4096):
         A, B = a[s:s + 4096], b[s:s + 4096]
         x = A[:, None] + (B - A)[:, None] * f[None, :]
-        k = np.searchsorted([x0 for x0, _ in SUPER_SEGMENTS], x, side="right") - 1
-        W = [np.array([w[i] for _, w in SUPER_SEGMENTS], float)[k] for i in range(3)]
+        k = np.searchsorted(np.sort(his), x, side="right")     # the segment between two interfaces' waves
+        W = [st[k] for st in states]
         for x0, WL, WR, lo, hi in fans:
-            m = (x >= lo) & (x < hi) if hi > lo else np.zeros_like(x, bool)
-            if m.any():
+            m = (x >= lo) & (x < hi)
+            if m.any() and (x0 < SUPER_EXACT or x0 in SUPER_G):
                 fan = er.sample(tuple(map(float, WL)), tuple(map(float, WR)), G14, (x[m] - x0) / t)
                 for i in range(3):
                     W[i][m] = fan[i]
-        U = conserved(*W, G14).mean(axis=2)
-        out[:, s:s + 4096] = U
+        out[:, s:s + 4096] = conserved(*W, G14).mean(axis=2)
     e, sound = super_wave(a, b, t)
     c = np.sqrt(G14)
     out += SUPER_WAVE * (e * np.array([1.0, 0.0, 0.0])[:, None] + sound * np.array([1.0, c, G14 / (G14 - 1.0)])[:, None])
