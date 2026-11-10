@@ -2,10 +2,11 @@
 
 Run with LUNA's environment, LUNA's src on the path, outside LUNA's tree:
     python luna_1d_run.py <problem of problems_1d.py> <N> <hllc|hll> <out.npz> [LIMITER=1] [CFL=0.8] [steps=0]
-        [kernel=auto] [repeats=2] [series=luna] [max_s=0] [resume=<state.npz>] [eps=1e-6]
+        [kernel=auto] [repeats=2] [series=luna] [max_s=0] [resume=<state.npz>] [eps=1e-6] [t=t_end]
 
 steps > 0: stop after that many steps; max_s > 0: stop after about that long and write the state, resume=<state.npz> continues.
 Writes rho, u, p, steps, wall_s and <out>.json for scripts/compare_1d.py; with max_s, only when t_end is reached, or with reached = 0 on a NaN dt.
+A reflecting right wall with an open left one (super-tube), which LUNA's one BOUNDARY cannot hold: the line and its mirror image, 2N cells, open ends.
 """
 import json
 import os
@@ -33,14 +34,19 @@ def main():
     repeats, series, kernel = int(extra.get("repeats", 2)), extra.get("series", "luna"), extra.get("kernel", "auto")
     max_s, resume = float(extra.get("max_s", 0)), extra.get("resume", "")
     pb = pr.problem(problem)
-    G, t_end = pb["gamma"], pb["t"]
+    G, t_end = pb["gamma"], float(extra.get("t", pb["t"]))
+    mirror = pb.get("right") == pr.REFLECTIVE
+    n_box = n
+    n = 2 * n if mirror else n
     test_problem = pb.get("luna", "Sod-Shock")
     cfg = Config(SPATIAL_DIMENSION=1, Nx=n, gamma=G, ORDER=1, LIMITER=limiter, riemann_solver=solver, CFL=cfl,
                  enable_x64=True, PLOT_AFTER_SIM=False, enable_checkpointing=False, hydro_kernel=kernel,
-                 test_problem=test_problem, Lx=pb["box"][1] - pb["box"][0], BOUNDARY=pb["boundary"], t_end=t_end,
+                 test_problem=test_problem, Lx=(2 if mirror else 1) * (pb["box"][1] - pb["box"][0]), BOUNDARY=pb["boundary"], t_end=t_end,
                  allow_first_order_faces=True)
     cfg.validate()
-    U0 = pr.initial(problem, n, float(extra.get("eps", pr.EPS)))
+    U0 = pr.initial(problem, n_box, float(extra.get("eps", pr.EPS)))
+    if mirror:
+        U0 = np.concatenate([U0, U0[:, ::-1] * np.array([1.0, -1.0, 1.0])[:, None]], axis=1)
     U0 = np.asarray(initial_conditions(cfg)) if U0 is None else U0
     mesh = Mesh(np.asarray(jax.devices()[:1]), ("x",))
     compute_dt, step, sharding = create_solver_distributed(cfg, GridParams.from_config(cfg), mesh)
@@ -84,20 +90,22 @@ def main():
             print(f"run: wall_s={walls[-1]:.4f} M_cell_updates_per_s={n * int(k) / walls[-1] / 1e6:.1f}")
         wall = min(walls)
     U = np.asarray(U)
+    asymmetry = float(np.abs(U[:, :n_box] - U[:, :n_box - 1:-1] * np.array([1.0, -1.0, 1.0])[:, None]).max()) if mirror else 0.0
+    U = U[:, :n_box]
     rho, u, p = pr.primitive(U, G)
     steps = int(k)
     reached = bool(float(t) >= t_end * (1 - 1e-12) and np.isfinite(U).all())
     stats = jax.devices()[0].memory_stats() or {}
     peak_mb = stats.get("peak_bytes_in_use", 0) / 1e6
-    np.savez(out, rho=rho, u=u, p=p, steps=steps, wall_s=wall, t=float(t), N=n, problem=problem, solver=solver,
-             limiter=limiter, cfl=cfl, device=str(jax.devices()[0]))
+    np.savez(out, rho=rho, u=u, p=p, steps=steps, wall_s=wall, t=float(t), N=n_box, problem=problem, solver=solver,
+             limiter=limiter, cfl=cfl, device=str(jax.devices()[0]), mirror_asymmetry=asymmetry)
     if reached or max_s == 0 or not np.isfinite(float(t)):
         with open(out + ".json", "w") as meta:
-            json.dump(dict(series=series, problem=problem, N=n, steps=steps, wall_s=wall, peak_MB=peak_mb, t=float(t), reached=int(reached),
+            json.dump(dict(series=series, problem=problem, N=n_box, cells_run=n, steps=steps, wall_s=wall, peak_MB=peak_mb, t=float(t), reached=int(reached),
                            file=os.path.basename(out)), meta)
     print(f"luna: problem={problem} N={n} solver={solver} LIMITER={limiter} CFL={cfl} kernel={hydro_kernel_name(cfg)} "
           f"steps={steps} t={float(t):.6g} wall_s={wall:.4f} cell_updates={n * steps:.4g} "
-          f"M_cell_updates_per_s={n * steps / wall / 1e6:.1f} peak_MB={peak_mb:.1f} device={jax.devices()[0]}")
+          f"M_cell_updates_per_s={n * steps / wall / 1e6:.1f} peak_MB={peak_mb:.1f} device={jax.devices()[0]} mirror_asymmetry={asymmetry:.3g}")
 
 
 if __name__ == "__main__":

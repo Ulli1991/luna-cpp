@@ -201,7 +201,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|cell|none|minmod|vanleer]"
                      " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused]"
-                     " [--inflow-spacing=s] [--out=file.npy] [--series=name]\n";
+                     " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name]\n";
         return 1;
     }
     const std::string name = argv[1];
@@ -234,6 +234,7 @@ int main(int argc, char* argv[]) {
                                      : hydro::Limiter::face_centroid;
     if (has(argc, argv, "--memory")) DeviceMemory::start();
     Problem pb = problem(name, std::stod(flag(argc, argv, "--amp", "0")));
+    if (const std::string t_end = flag(argc, argv, "--t-end", ""); !t_end.empty()) pb.t_end = std::stod(t_end);
     const int box_cells = o.n, pad_cells = static_cast<int>(std::ceil(std::stod(flag(argc, argv, "--pad", "0")) * o.n / pb.L));
     pb.origin -= pad_cells * pb.L / o.n;
     pb.L += 2 * pad_cells * pb.L / o.n;

@@ -109,6 +109,40 @@ inline Problem pure_shock(double mach, const Walls& outflow) {
     return tube(1.0, 0.0, 0.5 / s, g, {rho2, v2, p2}, {1, 0, 1}, 0.1, outflow);
 }
 
+// The super-hard tube (research_notes/super_tube_2026-11-10.md): from x on, the primitives (rho, v, P), up to the next x or 33.2.
+struct Segment {
+    double x, rho, v, P;
+};
+inline constexpr Segment super_tube_segments[] = {
+    {0.0, 1, 0, 1},       {6.0, 10, 0, 1},         {6.05, 1, 0, 1},    {8.05, 1, 1, 1},     {8.80, 10, 1, 1},  {8.85, 1, 1, 1},
+    {9.60, 1, 0, 1},      {11.60, 1, 0.75, 1},     {12.10, 0.125, 0, 0.1}, {12.60, 1, 0, 1}, {14.60, 1, 0, 0.1},
+    {15.10, 1e-3, 0, 1e-10}, {15.60, 1, 0, 1},     {17.60, 3.857143, -0.810631, 10.33333}, {18.10, 1, -3.44, 1},
+    {18.60, 1, 0, 1},     {22.60, 5.99924, 19.5975, 460.894}, {22.90, 5.99242, -6.19633, 46.0950}, {23.20, 1, 0, 1},
+    {27.20, 1, -2, 0.4},  {27.70, 1, 2, 0.4},      {28.20, 1, 0, 1},   {32.20, 1, 0, 1000}, {32.30, 1, 0, 0.01}, {33.10, 1, 0, 100}};
+inline constexpr double super_tube_length = 33.2, super_tube_wave = 1e-4, super_tube_wavelength = 0.25;
+
+// Exact cell average on [a, b]: the segments' volume fractions; on [3, 4] a right sound wave and an entropy wave, linear in U.
+inline State<1> super_tube(double a, double b) {
+    constexpr double g = gamma_gas, k = 2 * pi / super_tube_wavelength;
+    constexpr int count = sizeof super_tube_segments / sizeof super_tube_segments[0];
+    State<1> u{0, 0, 0};
+    for (int s = 0; s < count; ++s) {
+        const Segment& w = super_tube_segments[s];
+        const double end = s + 1 < count ? super_tube_segments[s + 1].x : super_tube_length;
+        const double f = std::max(0.0, std::min(b, end) - std::max(a, w.x)) / (b - a);
+        const State<1> U = conserved({w.rho, w.v, w.P}, g);
+        for (int v = 0; v < 3; ++v) u[v] += f * U[v];
+    }
+    const double lo = std::max(a, 3.0), hi = std::min(b, 4.0);
+    if (hi > lo) {  // c = sqrt(g) on the ambient: dU = s (1, c, c^2 / (g - 1)) + s (1, 0, 0)
+        const double s = super_tube_wave * (std::cos(k * (lo - 3)) - std::cos(k * (hi - 3))) / k / (b - a);
+        u[0] += 2 * s;
+        u[1] += std::sqrt(g) * s;
+        u[2] += g / (g - 1) * s;
+    }
+    return u;
+}
+
 // amplitude: of the linear waves (signed: LUNA keeps the part odd in it) and of the simple wave (0: its default, 0.1).
 inline Problem table(const std::string& name, double amplitude) {
     const Walls outflow{Wall::outflow, Wall::outflow}, closed{Wall::reflective, Wall::reflective};
@@ -145,6 +179,7 @@ inline Problem table(const std::string& name, double amplitude) {
                     return shock_into_wave(a, b, {1.515695, 0.523346, 1.805}, -4.5, 0.1, 20 * pi, 1.4);
                 }};
     if (name == "woodward-colella") return {1.0, 0.0, 0.038, 1.4, closed, woodward_colella};
+    if (name == "super-tube") return {super_tube_length, 0.0, 2.0, gamma_gas, {Wall::outflow, Wall::reflective}, super_tube};
     // Linear waves, one period, periodic.
     const double eps = amplitude != 0 ? amplitude : linear_amplitude;
     const auto wave = [&](double t, double v0, double drho, double dv, double dp) {
