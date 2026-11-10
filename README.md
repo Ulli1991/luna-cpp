@@ -152,6 +152,14 @@ Gas streaming into a wall builds a shock that moves back out, with a well-known 
 
 A small sound wave travelling once across a periodic line, the cleanest test of order on smooth flow. Static and LUNA are second order; the moving mesh has noise from cell to cell instead, and its error stops falling and then grows with resolution ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)).
 
+### Super-hard tube
+
+![Super-hard tube at t = 0.1, LUNA](docs/figures/super_tube_t01_luna.png)
+
+![Super-hard tube at t = 2, LUNA](docs/figures/super_tube_t2_luna.png)
+
+Our own test that puts the hard parts of the other 1D tests on one line: a quiet region, smooth waves, a standing and a moving density peak, a sonic-point rarefaction, a jump with a pressure ratio of 10⁹, a slow shock, colliding streams, a near-vacuum gap and a double blast against a reflecting wall, with an open wall on the left. At t = 0.1 the stages have not met yet and most have an exact solution; by t = 2 the blast's reflections have swept through all of them. Shown is LUNA at N = 4096 against the exact solution and its own run at 2²⁰ cells. Our static mesh matches LUNA in every stage; our moving mesh does not reach t = 2 yet ([#25](https://github.com/Ulli1991/luna-cpp/issues/25)). The setup is in research_notes/super_tube_2026-11-10.md; the problem lands in the code with the #23 fix.
+
 ### All 30 tests against resolution
 
 ![1D ladder](docs/figures/ladder_1d.png)
