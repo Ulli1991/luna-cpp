@@ -116,6 +116,7 @@ Each line names the last commit that had it: `git show <commit>:<path>` brings i
 
 - `hydro_sedov --precision=weight64|geo32|riemann32|mixed16`, presets no test, figure or measurement used: c12980c, `src/bench/hydro_sedov.cpp` (`run_precision`).
 - Gradient weights stored by the mesh (the `Weight` slot of `Precision`, presets `weight32` and `lowweights`, their `hydro` cases; voronoi-cpp's `gradient_weights` goes with them): d814706, `src/hydro/precision.hpp`, `finite_volume.hpp`.
+- `hydro_sedov --precision=flux32` (float face fluxes alone; it measured no gain, job 31953468) and its line in `throughput_precision.png`: d814706, `src/bench/hydro_sedov.cpp`, `scripts/make_figures.py`.
 
 ## Benchmark programs (src/bench/)
 

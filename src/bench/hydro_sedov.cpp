@@ -418,7 +418,6 @@ void run_precision(const Options& o, const Points& points) {
     if (p == "default") return run<hydro::DefaultPrecision<3>, R>(o, points);
     if (p == "double") return run<Precision<>, R>(o, points);
     if constexpr (std::is_same_v<R, hydro::HLLC>) {
-        if (p == "flux32") return run<Precision<double, double, float>, R>(o, points);
         if (p == "grad32") return run<hydro::Grad32, R>(o, points);
         if (p == "grad16") return run<Precision<double, Half>, R>(o, points);
         if (p == "mixed") return run<Precision<float, float, float>, R>(o, points);
@@ -437,7 +436,7 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);
     if (args.size() < 2) {
         std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]"
-                     " [--riemann=hllc|hll] [--precision=default|double|flux32|grad32|grad16|mixed|low]"
+                     " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f] [--watch]\n";
         return 2;
