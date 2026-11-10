@@ -49,7 +49,7 @@ cmake --build build-omp -j4
 
 Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the backend you want. On Raven, build with at most `-j4` on the login node, or inside a Slurm job, and run GPU work through Slurm.
 
-`cmake --build` with no target gives `hydro_sedov`, `hydro_1d`, `hydro_wave3d` and the tests. voronoi-cpp (the submodule) is the mesh library only, so the solver lives here. The CMake targets keep the `luna_` prefix from the split: `luna_hydro_library`, `luna_hydro_sedov`, `luna_hydro_1d`; build one with `--target luna_hydro_1d`.
+`cmake --build` with no target gives `hydro_sedov`, `hydro_1d`, `hydro_kh2d`, `hydro_wave3d` and the tests. voronoi-cpp (the submodule) is the mesh library only, so the solver lives here. The CMake targets keep the `luna_` prefix from the split: `luna_hydro_library`, `luna_hydro_sedov`, `luna_hydro_1d`, `luna_hydro_kh2d`, `luna_hydro_wave3d`; build one with `--target luna_hydro_1d`.
 
 ### Compiler flags in use
 
@@ -67,18 +67,18 @@ hydro_sedov <side> <jittered|uniform> [--moving] [--order=0|1] [--riemann=hllc|h
             [--precision=default|double|grad32|mixed|low|...] [--integrator=one-pass|two-pass] [--bulk=km/s]
             [--out=dir] [--snapshots=10] [--steps=max] [--memory] ...
 hydro_kh2d <N> [--moving] [--integrator=one-pass|two-pass] [--out-times=t,...] [--stop-after=<s>] [--resume] ...
-hydro_1d <problem> <N> [--moving] [--limiter=face|cell|none] [--dt=luna|arepo|fixed] [--courant=c] ...
+hydro_1d <problem> <N> [--moving] [--limiter=face|cell|none|minmod|vanleer] [--dt=luna|arepo|fixed] [--courant=c] ...
 hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--precision=...]
 sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 ```
 
-`hydro_sedov` needs HDF5 and writes snapshots. Every program prints a loud warning at start if it was built against an older voronoi-cpp than the newest.
+`hydro_sedov` needs HDF5 and writes snapshots. Every program prints a banner on stderr at start if the configure step found the pinned voronoi-cpp behind voronoi-cpp `main`.
 
 ## The method
 
 - **Finite volumes on a Voronoi mesh.** `hydro::FiniteVolume<D>` (`src/hydro/finite_volume.hpp`) handles 3D and 2D from one template; 1D has its own fused kernel (`finite_volume_1d.hpp`).
 - **MUSCL-Hancock.** Least-squares gradients of the primitive variables, limited at the face centroids as in AREPO, a half step in time, then HLLC (default) or HLL along each face normal, with one global time step.
-- **Moving mesh.** Points follow the gas, with a small drift towards their cell centroids that keeps cells round. The mesh is repaired every step, and fluxes go through the moving faces. To stay second order, a moving step takes fluxes on the old mesh and on the new mesh, half each. The code calls this `--integrator=two-pass`, the default; the one-pass option is first order on a moving mesh and will be removed ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)). 1D still uses one pass for now.
+- **Moving mesh.** Points follow the gas, with a small drift towards their cell centroids that keeps cells round. The mesh is repaired every step, and fluxes go through the moving faces. To stay second order, a moving step takes fluxes on the old mesh and on the new mesh, half each. The code calls this `--integrator=two-pass`; it is the default for a moving mesh at order 1 in 3D and 2D. The one-pass option is first order on a moving mesh ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)). 1D has no `--integrator` and uses one pass.
 - **Precision.** 3D runs `grad32` by default: gradients and limiting in float, everything else in double, 8 to 12 % faster with no measurable loss of accuracy. 2D and 1D run in double.
 - **Bit-reproducible.** Every cell sums its faces in a fixed order, so an A100 run gives the same bits every time.
 
@@ -259,6 +259,7 @@ Run times are in [TESTING.md](TESTING.md). The mesh's own tests are in voronoi-c
 | `hydro` | HLLC and HLL fluxes, conservation, bit-identical runs, moving-mesh invariances (bulk velocity, Galilean blast) |
 | `hydro_wave` | moving 3D step on smooth flow, both integrators: Yee's vortex and a sound wave against measured bounds |
 | `hydro2d` | 2D hydro, static and moving: uniform states, conservation, sound-wave order, Sod, Noh, a Galilean blast |
+| `hydro1d_cases` | every 1D test of LUNA's suite plus two it lacks, 30 in all, against LUNA and the exact solutions, static and moving |
 | `hydro1d` | 1D hydro: conservation, inflow, cells from a wall with the budget through it, Sod against the exact solution; LUNA's final states of Sod, Shu-Osher and Woodward-Colella at N = 16 to 1e-12 |
 
 ```sh
@@ -266,7 +267,7 @@ ctest --test-dir build-cuda --output-on-failure
 OMP_NUM_THREADS=1 ctest --test-dir build-omp
 ```
 
-CI (`.github/workflows/checks.yml`) runs clang-tidy and the CPU tests in ordinary and sanitizer builds against a pinned Serial Kokkos 5.0.2, with the submodule checked out. It does not run GPU jobs.
+CI (`.github/workflows/checks.yml`) runs clang-tidy (ordinary build) and the CPU tests (ordinary and sanitizer builds) against a pinned Serial Kokkos 5.0.2, with the submodule checked out. It does not run GPU jobs.
 
 
 ## Limitations
