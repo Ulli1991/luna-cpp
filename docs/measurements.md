@@ -100,3 +100,5 @@ Hydro speed so far: 0.107 to 0.152 G cell updates/s static. Estimates for the ne
 Scripts and modes nothing maintained uses; each line names the last commit that had it (`git show <commit>:<path>`).
 
 - `scripts/hydro_ncu_table.py` and the `ncu` mode of `scripts/hydro_speed_a100.sh`, Nsight Compute tables for research_notes/hydro_speed_2026-11-04.md (jobs 31802044-46); no number here or in the README comes from them: c12980c.
+- Modes `builds`, `accuracy`, `stream` and `repro` of `scripts/hydro_speed_a100.sh`, experiments of research_notes/hydro_speed_2026-11-04.md: c12980c.
+- Modes `library_check` (voronoi-cpp's own `scripts/bench_a100.sh` checks the library), `memory_compare`, `moving256face` and `ours128` of `scripts/hydro_a100.sh`, which no note or number names: c12980c.
