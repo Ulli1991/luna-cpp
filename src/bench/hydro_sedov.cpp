@@ -419,14 +419,10 @@ void run_precision(const Options& o, const Points& points) {
     if (p == "double") return run<Precision<>, R>(o, points);
     if constexpr (std::is_same_v<R, hydro::HLLC>) {
         if (p == "weight32") return run<Precision<double, float>, R>(o, points);
-        if (p == "weight64") return run<Precision<double, double>, R>(o, points);
         if (p == "flux32") return run<Precision<double, void, double, float>, R>(o, points);
         if (p == "grad32") return run<hydro::Grad32, R>(o, points);
         if (p == "grad16") return run<Precision<double, void, Half>, R>(o, points);
-        if (p == "geo32") return run<Precision<float>, R>(o, points);
-        if (p == "riemann32") return run<Precision<double, void, double, double, float>, R>(o, points);
         if (p == "mixed") return run<Precision<float, void, float, float>, R>(o, points);
-        if (p == "mixed16") return run<Precision<float, void, Half, float>, R>(o, points);
         if (p == "low") return run<Precision<float, void, Half, float, float>, R>(o, points);
         if (p == "lowweights") return run<Precision<float, float, Half, float, float>, R>(o, points);
     }
@@ -443,7 +439,7 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);
     if (args.size() < 2) {
         std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]"
-                     " [--riemann=hllc|hll] [--precision=default|double|weight32|weight64|flux32|grad32|grad16|geo32|riemann32|mixed|mixed16|low|lowweights]"
+                     " [--riemann=hllc|hll] [--precision=default|double|weight32|flux32|grad32|grad16|mixed|low|lowweights]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f] [--watch]\n";
         return 2;

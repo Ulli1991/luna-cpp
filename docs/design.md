@@ -110,6 +110,12 @@ Riemann solvers. Wave speeds after Davis as LUNA (fluxes.py:146-147, 65-66). LUN
 - `problems_3d.hpp`, gamma 1.4: sound, a right-going linear wave along x (c = 1), [0, 1) × [0, 1/4)², nx · nx/4 · nx/4 cells, t = 1, one period; simple, the exact isentropic simple wave of hydro_1d along x, the same box, t = 0.2; vortex, Yee's isentropic vortex (beta 5) in [-5, 5)² × [0, 2.5), nx · nx · nx/4 cells, t = 10, a steady state; tube, periodic Sod, left state in [0.5, 1.5) of [0, 2) × [0, 1/4)², 2 nx · nx/4 · nx/4 cells, t = 0.25.
 - `test/exact_riemann.hpp`: Toro 2009, ch. 4 (the pressure function, Newton's method for the star pressure, the sampling). Used for Sod against the exact cell averages, as LUNA's exact_riemann.cell_average (src/luna/hydro/exact_riemann.py:105-113: conservative averages of sub-samples per cell). Pressure function f_K(p) and derivative: eqs. 4.6, 4.7, 4.37.
 
+## Removed, and where to find it
+
+Each line names the last commit that had it: `git show <commit>:<path>` brings it back.
+
+- `hydro_sedov --precision=weight64|geo32|riemann32|mixed16`, presets no test, figure or measurement used: c12980c, `src/bench/hydro_sedov.cpp` (`run_precision`).
+
 ## Benchmark programs (src/bench/)
 
 ### hydro_sedov
