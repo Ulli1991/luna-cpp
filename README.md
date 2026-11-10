@@ -1,14 +1,18 @@
 # luna-cpp
 
-Moving-mesh hydrodynamics on GPUs. The fluid is solved on exact Voronoi meshes from [voronoi-cpp](https://github.com/Ulli1991/voronoi-cpp) (a git submodule), and the mesh can move with the flow so that cells follow the gas. Written in Kokkos C++: CUDA (validated on an A100 40 GB), plus OpenMP and Serial builds that run the same code for checks. Results are measured against LUNA, a static-grid GPU code, on the same test problems.
-
-The scheme is MUSCL-Hancock with HLLC or HLL on static meshes, and AREPO next generation's two flux passes on moving ones, with least-squares gradients and mesh regularisation in the style of AREPO. It runs in 3D and 2D (periodic boxes) and 1D (with walls), and is bit-reproducible from run to run. On Sedov 3D at 256³ the moving mesh takes 925 steps where the static mesh takes 5834.
+Moving-mesh hydrodynamics on GPUs. luna-cpp solves the Euler equations with finite volumes on the exact Voronoi meshes of [voronoi-cpp](https://github.com/Ulli1991/voronoi-cpp), included as a git submodule. The mesh can stay fixed, or move with the gas so that cells follow the flow. It is written in Kokkos C++ and runs on CUDA (tested on an A100 40 GB), with OpenMP and Serial builds of the same code for checks. Every result is measured against LUNA, a static-grid GPU code, as the yardstick.
 
 ![Control flow of a run](docs/figures/flow_step.png)
 
-One run from start to finish. Each step takes a time step, then one of three paths: a static mesh, the default two-pass moving mesh, or one pass. The green boxes are calls into voronoi-cpp.
+One run from start to finish. Each step takes a time step, then advances the gas on a static mesh, or on a moving one with fluxes on the old and the new mesh. The green boxes are calls into voronoi-cpp.
 
 BSD 3-Clause, see [LICENSE](LICENSE).
+
+## Where it stands
+
+- **Accuracy:** on shocks and contacts the moving mesh often beats LUNA at the same resolution, because cells follow the gas: sharper contacts on Sod, a smaller error on Shu-Osher and Woodward-Colella, and Sedov's low-density centre resolved down to 10⁻³ where fixed grids stop near 10⁻². On smooth flow the static mesh matches LUNA, and the moving mesh is second order in 3D and 2D but not yet on 1D sound waves ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)).
+- **Speed:** in 2D and 3D LUNA is faster per cell update, by 2 to 6 times on the static hydro and more on the moving step; in 1D the two are level, and ours is faster below 4M cells. The moving mesh needs fewer steps (925 against LUNA's 4035 on Sedov at 256³), but not enough fewer to win on GPU time yet.
+- **Scale:** 256³ cells fit on one 40 GB A100, moving or static.
 
 ## Install and build
 
@@ -55,6 +59,152 @@ Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the backend y
 - `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (always on in `CMakeLists.txt`) writes the database clang-tidy needs: `bash scripts/lint_cpp.sh build-omp` (Raven: `module load clang/20`).
 - `-DVORONOI_SANITIZERS=ON` adds address and undefined-behaviour sanitizers to a host build.
 
+
+## Running
+
+```text
+hydro_sedov <side> <jittered|uniform> [--moving] [--order=0|1] [--riemann=hllc|hll] [--limiter=face|cell|none]
+            [--precision=default|double|grad32|mixed|low|...] [--integrator=one-pass|two-pass] [--bulk=km/s]
+            [--out=dir] [--snapshots=10] [--steps=max] [--memory] ...
+hydro_kh2d <N> [--moving] [--integrator=one-pass|two-pass] [--out-times=t,...] [--stop-after=<s>] [--resume] ...
+hydro_1d <problem> <N> [--moving] [--limiter=face|cell|none] [--dt=luna|arepo|fixed] [--courant=c] ...
+hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--precision=...]
+sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
+```
+
+`hydro_sedov` needs HDF5 and writes snapshots. Every program prints a loud warning at start if it was built against an older voronoi-cpp than the newest.
+
+## The method
+
+- **Finite volumes on a Voronoi mesh.** `hydro::FiniteVolume<D>` (`src/hydro/finite_volume.hpp`) handles 3D and 2D from one template; 1D has its own fused kernel (`finite_volume_1d.hpp`).
+- **MUSCL-Hancock.** Least-squares gradients of the primitive variables, limited at the face centroids as in AREPO, a half step in time, then HLLC (default) or HLL along each face normal, with one global time step.
+- **Moving mesh.** Points follow the gas, with a small drift towards their cell centroids that keeps cells round. The mesh is repaired every step, and fluxes go through the moving faces. To stay second order, a moving step takes fluxes on the old mesh and on the new mesh, half each. The code calls this `--integrator=two-pass`, the default; the one-pass option is first order on a moving mesh and will be removed ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)). 1D still uses one pass for now.
+- **Precision.** 3D runs `grad32` by default: gradients and limiting in float, everything else in double, 8 to 12 % faster with no measurable loss of accuracy. 2D and 1D run in double.
+- **Bit-reproducible.** Every cell sums its faces in a fixed order, so an A100 run gives the same bits every time.
+
+## Results in 1D
+
+All 1D figures are density at the final time, at the resolution named, with zooms on the hard regions. Lines: moving mesh, static mesh, LUNA (MC limiter) and the exact or high-resolution reference.
+
+### Sod shock tube
+
+![Sod density](docs/figures/sod.png)
+
+The standard Riemann problem: a rarefaction, a contact and a shock, N = 512. The moving mesh has the sharpest contact, and 2.5 times LUNA's error at the tail of the rarefaction (x = 0.48). Static lies on LUNA.
+
+### Shu-Osher
+
+![Shu-Osher density](docs/figures/shu_osher.png)
+
+A Mach 3 shock running into a sine wave in density, which it compresses into short waves behind it, N = 1024 on LUNA's domain. Moving keeps the left wall at the fixed inflow state and adds cells there as gas enters, 1508 at the end; static and LUNA use a zero-flux wall. Moving resolves the short waves at least as well as LUNA.
+
+### Woodward-Colella
+
+![Woodward-Colella density](docs/figures/woodward_colella.png)
+
+Two blast waves between reflecting walls that collide, N = 2048. Moving holds the contacts and shocks in far fewer cells than LUNA, with one overshoot at x = 0.765.
+
+### Convergence
+
+![Field L1 by N](docs/figures/convergence_1d.png)
+
+The error of the reconstructed field against resolution on the three tests. Moving is ahead of LUNA in density on Sod (2 to 13 % behind in pressure), at or below LUNA on Shu-Osher up to 2¹⁷ cells, and ahead on Woodward-Colella, where its density error stalls near 3.4e-4.
+
+### Cost to reach an error
+
+![GPU time against field L1](docs/figures/time_to_target_1d.png)
+
+GPU seconds needed to reach a given error. LUNA wins Sod and Shu-Osher, by 7 to 16 times on Shu-Osher, where the moving mesh takes 7.5 times the steps and ends with 1.47 times the cells. Woodward-Colella is close, and only the moving mesh reaches a density error of 1e-3 in the ladder.
+
+## Results in 2D
+
+### Kelvin-Helmholtz instability
+
+![Kelvin-Helmholtz, moving against LUNA](docs/figures/kh_2d_evolution.png)
+
+Two shearing layers whose interface rolls up into billows (McNally, Lyra & Passy 2012), at t = 0, 1, 2.5, 4 and 5, moving mesh against LUNA, both N = 2048. They agree up to the first roll-up. Past t = 2.5 secondary instabilities set in earlier on the moving billows; neither run is converged there.
+
+### The moving mesh inside a billow
+
+![Kelvin-Helmholtz Voronoi mesh](docs/figures/kh_2d_mesh.png)
+
+The moving mesh at t = 4 (N = 512): the whole box and three nested zooms into one billow, with the exact Voronoi cells drawn over the density. Cells stretch and gather along the rolled-up layers.
+
+### Density against LUNA
+
+![Kelvin-Helmholtz density](docs/figures/kh_2d_density.png)
+
+Density at t = 1.0, 1.5, 2.5 and 3.0 for LUNA, static and moving (N = 2048), with the differences from LUNA. Static stays close to LUNA throughout (mean difference 4e-8 at t = 1 to 6e-4 at t = 3). The moving billows stop matching after t = 1.5 (0.012 at t = 2.5).
+
+### Growth of the instability
+
+![2D Kelvin-Helmholtz](docs/figures/kh_2d.png)
+
+The error of the instability's growth against the published reference curve, for N² cells. LUNA and static lead at the same N, and LUNA in GPU time. Moving with one pass stalls near 4e-4; with fluxes on both meshes it recovers.
+
+## Results in 3D
+
+### Yee vortex
+
+![3D Yee vortex](docs/figures/vortex_3d.png)
+
+A smooth isentropic vortex carried for ten time units, the standard test of order on smooth flow. With one pass the moving mesh is first order; with fluxes on both meshes it reaches order 2.2, then 1.5, close to static.
+
+### Sedov blast
+
+![Sedov 3D](docs/figures/sedov_3d.png)
+
+A point explosion (1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr). It tests shock capturing and the moving mesh's response to strong expansion, but cannot rank schemes: every code converges below first order (0.66 LUNA, 0.78 moving). Left, density in shells at 128³; right, error against resolution. These moving runs used one pass.
+
+### Sedov at 256³ against LUNA
+
+![Sedov 3D at 256, shock](docs/figures/sedov3d_shock.png)
+
+Shock radius, density profiles at five times and the column density, against LUNA and the Sedov-Taylor solution. The two codes agree to 0.2 % on average, with up to 9 % of the peak at the shock. Both peaks sit below Sedov-Taylor because 256³ is coarse.
+
+### Radial profiles
+
+![Sedov 3D at 256, radial profiles](docs/figures/sedov3d_radial.png)
+
+Density, velocity, pressure and temperature at 1e4 yr. The moving mesh follows Sedov-Taylor down to a density of 10⁻³ in the evacuated centre, where both fixed grids level off near 10⁻².
+
+### The mesh at the shell
+
+![Sedov 3D at 256, mesh at the shell](docs/figures/sedov3d_mesh.png)
+
+A slice through the 3D mesh at 1e4 yr. The moving cells gather in the shell and open up behind it; the static mesh stays uniform.
+
+## Speed
+
+Measured on one A100 at 1305 MHz, Sedov 3D, 40 steps, LUNA in the same job. G cell updates per second; jobs and the remaining rows are in [docs/measurements.md](docs/measurements.md).
+
+| G cell updates/s | 128³ | 256³ |
+|---|---|---|
+| static mesh, HLLC | 0.170 | 0.166 |
+| moving mesh, whole step with the mesh update | 0.072 | 0.076 |
+| LUNA, MC, HLLC, FP64 | 0.47 to 0.76 | 0.87 |
+| LUNA, FP32 | 0.68 | 1.74 |
+| device memory, moving | 2255 B/cell | 2255 B/cell |
+| device memory, LUNA FP64 | 0.22 GB | 1.25 GB |
+
+### Against resolution
+
+![Throughput against resolution](docs/figures/throughput_scaling.png)
+
+Speed and memory from 32³ to 256³. The hydro is flat from 96³ up; below 64³ the fixed cost per step dominates.
+
+### Precision options
+
+![Throughput by precision](docs/figures/throughput_precision.png)
+
+The same sweep for each precision option. The default `grad32` gains 12 % on the static hydro and 8 % on the moving step against double; `grad16` gains a few percent more. None of ours is FP32 throughout, so LUNA's FP32 line is not a like-for-like comparison. `grad32` leaves the error against exact solutions unchanged to four digits on every test checked.
+
+### 1D, 2D and 3D
+
+![Throughput in 1D, 2D and 3D](docs/figures/throughput_dimensions.png)
+
+The same blast in each dimension. At the largest size the static hydro runs 2.66, 0.67 and 0.15 G cell updates/s against LUNA's 2.96, 1.46 and 0.95: level in 1D, LUNA 2.2 times ahead in 2D and 6.4 times in 3D, roughly in line with the number of faces per cell. Our 1D is faster than LUNA up to 4M cells.
+
 ## Tests
 
 Run times are in [TESTING.md](TESTING.md). The mesh's own tests are in voronoi-cpp.
@@ -73,190 +223,34 @@ OMP_NUM_THREADS=1 ctest --test-dir build-omp
 
 CI (`.github/workflows/checks.yml`) runs clang-tidy and the CPU tests in ordinary and sanitizer builds against a pinned Serial Kokkos 5.0.2, with the submodule checked out. It does not run GPU jobs.
 
-## The hydro
 
-`hydro::FiniteVolume` (`src/hydro/`) runs finite volumes on a static or moving `voronoi::Mesh`. On a moving mesh the points follow the flow with a drift towards the cell centroids, the mesh is repaired every step, and fluxes go through the moving faces. Each step uses least-squares gradients of the primitives, a MUSCL-Hancock half step, and HLLC (default) or HLL along each face normal, with one global time step (Courant factor 0.3). Order 0 is first-order Godunov. Every cell sums over its face list in a fixed order, which makes runs bit-reproducible. There are two update loops: per face (default at second order) and per cell (default at first order).
+## Limitations
 
-On a moving mesh the default integrator is AREPO next generation's two passes: fluxes on the mesh at the start of the step, half applied, the mesh update, then fluxes on the new mesh, half applied. `--integrator=one-pass` selects the MUSCL-Hancock step of the static mesh instead. Moving-mesh numbers below name the integrator used.
-
-In 3D the default precision, moving and static, is `grad32`: gradients, limiter and face-state change in float, everything else double. `--precision=double` selects double throughout, with the bits of the old default, for reproducing old results; logs of those runs call it `default`. 2D and 1D stay double: `grad32` has not been measured in 2D, and 1D has no precision options. Results older than this change, including the 2D, 1D and accuracy figures below, are double.
-
-```text
-hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]
-            [--riemann=hllc|hll] [--precision=default|double|grad32|mixed|low|...] [--moving] [--bulk=km/s] [--out=dir] [--snapshots=10] [--gradients] [--steps=max] [--input-order] [--memory]
-            [--integrator=one-pass|two-pass] [--cold=f] [--watch]
-hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--jitter=spacings] [--precision=default|double|grad32|grad16] [--out=file.npy]
-sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode> (see the script)
-```
-
-`hydro_sedov` (needs HDF5; on Raven `module load hdf5-serial`) runs a Sedov blast (1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr) and writes HDF5 snapshots. Speed on one A100 at 1305 MHz, 40 steps, jittered points, LUNA in the same job; jobs and details are in [docs/measurements.md](docs/measurements.md).
-
-| G cell updates per second | 2,097,152 cells | 16,777,216 cells |
-|---|---|---|
-| moving mesh, two passes (default), `grad32` (default), HLLC, per-face loop (mesh update included) | 0.072 | 0.076 |
-| moving mesh, one pass, same | 0.091 | 0.099 |
-| static mesh, MUSCL-Hancock HLLC, `grad32`, per-face loop | 0.170 | 0.166 |
-| static mesh, MUSCL-Hancock HLL, `grad32`, per-face loop | 0.177 | |
-| static mesh, first order HLLC, per-cell loop | 0.312 | |
-| `--precision=double`: moving, two passes | 0.067 | 0.070 |
-| `--precision=double`: moving, one pass | 0.084 | 0.091 |
-| `--precision=double`: static, HLLC | 0.152 | 0.148 |
-| LUNA, MC, HLLC, Pallas, FP64 | 0.47 | 0.87 |
-| LUNA, same, FP32 | 0.68 | 1.74 |
-| device memory, static (per-face, second order), `grad32` | 2185 B/cell | 2185 B/cell |
-| device memory, moving, two passes (per-face), `grad32` | 2255 B/cell | 2255 B/cell |
-| device memory, moving, one pass (per-face), `grad32` | 2233 B/cell | 2233 B/cell |
-| device memory, `--precision=double`: static; two passes; one pass | 2250; 2319; 2298 B/cell | 2250; 2319; 2298 B/cell |
-| device memory, LUNA, FP64 | 0.22 GB | 1.25 GB, 0.63 GB in FP32 |
-
-LUNA has the higher cell update rate in every row, and its 128³ rate moved between jobs (FP64 0.47 to 0.76). At 256³ the moving mesh takes 925 steps against LUNA's 4035, about 4.4 times fewer, but its whole step is 12 times slower.
-
-Accuracy on Sedov at 128³ (HLLC): shock radius 0.978 of the Sedov-Taylor value at 1e4 yr, L1 density error 0.075 rho0 (first order: 0.104), mass and energy conserved to 2e-16. The moving mesh needs 354 steps instead of 1642 for an L1 of 0.058 rho0. These L1 values are sampled at the mesh generators, which flatters a moving mesh. The field L1 is the fair norm: for density within r < 1.5 R_s it is 0.0629 (one pass) and 0.0648 (two passes) at 128³, and 0.0369 and 0.0377 at 256³.
-
-### 2D (`hydro_kh2d`, `hydro::FiniteVolume<2>`)
-
-![Kelvin-Helmholtz, moving against LUNA](docs/figures/kh_2d_evolution.png)
-
-Kelvin-Helmholtz of McNally, Lyra & Passy (2012) at t = 0, 1, 2.5, 4, 5, moving (two passes) against LUNA, both at N = 2048. Past t = 2.5 secondary instabilities on the moving billows set in earlier than in LUNA; this is not a converged solution in either code.
-
-![Kelvin-Helmholtz Voronoi mesh](docs/figures/kh_2d_mesh.png)
-
-The moving mesh at t = 4 (N = 512), the whole box and three nested zooms into a billow. The map is the scheme's own field with the exact Voronoi edges drawn over it.
-
-![Kelvin-Helmholtz density](docs/figures/kh_2d_density.png)
-
-Density at t = 1.0, 1.5, 2.5, 3.0 for LUNA, static and moving (N = 2048), with the differences from LUNA. Static stays close to LUNA throughout (mean |Δρ| 4e-8 at t = 1.0 to 6e-4 at t = 3.0). The moving billows no longer match past t = 1.5 (mean |Δρ| 5e-5 at t = 1.0, 0.012 at t = 2.5, 0.073 at t = 3.0).
-
-`hydro_kh2d <N> [--moving] [--integrator=one-pass|two-pass] [--bulk=<u>] [--out-times=t,...] [--stop-after=<s>] [--resume] ...` runs this test; the last two split a long run across jobs.
-
-G cell updates/s at N = 2048: LUNA 1.78, static 0.756, moving one pass 0.414, two passes 0.322; peak 693, 735 and 749 B/cell for ours. GPU seconds to reach max |e| = 0.001: LUNA 0.55, static 1.1, moving 15. Details: research_notes/stage2_2d_2026-11-05.md.
-
-### 1D (`hydro_1d`, `finite_volume_1d.hpp`)
-
-`hydro::FiniteVolume<1, Exec, Riemann>` on `voronoi::Mesh<1>`, static or moving, with walls (reflective, zero gradient, inflow); a wall that gas enters supplies cells. The whole step is one kernel. A static run uses Courant x V / (|v| + c) at 0.8; a moving run uses AREPO next generation's rule at 0.4 (3D stays at 0.3). Moving points are regularised as in AREPO next generation.
-
-G cell updates/s on one A100 at 1305 MHz, Sod, HLLC (hydro only is a static step, whole step a moving one at its defaults):
-
-| cells | 4,096 | 65,536 | 1,048,576 | 16,777,216 |
-|---|---|---|---|---|
-| hydro only | 0.081 | 0.948 | 2.810 | 3.226 |
-| whole moving step | 0.048 | 0.636 | 1.872 | 2.297 |
-
-Below about 1e5 cells a step is bound by launch latency, not by the kernel. Peak device memory is 144 B/cell static and 152 B/cell moving.
-
-## Figures
-
-From `scripts/make_figures.py`, in LUNA's figure style. Setups and jobs are in [docs/measurements.md](docs/measurements.md).
-
-![Sod density](docs/figures/sod.png)
-
-Sod shock tube, N = 512, against the exact solution. Moving has the sharper contact, and 2.5 times LUNA's error at the tail of the rarefaction (x = 0.48). Static lies on LUNA.
-
-![Shu-Osher density](docs/figures/shu_osher.png)
-
-Shu-Osher, N = 1024 on LUNA's domain. Moving holds the left wall at the fixed inflow state instead of LUNA's zero flux, which static keeps, because a zero-flux wall let the totals drift from the budget through the walls. Gas enters there, and the wall supplies cells at the initial spacing, 1508 at the end ([research_notes/inflow_2026-11-06.md](research_notes/inflow_2026-11-06.md)).
-
-![Woodward-Colella density](docs/figures/woodward_colella.png)
-
-Woodward-Colella, N = 2048. Moving holds the contacts and shocks in far fewer cells than LUNA, with an overshoot at x = 0.765.
-
-![Field L1 by N](docs/figures/convergence_1d.png)
-
-Error of the reconstructed field against resolution. On Sod, moving is ahead of LUNA in density and 2 to 13 % over it in pressure. On Shu-Osher moving is at or below LUNA in density, velocity and pressure at every N to 2¹⁷ (ratios 0.39-0.81, 0.79-0.84, 0.83-0.99), N being the cells at the start; density falls off order 1 above 2¹⁵. On Woodward-Colella moving is ahead of LUNA, with a stall near 3.4e-4 in density.
-
-![GPU time against field L1](docs/figures/time_to_target_1d.png)
-
-GPU time to reach a given error in 1D. LUNA wins Sod and Shu-Osher, there by 7-16x: moving takes 7.5x the steps and ends with 1.47x the cells. On Woodward-Colella it is close in density and pressure, and only moving reaches a density error of 1e-3 in the ladder.
-
-![3D Yee vortex](docs/figures/vortex_3d.png)
-
-Convergence of the 3D Yee vortex. Moving with one pass is first order; two passes (now the default) reach order 2.2, then 1.5, and stay above static.
-
-![2D Kelvin-Helmholtz](docs/figures/kh_2d.png)
-
-Kelvin-Helmholtz after McNally, Lyra & Passy (2012): error of the growth measure against their reference curve, for N² cells. LUNA and static lead at equal N, and LUNA in GPU time. Moving with one pass stalls near 4e-4; two passes recover.
-
-![Sedov 3D](docs/figures/sedov_3d.png)
-
-Sedov 3D is a shock test that cannot rank schemes: its order is below 1 for every code (0.66 LUNA minmod, 0.78 moving, n = 128 to 256). Left, density shells at 128³; right, field L1 against resolution. Moving is one pass and older than the two-pass default in these runs.
-
-![Sedov 3D at 256, shock](docs/figures/sedov3d_shock.png)
-
-The same Sedov at 256³ against LUNA and Sedov-Taylor: shock radius, density profiles at five times, and column density with the difference. The difference reaches 9 % of the peak at the shock, mean 0.2 %. LUNA's published figure is at 1024³; all runs here are 256³, four times coarser, so the peak falls below Sedov-Taylor by resolution and the two are not to be read as equal.
-
-![Sedov 3D at 256, radial profiles](docs/figures/sedov3d_radial.png)
-
-Radial profiles at 1e4 yr against Sedov-Taylor. The moving mesh follows Sedov-Taylor down to n of 10⁻³, where the fixed grids hold a floor near 10⁻². Moving curves start at 1.2 pc, inside which the shells hold no generator.
-
-![Sedov 3D at 256, mesh at the shell](docs/figures/sedov3d_mesh.png)
-
-A slice through the 3D mesh at 1e4 yr: (a) moving, where cells gather in the shell and open behind it; zooms into the same window, (b) moving, (c) static.
-
-![Throughput against resolution](docs/figures/throughput_scaling.png)
-
-Throughput and memory against resolution, 32³ to 256³, on Sedov 3D, with LUNA. Hydro is flat from 96³ to 256³; below 64³ the fixed cost per step dominates.
-
-![Throughput by precision](docs/figures/throughput_precision.png)
-
-The same sweep for our precision options, against double. The default, `grad32`, gains 12 % on hydro static and 8 % on the whole two-pass step. At 128³ the fastest option, `grad16`, gains 15 % on hydro and 10 % on the whole step. None of our options is FP32 throughout, so LUNA FP32 is not like for like. At 256³:
-
-| 256³ | double | `grad32` | `grad16` | LUNA FP64 | LUNA FP32 |
-|---|---|---|---|---|---|
-| hydro static, G cell updates/s | 0.149 | 0.166 | 0.170 | 0.954 | 2.133 |
-| whole two-pass step, G cell updates/s | 0.070 | 0.076 | 0.077 | | |
-| GPU GB, two passes | 40.5 | 39.4 | 38.9 | 1.25 | 0.63 |
-
-`grad32` against double on one A100:
-
-| Test | moving, two passes | static |
-|---|---|---|
-| vortex, nx = 64 to 256, change of L1 against the exact averages | at most 3e-4 rho, 1e-3 P; v unchanged in 4 digits | unchanged in 4 digits |
-| sound, simple wave, tube | unchanged in 4 digits | unchanged in 4 digits |
-| Sedov field L1, 128³ and 256³ | unchanged in 4 digits | unchanged in 4 digits |
-| cells by id against the double run, L1 | up to 4e-6 in rho (vortex, 256) | below 2e-9 |
-
-Float gradients add no error floor down to the smallest L1 measured, 1e-6. Moving runs differ cell by cell because one rounding change moves the mesh; their errors against the exact solution do not change. `grad32` costs one known thing: Galilean invariance of the radial profile goes from 6e-14 to about 2e-10. `hydro_wave` holds `grad32` to double on vortex and sound, moving and static.
-
-![Throughput in 1D, 2D and 3D](docs/figures/throughput_dimensions.png)
-
-Throughput against resolution in 1D, 2D and 3D, with LUNA, on a blast problem in each. At the largest size static hydro runs 2.66, 0.67 and 0.15 G cell updates/s, LUNA 2.96, 1.46 and 0.95: level in 1D, 2.2 times ahead in 2D, 6.4 times in 3D, in line with the faces per cell but not separated from other causes. Our 1D leads LUNA up to 4M cells. Two passes take the whole step to 0.29 in 2D and 0.07 in 3D.
-
-## Limitations and open items
-
-- The hydro step is not yet at its target (0.3 G cell updates/s static, 0.15 G the whole two-pass step). At 128³ `grad32` runs at 0.170 static, and the whole moving step at 0.091 with one pass and 0.072 with two (double: 0.152, 0.084, 0.067). The step is memory-latency bound: the hydro kernels spend 61 to 98 % of their warp slots waiting for memory, and the gradient sweep is the slowest. Roofline numbers are in the measurements file. Compile-time `--precision=` options give up to +19 % (`low`) on static hydro against double.
-- Moving 256³ on a 40 GB A100: two passes fit, in `grad32` (2255 B/cell) and in double (2319 B/cell); with `--precision=mixed` they do not (2445 B/cell). Use `--integrator=one-pass` there, or the default.
-- On the CPU (gcc's default FP contraction) some hydro modes differ from the GPU in the last bits; the A100 runs are bit-identical run to run.
-- Periodic boxes only in 3D and 2D; only 1D has walls.
-- 1D moving mesh: a wall supplies cells where gas enters, but nothing removes points where gas leaves: no test has points reach an open wall, and that path is not tested. A subsonic inflow keeps LUNA's zero-gradient wall, whose state drifts by about 1e-7 at N = 2¹⁷ (research_notes/inflow_2026-11-06.md).
-- 1D moving mesh: the error of Woodward-Colella stops falling near N = 2¹⁵, at every Courant number tried (research_notes/stage1_1d_2026-11-04.md).
+- **Speed.** The hydro step is below its target of 0.3 G cell updates/s static. It waits on memory, not arithmetic: the kernels spend 61 to 98 % of their time waiting for loads, and the gradient sweep is the slowest.
+- **1D moving mesh:** sound waves are first order and then stall near 1e-5 ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)); Woodward-Colella stalls near N = 2¹⁵; nothing removes points where gas leaves through an open wall.
+- **Boxes:** periodic only in 3D and 2D; only 1D has walls.
+- **Memory:** `--precision=mixed` does not fit a moving 256³ run on a 40 GB A100; a forced rebuild beside a moving 256³ run runs out of memory ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)).
+- **Bits:** CPU builds can differ from the GPU in the last bits for some modes; A100 runs are identical run to run.
+- **Open bugs:** stuck flips at 256³ ([#8](https://github.com/Ulli1991/luna-cpp/issues/8)); NaN from zero-area faces on an exact lattice ([#6](https://github.com/Ulli1991/luna-cpp/issues/6)). Mesh bugs are listed in the [voronoi-cpp README](https://github.com/Ulli1991/voronoi-cpp#limitations-and-open-items).
 
 ## Roadmap
 
-Done: 3D, 2D and 1D hydro on the exact mesh, two passes as the default on moving meshes, a first round of hydro speed (0.107 to 0.152 G cell updates/s static), `grad32` as the 3D default (0.170).
+Done: 3D, 2D and 1D hydro on the exact mesh, second order on moving meshes in 3D and 2D, a first round of speed work, `grad32` in 3D.
 
-1. One `main` and one general runner in 1D, 2D and 3D ([#18](https://github.com/Ulli1991/luna-cpp/issues/18)): the runner reads a LUNA-style parameter file, reads or sets up the ICs, sets the run parameters and loops until `t_end`.
-2. Hydro speed: target 0.3 G cell updates/s static, 0.15 G the whole two-pass step. Next: an owner bit in the list entries (estimate +8 % static, +5 % whole step), faces numbered by owner in the mesh (+8 % hydro measured with a copy, +5 % whole step estimated). Sorting cells by list length and reusing the half step between passes were measured and made it slower.
-3. A standing 3D test suite with LUNA coverage ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)), including a test that doesn't favour lattices.
-4. Time integration study ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)), accuracy scorecard.
-5. Local time stepping from AREPO-ng ([#9](https://github.com/Ulli1991/luna-cpp/issues/9)), a CPU path for few active cells ([#10](https://github.com/Ulli1991/luna-cpp/issues/10)).
-6. Multi-GPU.
-7. Refinement.
-8. Multigrid self-gravity.
-9. Autodiff in C++ with Enzyme ([#12](https://github.com/Ulli1991/luna-cpp/issues/12)).
+1. One `main` and one general runner for 1D, 2D and 3D, reading a LUNA-style parameter file ([#18](https://github.com/Ulli1991/luna-cpp/issues/18)).
+2. One scheme everywhere: MUSCL-Hancock with fluxes on the old and new mesh when the mesh moves, including 1D, and no one-pass option ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)).
+3. Hydro speed: towards 0.3 G cell updates/s static, starting with faces numbered by owner and fewer registers in the gradient sweep.
+4. A standing 3D test suite against LUNA ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)).
+5. Time integration study: RK2 with PLM against MUSCL-Hancock, and how the mesh should move within a step ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)).
+6. Local time steps ([#9](https://github.com/Ulli1991/luna-cpp/issues/9)), multi-GPU, refinement, self-gravity, and autodiff ([#12](https://github.com/Ulli1991/luna-cpp/issues/12)).
 
-Open bugs: a forced rebuild beside two passes runs out of memory at 256³ ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)); stuck flips at 256³ ([#8](https://github.com/Ulli1991/luna-cpp/issues/8)); NaN from zero-area faces on an exact lattice ([#6](https://github.com/Ulli1991/luna-cpp/issues/6)). Mesh bugs that reach the hydro are listed in the [voronoi-cpp README](https://github.com/Ulli1991/voronoi-cpp#limitations-and-open-items).
+More ideas, each with a first test: [docs/ideas.md](docs/ideas.md).
 
 ## Repository layout
 
-- `src/hydro/` (header-only, in the order a step uses it):
-  - `precision.hpp`: `Precision`, the type of each stage (geometry, gradient, flux, state) that the other files are templated on.
-  - `euler.hpp`: the gas, conversions between conserved and primitive states, and the HLLC and HLL fluxes.
-  - `finite_volume.hpp`: `hydro::FiniteVolume<D>` for D = 2, 3; `time_step()`, then `step()`, which runs `advance()` or `step_two_pass()`, calling `voronoi::Mesh` for the mesh.
-  - `finite_volume_1d.hpp`: the same scheme in 1D, on `voronoi::Mesh<1>`.
-  - `problems_1d.hpp`, `problems_3d.hpp`: initial conditions. `snapshot.hpp`: output.
-- `src/bench/`: `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`, each a `main` that builds a mesh, sets initial conditions and steps.
-- `src/test/`: the tests, each driving `src/hydro/`; `exact_riemann.hpp` and `luna_1d_values.hpp` are test-only references.
-- `extern/voronoi-cpp/`: the mesh library, pinned submodule.
-- `scripts/`: A100 run scripts, comparison and figure scripts (`make_figures.py`, `figstyle.py`), `lint_cpp.sh`.
-- `docs/figures/`: the figures.
-- `research_notes/`, `reports/`: status notes.
+- `src/hydro/`: the solver, header-only: `precision.hpp`, `euler.hpp` (gas and fluxes), `finite_volume.hpp` (2D and 3D), `finite_volume_1d.hpp`, and the initial conditions and snapshots.
+- `src/bench/`: the programs `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`.
+- `src/test/`: the tests.
+- `extern/voronoi-cpp/`: the mesh library, a pinned submodule with its full source.
+- `scripts/`: run scripts for the A100, figure scripts (`make_figures.py`, LUNA's `figstyle.py`), lint.
+- `docs/`: figures, `design.md`, `measurements.md`, `ideas.md`.
