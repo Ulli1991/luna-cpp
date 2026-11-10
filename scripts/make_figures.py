@@ -1372,7 +1372,8 @@ def fig_super_tube(t, views, ylim):
         xe, re_ = 0.5 * (e[:-1] + e[1:]), pr1d.super_exact(e[:-1], e[1:], 0.1)[0]
         re_ = np.where((xe < 20.6) | ((xe > 25.9) & (xe < 30.2)), re_, np.nan)   # S and H are not single Riemann problems
         refs = [(xe, re_, dict(REF, label="exact (A to G)"))] + refs
-    runs = [(*super_run(s, SUPER_N, t), s) for s in ("luna", "static", "moving")]
+    series = [s for s in ("luna", "static", "moving") if os.path.exists(f"{SUPER_RUNS}/{s}_super-tube_{SUPER_N}_t{t}" + (".npz" if s == "luna" else ".npy"))]
+    runs = [(*super_run(s, SUPER_N, t), s) for s in series]   # moving stops before t = 2 (luna-cpp #25)
     fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.8))
     outer = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.16)
     ax = fig.add_subplot(outer[0])
@@ -1385,7 +1386,8 @@ def fig_super_tube(t, views, ylim):
     ax.set_yscale("log")
     ax.set_ylabel(r"$\rho$")
     corner(ax, f"$t = {t}$, $N = {SUPER_N}$", x=0.01, y=0.04, va="bottom")
-    ax.legend(handles=[key("luna", "LUNA MC"), key("static", "static"), key("moving", "moving")] + [rkey(kw["label"], {k: v for k, v in kw.items() if k != "label"}) for *_, kw in refs],
+    names = {"luna": "LUNA MC", "static": "static", "moving": "moving"}
+    ax.legend(handles=[key(s, names[s]) for s in series] + [rkey(kw["label"], {k: v for k, v in kw.items() if k != "label"}) for *_, kw in refs],
               **dict(LEGEND, loc="upper center", ncol=3))
     z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
     for a, (vx, ticks, letter, label, vy) in zip(z, views):
@@ -1405,8 +1407,8 @@ def fig_super_early():
 
 
 def fig_super_end():
-    views = (((5.9, 6.25), [5.95, 6.05, 6.15], "a", "C stationary peak", None), ((9.4, 9.9), [9.5, 9.65, 9.8], "b", "C2 peak", None),
-             ((11.2, 12.2), [11.3, 11.7, 12.1], "c", "D to F", None), ((30.6, 31.4), [30.7, 31.0, 31.3], "d", "H front", None))
+    views = (((5.9, 6.25), [5.95, 6.05, 6.15], "a", "C stationary peak", (0.5, 13)), ((9.4, 9.9), [9.5, 9.65, 9.8], "b", "C2 peak", (0.5, 13)),
+             ((11.2, 12.2), [11.3, 11.7, 12.1], "c", "D to F", (1.5, 26)), ((30.6, 31.4), [30.7, 31.0, 31.3], "d", "H front", (0.05, 1.3)))
     fig_super_tube("2", views, (0.03, 60))
 
 
