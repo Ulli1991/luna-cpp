@@ -65,7 +65,7 @@ endif()
 if(BUILD_TESTING)
     set(hydro_test_timeout 600)
     if(VORONOI_SANITIZERS)
-        set(hydro_test_timeout 3000)  # about 11x slower: `hydro` and `hydro_wave` passed 600 s on CI's 2 cores with two passes
+        set(hydro_test_timeout 3000)  # about 11x slower: `hydro` and `hydro_wave` passed 600 s on CI's 2 cores with the moving step on both meshes
     endif()
     foreach(test hydro hydro1d hydro1d_cases hydro_wave hydro2d)
         hydro_program(${test}_test ${test}_test src/test/${test}_test.cpp)

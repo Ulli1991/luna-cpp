@@ -1,6 +1,6 @@
-// CTest `hydro_wave`: L1 accuracy of the moving 3D step on smooth flow with a known end state, both integrators.
+// CTest `hydro_wave`: L1 accuracy of the moving 3D step (MUSCL-Hancock on a moving mesh) on smooth flow with a known end state.
 // Drives FiniteVolume<3>::time_step and step on hydro::wave_initial problems (src/hydro/finite_volume.hpp, problems_3d.hpp).
-// Bounds are measured plus 10 %; rates sit just below measured: two passes rho 2.2 and 1.7, one pass 1.1 and 0.
+// Bounds are measured plus 10 %; rates sit just below measured: rho 2.2 and 1.7.
 
 #include "check.hpp"
 #include "finite_volume.hpp"
@@ -27,7 +27,7 @@ struct Result {
 
 // Runs the problem to t_end with FiniteVolume<3> and returns its L1 errors. Used by: gate, against_double.
 template <class Precision, class Exact>
-Result run(const std::string& problem, int nx, hydro::Motion motion, hydro::Integrator integrator, double amp, double jitter, double t_end, Exact exact) {
+Result run(const std::string& problem, int nx, hydro::Motion motion, double amp, double jitter, double t_end, Exact exact) {
     using FV = hydro::FiniteVolume<3, Exec, hydro::HLLC, Precision>;
     const hydro::Problem3D p = hydro::problem_3d(problem, nx);
     const hydro::Gas gas{hydro::wave_gamma};
@@ -37,7 +37,7 @@ Result run(const std::string& problem, int nx, hydro::Motion motion, hydro::Inte
     typename FV::Mesh mesh(Exec{}, Box(p.side[0], p.side[1], p.side[2]));
     mesh.update(to_device(points));
     mesh.update_cells();
-    FV fv(Exec{}, mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion, integrator);
+    FV fv(Exec{}, mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion);
     auto at = [&](const auto& x, const auto& c, long long i, int a) { return std::fmod(x(i, a) + c(i, a) + 2 * p.side[a], p.side[a]) + p.origin[a]; };
     {
         const auto x = to_host(mesh.positions());
@@ -82,7 +82,6 @@ Result run(const std::string& problem, int nx, hydro::Motion motion, hydro::Inte
 // The largest allowed L1 of rho, v, P at both resolutions, and the smallest rate of rho between them. Used by: main (via gate).
 struct Gate {
     const char* name;
-    hydro::Integrator integrator;
     std::array<double, 3> coarse, fine;
     double rate;
 };
@@ -90,8 +89,8 @@ struct Gate {
 // Bounds one problem at nx and 2 nx against a Gate. Used by: main.
 void gate(Check& check, const std::string& problem, const Gate& g, int nx, double amp, double jitter, double t_end) {
     auto exact = [&](double x, double y) { return hydro::wave_initial(problem, x, y, amp); };
-    const auto a = run<hydro::DefaultPrecision<3>>(problem, nx, hydro::Motion::moving, g.integrator, amp, jitter, t_end, exact).l1;
-    const auto b = run<hydro::DefaultPrecision<3>>(problem, 2 * nx, hydro::Motion::moving, g.integrator, amp, jitter, t_end, exact).l1;
+    const auto a = run<hydro::DefaultPrecision<3>>(problem, nx, hydro::Motion::moving, amp, jitter, t_end, exact).l1;
+    const auto b = run<hydro::DefaultPrecision<3>>(problem, 2 * nx, hydro::Motion::moving, amp, jitter, t_end, exact).l1;
     const double rate = std::log2(a[0] / b[0]);
     const std::string head = problem + " " + g.name;
     for (int k = 0; k < 3; ++k) {
@@ -105,10 +104,9 @@ void gate(Check& check, const std::string& problem, const Gate& g, int nx, doubl
 // grad32 against double, same problem, mesh and steps: relative change of each L1 vs exact, and L1 of the two end states, each below its bound.
 void against_double(Check& check, const std::string& problem, hydro::Motion motion, int nx, double amp, double jitter, double t_end, double l1_within, double cells_within) {
     const bool moving = motion == hydro::Motion::moving;
-    const auto integrator = hydro::default_integrator(motion, 1);
     auto exact = [&](double x, double y) { return hydro::wave_initial(problem, x, y, amp); };
-    const Result f = run<hydro::Grad32>(problem, nx, motion, integrator, amp, jitter, t_end, exact);
-    const Result d = run<hydro::Precision<>>(problem, nx, motion, integrator, amp, jitter, t_end, exact);
+    const Result f = run<hydro::Grad32>(problem, nx, motion, amp, jitter, t_end, exact);
+    const Result d = run<hydro::Precision<>>(problem, nx, motion, amp, jitter, t_end, exact);
     const std::string head = problem + " " + (moving ? "moving" : "static") + " nx=" + std::to_string(nx) + " grad32 against double: ";
     std::array<double, 3> cells{};
     double total = 0;
@@ -133,13 +131,8 @@ void against_double(Check& check, const std::string& problem, hydro::Motion moti
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     Check check;
-    constexpr auto one = hydro::Integrator::one_pass;
-    constexpr auto two = hydro::Integrator::two_pass;
-    gate(check, "vortex", {"one-pass", one, {1.9e-3, 6.8e-3, 3.2e-3}, {8.9e-4, 1.3e-3, 7.8e-4}, 1.0}, 24, 0, 0.1, 2);
-    gate(check, "vortex", {"two-pass", two, {2.6e-3, 7.2e-3, 3.6e-3}, {5.7e-4, 1.3e-3, 7.6e-4}, 2.0}, 24, 0, 0.1, 2);
-    // At jitter 0.25 rho of one pass sits on a floor of the regularised mesh motion, the rate near 0.
-    gate(check, "sound", {"one-pass", one, {7.2e-5, 2.2e-5, 1.9e-5}, {7.3e-5, 5.5e-6, 5.9e-6}, -0.15}, 24, 1e-3, 0.25, 1);
-    gate(check, "sound", {"two-pass", two, {2.7e-5, 2.7e-5, 2.7e-5}, {8.2e-6, 7.4e-6, 7.3e-6}, 1.6}, 24, 1e-3, 0.25, 1);
+    gate(check, "vortex", {"moving", {2.6e-3, 7.2e-3, 3.6e-3}, {5.7e-4, 1.3e-3, 7.6e-4}, 2.0}, 24, 0, 0.1, 2);
+    gate(check, "sound", {"moving", {2.7e-5, 2.7e-5, 2.7e-5}, {8.2e-6, 7.4e-6, 7.3e-6}, 1.6}, 24, 1e-3, 0.25, 1);
     constexpr auto moving = hydro::Motion::moving;
     constexpr auto fixed = hydro::Motion::static_mesh;
     // nx = 24: the sanitizer run in CI pays for every step; bounds 3 to 4 times the largest value measured on CPU and A100.

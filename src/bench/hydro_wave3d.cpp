@@ -55,11 +55,8 @@ int run(int argc, char** argv) {
     typename FV::Mesh mesh(exec, box);
     mesh.update(to_device(points));
     mesh.update_cells();
-    const std::string integrator = flag(argc, argv, "--integrator", moving ? "two-pass" : "one-pass");
-    if (integrator != "one-pass" && integrator != "two-pass") throw std::invalid_argument("hydro_wave3d: --integrator=one-pass|two-pass");
     FV fv(exec, mesh, gas, 1, hydro::Update::per_face, has(argc, argv, "--limiter=none") ? hydro::Limiter::none : hydro::Limiter::face_centroid,
-          moving ? hydro::Motion::moving : hydro::Motion::static_mesh,
-          integrator == "two-pass" ? hydro::Integrator::two_pass : hydro::Integrator::one_pass);
+          moving ? hydro::Motion::moving : hydro::Motion::static_mesh);
     {
         const auto x = to_host(mesh.positions());
         const auto c = to_host(mesh.centroid());
@@ -86,7 +83,7 @@ int run(int argc, char** argv) {
     exec.fence();
     const double wall = timer.seconds();
     const hydro::MeshStats& ms = fv.mesh_stats();
-    std::cout << "ours3d: problem=" << problem << " nx=" << nx << " n=" << n << " moving=" << moving << " integrator=" << integrator << " courant=" << courant << " jitter=" << jitter
+    std::cout << "ours3d: problem=" << problem << " nx=" << nx << " n=" << n << " moving=" << moving << " courant=" << courant << " jitter=" << jitter
               << " steps=" << steps << " t=" << t << " rebuilds=" << ms.rebuilds << " fallbacks=" << fallbacks << " precision=" << flag(argc, argv, "--precision", "default") << " wall_s=" << wall << " M_cell_updates_per_s=" << n * steps / wall / 1e6 << "\n";
     if (!out.empty()) {
         mesh.update_cells();

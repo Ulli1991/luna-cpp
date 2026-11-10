@@ -285,6 +285,7 @@ public:
     // One step of length dt (moving: the points then drift and the mesh's order is updated). Used by: the driver after time_step().
     void step(double dt, Timings* timings = nullptr) {
         timer_.reset();
+        reserve_next_points();
         if (order_ == 1)
             advance<1>(dt);
         else
@@ -292,6 +293,7 @@ public:
         phase_end(timings, &Timings::fluxes);
         std::swap(q_, next_);
         if (motion_ == Motion::moving) {
+            std::swap(x_, x_next_);
             const voronoi::Report report = mesh_->order(live_points());
             mesh_stats_.updates += 1;
             mesh_stats_.rebuilds += report.rebuilt;
@@ -305,8 +307,7 @@ public:
     // Used by: the driver instead of step() + time_step().
     // Static: time_step(courant, luna) after step(dt), to rounding.
     double step_and_time_step(double dt, double courant) {
-        if (x_.extent(0) > 0 && x_next_.extent(0) == 0)
-            x_next_ = Points(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_x_next")), capacity_);
+        reserve_next_points();
         const bool moving = motion_ == Motion::moving;
         if (order_ == 1) return moving ? run_fused<1, true>(dt, courant) : run_fused<1, false>(dt, courant);
         return moving ? run_fused<0, true>(dt, courant) : run_fused<0, false>(dt, courant);
@@ -384,7 +385,7 @@ public:
         sorted_mesh::Grid grid;
         double dt, courant;
 
-        // Used by: body(). A cell's state at a face at offset r from its centroid (moving: where the face is at the half step).
+        // Static: a cell's state at a face at offset r from its centroid, half a step on. Used by: body().
         KOKKOS_INLINE_FUNCTION State face_state(const State& W, const State& g, double r) const {
             if constexpr (Order == 0) {
                 (void)g;
@@ -394,6 +395,27 @@ public:
                 Gradient<1> grad;
                 for (int v = 0; v < V; ++v) grad[v][0] = g[v];
                 State Wf = half_step(W, grad, dt, st.gas);
+                for (int v = 0; v < V; ++v) Wf[v] += g[v] * r;
+                if (Wf[0] > 0 && Wf[2] > 0) return Wf;
+                return W;
+            }
+        }
+
+        // Moving: W + g r, a whole step on (MUSCL-Hancock) when `second`; the cell's own W if rho or P would not stay positive.
+        // Used by: body(), on both meshes.
+        KOKKOS_INLINE_FUNCTION State extrapolated(const State& W, const State& g, double r, int second) const {
+            if constexpr (Order == 0) {
+                (void)g;
+                (void)r;
+                (void)second;
+                return W;
+            } else {
+                State Wf = W;
+                if (second) {
+                    Gradient<1> grad;
+                    for (int v = 0; v < V; ++v) grad[v][0] = g[v];
+                    Wf = half_step(W, grad, 2 * dt, st.gas);
+                }
                 for (int v = 0; v < V; ++v) Wf[v] += g[v] * r;
                 if (Wf[0] > 0 && Wf[2] > 0) return Wf;
                 return W;
@@ -420,11 +442,12 @@ public:
         // Where a point at x0 ends up after dt. Used by: body().
         KOKKOS_INLINE_FUNCTION double moved(double x0, double velocity) const {
             const double side = st.line.side();
-            const double y = x0 + dt * velocity;
+            const double y = Kokkos::fma(dt, velocity, x0);
             return st.line.periodic ? y - side * Kokkos::floor(y / side) : Kokkos::fmin(Kokkos::fmax(y, 0.0), side);
         }
 
-        // Per slot: load, gradients, point velocities, two face fluxes, Q update (then, fused: new keys, next dt).
+        // Per slot: load, gradients, point velocities (moving: the new keys), two face fluxes, Q update (fused: next dt).
+        // Moving: each flux is the mean of those on the meshes of t^n and t^n+1, as finite_volume.hpp's step_moving().
         // Inner: no ghost in reach, nothing to wrap. Used by: operator().
         template <bool Inner>
         KOKKOS_INLINE_FUNCTION void body(int s, double& smallest, int& descents) const {
@@ -446,23 +469,57 @@ public:
                 if constexpr (Moving)
                     point[k] = cell[k].W[1] + st.drift(cell[k].W, grad[k][0], cell[k].c, 0.5 * (gap[k - 1] + gap[k]));
             }
+            // Moving: each point's new key and its move in grid steps; a face moves by the mean of its generators' moves.
+            sorted_mesh::Key key[5] = {0, 0, 0, 0, 0};
+            double moves[5] = {0, 0, 0, 0, 0};
+            if constexpr (Moving) {
+                for (int k = 1; k <= 3; ++k) {
+                    if (!Inner && !cell[k].real) continue;
+                    const int t = Inner ? s - 2 + k : line.slot(s, k - 2);
+                    key[k] = sorted_mesh::snap(moved(x(line.order(t), 0), point[k]), grid, line.periodic);
+                    i64 d = static_cast<i64>(key[k]) - static_cast<i64>(line.key(t));
+                    if (line.periodic) d = d > line.period / 2 ? d - line.period : d < -line.period / 2 ? d + line.period : d;
+                    moves[k] = static_cast<double>(d);
+                }
+            }
             // The fluxes through the left (k = 1 | 2) and right (2 | 3) faces of s, positive along +x.
             State F[2];
             for (int f = 0; f < 2; ++f) {
                 const int a = 1 + f, b = 2 + f;
-                // A wall face is static; a face between cells moves with the mean of their point velocities.
-                double w = 0;
-                if constexpr (Moving)
-                    if (Inner || (cell[a].real && cell[b].real)) w = 0.5 * (point[a] + point[b]);
-                const double shift = 0.5 * dt * w;
-                State L, R;
-                if (Inner || cell[a].real) L = face_state(cell[a].W, grad[a], 0.5 * gap[a] - cell[a].c + shift);
-                if (Inner || cell[b].real) R = face_state(cell[b].W, grad[b], -0.5 * gap[a] - cell[b].c + shift);
-                if constexpr (!Inner) {
-                    if (!cell[a].real) L = st.ghost_face(R, cell[b].W, true);
-                    if (!cell[b].real) R = st.ghost_face(L, cell[a].W, false);
+                if constexpr (Moving) {
+                    // A wall face is static; between cells, the face's move on the grid sets w, so V^n+1 - V^n = dt (w_R - w_L) to rounding.
+                    const bool inside = Inner || (cell[a].real && cell[b].real);
+                    const double travel = inside ? 0.5 * (moves[a] + moves[b]) * line.step : 0.0;
+                    const double w = travel / dt;
+                    const double ra = 0.5 * gap[a] - cell[a].c, rb = -0.5 * gap[a] - cell[b].c;
+                    // On the mesh of t^n (second = 0), then on that of t^n+1 (W^n a whole step on, to where the face is then).
+                    const auto on_mesh = [&](int second) {
+                        State L, R;
+                        if (Inner || cell[a].real) L = extrapolated(cell[a].W, grad[a], ra + second * travel, second);
+                        if (Inner || cell[b].real) R = extrapolated(cell[b].W, grad[b], rb + second * travel, second);
+                        if constexpr (!Inner) {
+                            if (!cell[a].real) L = st.ghost_face(R, cell[b].W, true);
+                            if (!cell[b].real) R = st.ghost_face(L, cell[a].W, false);
+                        }
+                        return Riemann::flux(L, R, Vec<1>{1.0}, Vec<1>{w}, st.gas);
+                    };
+                    if constexpr (Order == 0) {
+                        F[f] = on_mesh(0);
+                    } else {
+                        const State first = on_mesh(0), second = on_mesh(1);
+                        for (int v = 0; v < V; ++v) F[f][v] = 0.5 * (first[v] + second[v]);
+                    }
+                } else {
+                    const double w = 0, shift = 0.5 * dt * w;
+                    State L, R;
+                    if (Inner || cell[a].real) L = face_state(cell[a].W, grad[a], 0.5 * gap[a] - cell[a].c + shift);
+                    if (Inner || cell[b].real) R = face_state(cell[b].W, grad[b], -0.5 * gap[a] - cell[b].c + shift);
+                    if constexpr (!Inner) {
+                        if (!cell[a].real) L = st.ghost_face(R, cell[b].W, true);
+                        if (!cell[b].real) R = st.ghost_face(L, cell[a].W, false);
+                    }
+                    F[f] = Riemann::flux(L, R, Vec<1>{1.0}, Vec<1>{w}, st.gas);
                 }
-                F[f] = Riemann::flux(L, R, Vec<1>{1.0}, Vec<1>{w}, st.gas);
             }
             const int i = line.order(s);
             State Unew;
@@ -470,34 +527,25 @@ public:
                 Unew[v] = st.q(i, v) - dt * (F[1][v] - F[0][v]);
                 next(i, v) = Unew[v];
             }
-            if constexpr (Moving && !Fused) x(i, 0) = moved(x(i, 0), point[2]);
+            if constexpr (Moving) x_next(i, 0) = moved(x(i, 0), point[2]);
             if constexpr (Fused) {
                 double volume = cell[2].V, relative = 0;
                 if constexpr (Moving) {
-                    using Key = sorted_mesh::Key;
-                    const double here = moved(x(i, 0), point[2]);
-                    x_next(i, 0) = here;
-                    const Key key = sorted_mesh::snap(here, grid, line.periodic);
-                    keys(s) = key;
-                    const auto next_key = [&](int slot, int k) {
-                        return sorted_mesh::snap(moved(x(line.order(slot), 0), point[k]), grid, line.periodic);
-                    };
+                    keys(s) = key[2];
                     double left, right;
                     if (Inner || cell[1].real) {
-                        const Key other = next_key(Inner ? s - 1 : line.slot(s, -1), 1);
-                        const i64 d = static_cast<i64>(key) - static_cast<i64>(other);
+                        const i64 d = static_cast<i64>(key[2]) - static_cast<i64>(key[1]);
                         left = static_cast<double>(d < 0 && line.periodic ? d + line.period : d);
                     } else {
-                        left = static_cast<double>(2 * static_cast<i64>(key));
+                        left = static_cast<double>(2 * static_cast<i64>(key[2]));
                     }
                     if (Inner || cell[3].real) {
                         const int t = Inner ? s + 1 : line.slot(s, 1);
-                        const Key other = next_key(t, 3);
-                        const i64 d = static_cast<i64>(other) - static_cast<i64>(key);
+                        const i64 d = static_cast<i64>(key[3]) - static_cast<i64>(key[2]);
                         right = static_cast<double>(d < 0 && line.periodic ? d + line.period : d);
-                        descents += !sorted_mesh::before(key, i, other, line.order(t));
+                        descents += !sorted_mesh::before(key[2], i, key[3], line.order(t));
                     } else {
-                        right = static_cast<double>(2 * (line.period - static_cast<i64>(key)));
+                        right = static_cast<double>(2 * (line.period - static_cast<i64>(key[2])));
                     }
                     volume = (left + right) * (0.5 * line.step);
                     relative = Kokkos::fabs(point[2] - cell[2].W[1]);
@@ -521,17 +569,14 @@ public:
     // Launches the unfused Kernel. Used by: advance().
     template <int Order, bool Moving>
     void run(double dt) {
-        const Kernel<Order, Moving, false> kernel{stencil(), next_, x_, x_next_, {}, {}, dt, 0.0};
+        const Kernel<Order, Moving, false> kernel{stencil(), next_, x_, x_next_, {}, grid(), dt, 0.0};
         Kokkos::parallel_for("hydro1::step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), kernel);
     }
     // Launches the fused Kernel, then reorders/supplies cells; returns the next dt. Used by: step_and_time_step().
     template <int Order, bool Moving>
     double run_fused(double dt, double courant) {
         const Line& line = mesh_->line();
-        sorted_mesh::Grid grid;
-        grid.side = line.side();
-        grid.step = line.step;
-        const Kernel<Order, Moving, true> kernel{stencil(), next_, x_, x_next_, mesh_->spare_keys(), grid, dt, courant};
+        const Kernel<Order, Moving, true> kernel{stencil(), next_, x_, x_next_, mesh_->spare_keys(), grid(), dt, courant};
         double smallest = 0;
         int descents = 0, wants = 0;
         const Kokkos::RangePolicy<ExecSpace> slots(exec_, 0, n_);
@@ -560,6 +605,18 @@ public:
     }
 
 private:
+    // The line's grid, for the kernels' snap of the moved points. Used by: run(), run_fused().
+    sorted_mesh::Grid grid() const {
+        sorted_mesh::Grid g;
+        g.side = mesh_->line().side();
+        g.step = mesh_->line().step;
+        return g;
+    }
+    // A moving step writes the new positions beside the old ones. Used by: step(), step_and_time_step().
+    void reserve_next_points() {
+        if (x_.extent(0) > 0 && x_next_.extent(0) == 0)
+            x_next_ = Points(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_x_next")), capacity_);
+    }
     // Used by: time_step(), supply_cells(), run(), run_fused().
     Stencil stencil() const {
         return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_};

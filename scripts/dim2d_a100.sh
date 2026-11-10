@@ -42,13 +42,13 @@ luna() {  # luna <N> <out name> [key=value ...]
 do_diag() {  # what limits the moving mesh on KH
     use_ours
     n=256
-    for c in 0.8 0.4 0.2 0.1; do "$bin/hydro_kh2d" $n --moving --integrator=one-pass --courant=$c --out="$build/runs/diag_moving_c$c" | grep -E "^ours"; done
+    for c in 0.8 0.4 0.2 0.1; do "$bin/hydro_kh2d" $n --moving --courant=$c --out="$build/runs/diag_moving_c$c" | grep -E "^ours"; done
     for c in 0.4 0.2 0.1; do "$bin/hydro_kh2d" $n --courant=$c --out="$build/runs/diag_static_c$c" | grep -E "^ours"; done
-    "$bin/hydro_kh2d" $n --moving --integrator=one-pass --dt=arepo --out="$build/runs/diag_moving_arepo" | grep -E "^ours"
+    "$bin/hydro_kh2d" $n --moving --dt=arepo --out="$build/runs/diag_moving_arepo" | grep -E "^ours"
     "$bin/hydro_kh2d" $n --jitter=0.2 --out="$build/runs/diag_static_j" | grep -E "^ours"
-    "$bin/hydro_kh2d" $n --moving --integrator=one-pass --jitter=0.2 --out="$build/runs/diag_moving_j" | grep -E "^ours"
-    "$bin/hydro_kh2d" $n --moving --integrator=one-pass --steps=500 --phases --memory | grep -E "^ours|^phase|^memory"
-    "$bin/hydro_kh2d" 1024 --moving --integrator=one-pass --steps=500 --phases --memory | grep -E "^ours|^phase|^memory"
+    "$bin/hydro_kh2d" $n --moving --jitter=0.2 --out="$build/runs/diag_moving_j" | grep -E "^ours"
+    "$bin/hydro_kh2d" $n --moving --steps=500 --phases --memory | grep -E "^ours|^phase|^memory"
+    "$bin/hydro_kh2d" 1024 --moving --steps=500 --phases --memory | grep -E "^ours|^phase|^memory"
     "$bin/hydro_kh2d" 1024 --steps=500 --phases --memory | grep -E "^ours|^phase|^memory"
 }
 case "$mode" in
@@ -71,8 +71,7 @@ kh)
         luna "$n" "luna_$n"
         use_ours
         "$bin/hydro_kh2d" "$n" --memory --out="$build/runs/static_$n" | grep -E "^(ours|memory|phase)"
-        "$bin/hydro_kh2d" "$n" --moving --integrator=one-pass --memory --out="$build/runs/moving_$n" | grep -E "^(ours|memory|phase)"
-        "$bin/hydro_kh2d" "$n" --moving --integrator=two-pass --memory --out="$build/runs/moving_twoflux_$n" | grep -E "^(ours|memory|phase)"
+        "$bin/hydro_kh2d" "$n" --moving --memory --out="$build/runs/moving_$n" | grep -E "^(ours|memory|phase)"
     done
     ;;
 khfield)  # khfield <t> <N> [...]
@@ -92,8 +91,7 @@ khbulk)  # khbulk <bulk> <N> [...]: as kh with a bulk velocity along x
         luna "$n" "luna_bulk${u}_$n" bulk="$u"
         use_ours
         "$bin/hydro_kh2d" "$n" --bulk="$u" --memory --out="$build/runs/static_bulk${u}_$n" | grep -E "^(ours|memory|phase)"
-        "$bin/hydro_kh2d" "$n" --moving --integrator=one-pass --bulk="$u" --memory --out="$build/runs/moving_bulk${u}_$n" | grep -E "^(ours|memory|phase)"
-        "$bin/hydro_kh2d" "$n" --moving --integrator=two-pass --bulk="$u" --memory --out="$build/runs/moving_twoflux_bulk${u}_$n" | grep -E "^(ours|memory|phase)"
+        "$bin/hydro_kh2d" "$n" --moving --bulk="$u" --memory --out="$build/runs/moving_bulk${u}_$n" | grep -E "^(ours|memory|phase)"
     done
     ;;
 run)

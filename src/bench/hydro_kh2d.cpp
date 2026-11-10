@@ -47,7 +47,6 @@ struct Options {
     bool moving = false, phases = false, memory = false, fixed = false, resume = false;
     std::vector<double> out_times;
     hydro::StepRule rule = hydro::StepRule::luna;
-    hydro::Integrator integrator = hydro::Integrator::one_pass;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
     hydro::Update update = hydro::Update::per_face;
     std::string out, riemann = "hllc", dt = "luna";
@@ -162,7 +161,7 @@ int run(const Options& o) {
         exec.fence();
         build_ms = build_timer.seconds() * 1e3;
         Fv fv(exec, mesh, hydro::Gas{gas_gamma}, o.order, o.update, o.limiter,
-              o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh, o.integrator);
+              o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh);
         if (o.rule == hydro::StepRule::luna) fv.set_step_rule(hydro::StepRule::luna);
         {
             auto q = Kokkos::create_mirror_view(fv.state());
@@ -299,10 +298,10 @@ int run(const Options& o) {
         }
     }
     const std::string mesh_kind = o.moving ? "moving" : "static";
-    std::printf("ours: N=%d mesh=%s integrator=%s order=%d solver=%s limiter=%s dt=%s courant=%g jitter=%g bulk=%g update=%s steps=%lld "
+    std::printf("ours: N=%d mesh=%s order=%d solver=%s limiter=%s dt=%s courant=%g jitter=%g bulk=%g update=%s steps=%lld "
                 "wall_s=%.4f build_ms=%.2f M_cell_updates_per_s=%.1f same_hash=%d mesh_rebuilds=%lld stuck=%lld host_patches=%lld "
                 "device_flips=%lld M_final=%.8e\n",
-                o.n, mesh_kind.c_str(), o.integrator == hydro::Integrator::two_pass ? "two-pass" : "one-pass", o.order, o.riemann.c_str(),
+                o.n, mesh_kind.c_str(), o.order, o.riemann.c_str(),
                 o.limiter == hydro::Limiter::face_centroid ? "face" : o.limiter == hydro::Limiter::cell_centroid ? "cell" : "none",
                 o.dt.c_str(), o.courant, o.jitter, o.bulk, o.update == hydro::Update::per_face ? "face" : "cell", steps_best, best,
                 build_ms, n * double(steps_best) / best * 1e-6, same ? 1 : 0, stats_best.rebuilds, stats_best.stuck,
@@ -337,11 +336,6 @@ int main(int argc, char** argv) {
     o.phases = has(argc, argv, "--phases");
     o.memory = has(argc, argv, "--memory");
     o.order = std::stoi(flag(argc, argv, "--order", "1"));
-    const std::string integrator = flag(argc, argv, "--integrator", "");
-    if (!integrator.empty() && integrator != "one-pass" && integrator != "two-pass") throw std::invalid_argument("hydro_kh2d: --integrator=one-pass|two-pass");
-    o.integrator = integrator.empty() ? hydro::default_integrator(o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh, o.order)
-                   : integrator == "two-pass" ? hydro::Integrator::two_pass
-                                              : hydro::Integrator::one_pass;
     o.dt = flag(argc, argv, "--dt", "luna");
     o.courant = std::stod(flag(argc, argv, "--courant", o.dt == "arepo" ? "0.3" : "0.8"));
     o.rule = o.dt == "arepo" ? hydro::StepRule::arepo : hydro::StepRule::luna;

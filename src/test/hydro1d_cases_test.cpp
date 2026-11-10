@@ -158,8 +158,7 @@ bool is_linear(const std::string& name) {
 }
 
 // e_i per variable with the rules of LUNA's tests, into L1.
-Three l1_of(const std::string& name, const std::vector<Cell>& cells, const std::vector<Cell>* minus = nullptr) {
-    const double eps = pr::linear_amplitude;
+Three l1_of(const std::string& name, const std::vector<Cell>& cells, const std::vector<Cell>* minus = nullptr, double eps = pr::linear_amplitude) {
     const Exact plus(name, is_linear(name) ? eps : 0), negative(name, -eps);
     Three sum{0, 0, 0};
     const int n = static_cast<int>(cells.size());
@@ -203,11 +202,11 @@ struct Measured {
     double t = 0;
     long steps = 0;
 };
-Measured measure(const std::string& name, int n, Motion motion, Limiter limiter = Limiter::face_centroid) {
+Measured measure(const std::string& name, int n, Motion motion, Limiter limiter = Limiter::face_centroid, double eps = pr::linear_amplitude) {
     Measured out;
     if (is_linear(name)) {
-        const Run plus = simulate(name, n, motion, limiter, pr::linear_amplitude), minus = simulate(name, n, motion, limiter, -pr::linear_amplitude);
-        out = {l1_of(name, plus.cells, &minus.cells), plus.reached && minus.reached, plus.t, plus.steps};
+        const Run plus = simulate(name, n, motion, limiter, eps), minus = simulate(name, n, motion, limiter, -eps);
+        out = {l1_of(name, plus.cells, &minus.cells, eps), plus.reached && minus.reached, plus.t, plus.steps};
         return out;
     }
     const Run r = simulate(name, n, motion, limiter);
@@ -440,6 +439,16 @@ int main(int argc, char* argv[]) {
     for (const int n : {256, 512}) {
         const auto r = measure("sound-right", n, Motion::static_mesh).l1, l = measure("sound-left", n, Motion::static_mesh).l1;
         check.expect(std::abs(r[0] - l[0]) / r[0] < 1e-5 && std::abs(r[2] - l[2]) / r[2] < 1e-5, "sound N=" + std::to_string(n) + ": right and left errors agree (" + sci(std::abs(r[0] - l[0]) / r[0]) + ")");
+    }
+    // Moving sound wave at amplitude 1e-8 (#23): rounding of the point motion made it grow from N = 1024 (order 0.15); now order 2.0, 3.27e-6 at 2048 (A100).
+    {
+        std::vector<double> ns, es;
+        for (const int n : {256, 512, 1024, 2048}) {
+            ns.push_back(n);
+            es.push_back(measure("sound-right", n, Motion::moving, Limiter::face_centroid, 1e-8).l1[0]);
+        }
+        const double order = fit(ns, es);
+        check.expect(order >= 1.8 && es.back() <= 1.25 * 3.267e-6, "sound-right moving, amplitude 1e-8, N = 256-2048: rho order " + std::to_string(order) + " (>= 1.8), L1 at 2048 " + sci(es.back()) + " (<= 1.25 x 3.27e-6)");
     }
     // A true vacuum on the left: LUNA stops at t = 0 on a NaN dt (la14379.py, test_vacuum_expansion_true_vacuum, strict xfail).
     {

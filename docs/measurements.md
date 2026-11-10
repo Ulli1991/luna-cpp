@@ -2,6 +2,8 @@
 
 Where each number and figure in the [README](../README.md) comes from: jobs, commits, clocks and the setup details left out of the README. Sections follow the README headings. Unless stated, runs are on one A100 40 GB, double precision, HLLC. The same code varies by about 10 % between GPU jobs.
 
+The records below keep the names of their time: "two passes" (`--integrator=two-pass`) is today's moving step, MUSCL-Hancock on a moving mesh, the only one since 2026-11-10; "one pass" was a single flux at the half step, an option until then, now removed.
+
 ## The hydro
 
 ### Sedov speed table

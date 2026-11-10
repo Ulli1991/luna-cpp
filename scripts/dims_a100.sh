@@ -1,5 +1,5 @@
 #!/bin/bash
-# Throughput against resolution on Sedov in 1D, 2D or 3D on one A100: hydro static and two-pass, mesh only, whole moving step, LUNA.
+# Throughput against resolution on Sedov in 1D, 2D or 3D on one A100: hydro static and moving, mesh only, whole moving step, LUNA.
 #   sbatch --export=ALL,BIN=<build>,OUT=<runs> -o <logs>/dims-%j.out scripts/dims_a100.sh <1|2|3>
 #SBATCH -J dims
 #SBATCH -p gpudev,gpu1
@@ -31,7 +31,7 @@ case "$dim" in
     for n in $sides; do
         echo "== ours $n static $(date +%T)"
         "$BIN/hydro_1d" sedov "$n" --jitter=0.1 --steps=40 --repeats=1 --phases --memory 2>&1 | grep -E "$keep" | cut -c1-240
-        echo "== ours $n one-pass $(date +%T)"
+        echo "== ours $n moving $(date +%T)"
         "$BIN/hydro_1d" sedov "$n" --jitter=0.1 --moving --steps=40 --repeats=1 --phases --memory 2>&1 | grep -E "$keep" | cut -c1-240
     done
     ;;
@@ -40,16 +40,14 @@ case "$dim" in
     for n in $sides; do
         echo "== ours $n static $(date +%T)"
         "$BIN/hydro_kh2d" "$n" --problem=sedov --jitter=0.1 --steps=40 --repeats=2 --phases --memory 2>&1 | grep -E "$keep" | cut -c1-300
-        for i in one-pass two-pass; do
-            echo "== ours $n $i $(date +%T)"
-            "$BIN/hydro_kh2d" "$n" --problem=sedov --jitter=0.1 --moving --integrator="$i" --dt=arepo --courant=0.3 --steps=40 --repeats=2 --phases --memory 2>&1 | grep -E "$keep" | cut -c1-300
-        done
+        echo "== ours $n moving $(date +%T)"
+        "$BIN/hydro_kh2d" "$n" --problem=sedov --jitter=0.1 --moving --dt=arepo --courant=0.3 --steps=40 --repeats=2 --phases --memory 2>&1 | grep -E "$keep" | cut -c1-300
     done
     ;;
 3)
     sides="32 48 64 96 128 192 256"
     for side in $sides; do
-        for flags in "" "--moving --integrator=one-pass" "--moving --integrator=two-pass"; do
+        for flags in "" "--moving"; do
             echo "== ours $side ${flags:-static} round 1 $(date +%T)"
             "$BIN/hydro_sedov" "$side" jittered --steps=40 --memory $flags 2>&1 | grep -E "$keep" | cut -c1-300
         done
