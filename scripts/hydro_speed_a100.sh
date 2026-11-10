@@ -17,7 +17,7 @@ out="$(realpath -m "${1:-speed-runs}")"
 mode="${2:-speed128}"
 mkdir -p "$out"
 nvidia-smi -L
-all="default double weight32 flux32 grad32 grad16 mixed low lowweights"
+all="default double flux32 grad32 grad16 mixed low"
 
 speed() {  # speed <build> <side> [flags]: the phase lines of a 40-step run
     local build="$1" side="$2"

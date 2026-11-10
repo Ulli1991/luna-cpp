@@ -36,7 +36,7 @@ Per-cell and per-face data are rows (LayoutRight), so a random access reads one 
 
 ### Precision (src/hydro/precision.hpp)
 
-The default, `DefaultPrecision<D>`, is `grad32` in 3D (float gradients, limiter and face-state change, everything else double) and double in 2D, where `grad32` has not been measured; 1D has no policies. `Precision<>`, `--precision=double`, is double throughout, with the least-squares fit solved in the sweep (the bits from before `grad32` became the default). Reduced precision and stored weights are compile-time options of the weights, gradients, stored face fluxes, Riemann solve and face geometry rows. Q, volumes, centroids, W and the sums of the face fluxes stay double in every policy. With a float gradient type, the differences W_j - W_i and the separations are formed in double and rounded once, and a face state is W + (its change in float), so a uniform state stays exactly uniform. FP16 gradients use one power-of-two exponent per variable group (rho, v, P): the exponent k of a group whose largest magnitude is m satisfies m 2ᵏ in [2¹⁴, 2¹⁵) (k = 0 for m = 0), within [-114, 126], so there is no overflow and 11 bits relative to the group's largest component. The FP16 storage is the precision study's (branch precision-study 59ff9d1, src/hydro/precision.hpp). Weights are computed in double by the mesh at every update (`tet_mesh::gradient_weights`); the measured effect is in hydro_speed_2026-11-04.md.
+The default, `DefaultPrecision<D>`, is `grad32` in 3D (float gradients, limiter and face-state change, everything else double) and double in 2D, where `grad32` has not been measured; 1D has no policies. `Precision<>`, `--precision=double`, is double throughout, with the least-squares fit solved in the sweep (the bits from before `grad32` became the default). Reduced precision is a compile-time option of the gradients, stored face fluxes, Riemann solve and face geometry rows. Q, volumes, centroids, W and the sums of the face fluxes stay double in every policy. With a float gradient type, the differences W_j - W_i and the separations are formed in double and rounded once, and a face state is W + (its change in float), so a uniform state stays exactly uniform. FP16 gradients use one power-of-two exponent per variable group (rho, v, P): the exponent k of a group whose largest magnitude is m satisfies m 2ᵏ in [2¹⁴, 2¹⁵) (k = 0 for m = 0), within [-114, 126], so there is no overflow and 11 bits relative to the group's largest component. The FP16 storage is the precision study's (branch precision-study 59ff9d1, src/hydro/precision.hpp).
 
 ### Gradient limiter
 
@@ -115,6 +115,7 @@ Riemann solvers. Wave speeds after Davis as LUNA (fluxes.py:146-147, 65-66). LUN
 Each line names the last commit that had it: `git show <commit>:<path>` brings it back.
 
 - `hydro_sedov --precision=weight64|geo32|riemann32|mixed16`, presets no test, figure or measurement used: c12980c, `src/bench/hydro_sedov.cpp` (`run_precision`).
+- Gradient weights stored by the mesh (the `Weight` slot of `Precision`, presets `weight32` and `lowweights`, their `hydro` cases; voronoi-cpp's `gradient_weights` goes with them): d814706, `src/hydro/precision.hpp`, `finite_volume.hpp`.
 
 ## Benchmark programs (src/bench/)
 

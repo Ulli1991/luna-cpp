@@ -125,6 +125,6 @@ int main(int argc, char** argv) {
     if (precision == "default") return run<hydro::DefaultPrecision<3>>(argc, argv);
     if (precision == "double") return run<hydro::Precision<>>(argc, argv);
     if (precision == "grad32") return run<hydro::Grad32>(argc, argv);
-    if (precision == "grad16") return run<hydro::Precision<double, void, hydro::Half>>(argc, argv);
+    if (precision == "grad16") return run<hydro::Precision<double, hydro::Half>>(argc, argv);
     throw std::invalid_argument("hydro_wave3d: --precision=default|double|grad32|grad16");
 }

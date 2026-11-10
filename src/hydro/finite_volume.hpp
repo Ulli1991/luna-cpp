@@ -45,7 +45,7 @@ public:
     static constexpr int V = D + 2;
     using P = Precision;
     using Memory = typename ExecSpace::memory_space;
-    using Mesh = voronoi::Mesh<D, ExecSpace, typename P::geometry, typename P::weight>;
+    using Mesh = voronoi::Mesh<D, ExecSpace, typename P::geometry>;
     using State = hydro::State<D>;
     using Vec = hydro::Vec<D>;
     using G = typename P::gradient;
@@ -179,7 +179,6 @@ public:
         Kokkos::View<const int*, Memory> owner, neighbour, start, face;
         typename Mesh::Rows area, face_centroid, centroid;
         typename Mesh::FaceRows rows;
-        typename Mesh::Weights weights;
         Kokkos::View<const double*, Memory> volume;
         typename Mesh::Positions positions;
         exact_predicates::BoxN<D> box;
@@ -261,7 +260,7 @@ public:
         faces_ = mesh.faces();
         geometry_ = {mesh.owner(),     mesh.neighbour(), mesh.cell_face_start(), mesh.cell_face(),
                      mesh.area(),      mesh.face_centroid(), mesh.centroid(),    mesh.face_rows(),
-                     mesh.gradient_weights(), mesh.volume(), mesh.positions(),   mesh.sides()};
+                     mesh.volume(),    mesh.positions(),  mesh.sides()};
     }
 
     // Sizes of the per-cell rows, each part on a 32-byte boundary. Used by: borrow_scratch(), the constructor.
@@ -329,7 +328,7 @@ public:
                 lo[v] = Kokkos::Experimental::finite_max_v<G>;
                 hi[v] = -Kokkos::Experimental::finite_max_v<G>;
             }
-            // Without weights: the normal equations M x = b, summed here and solved after the loop.
+            // The normal equations M x = b, summed here and solved after the loop.
             constexpr int U = D + 1;
             G M[U][U] = {};
             G b[V][U] = {};
@@ -344,25 +343,16 @@ public:
                 smallest_face = Kokkos::fmin(smallest_face, magnitude);
                 if constexpr (Moving) max_angle = Kokkos::fmax(max_angle, face_angle(magnitude) / (0.5 * Kokkos::sqrt(dot(d, d))));
                 if constexpr (Grad) {
-                    G weight[D], X[U];
-                    if constexpr (Mesh::with_weights) {
-                        for (int c = 0; c < D; ++c) weight[c] = static_cast<G>(geo.weights(k, c));
-                    } else {
-                        const Vec between = d + geo.row(geo.centroid, j) - centroid;
-                        X[0] = 1;
-                        for (int p = 1; p < U; ++p) X[p] = static_cast<G>(between[p - 1]);
-                        const G w = static_cast<G>(magnitude);
-                        for (int p = 0; p < U; ++p)
-                            for (int s = p; s < U; ++s) M[p][s] += w * X[p] * X[s];
-                    }
+                    G X[U];
+                    const Vec between = d + geo.row(geo.centroid, j) - centroid;
+                    X[0] = 1;
+                    for (int p = 1; p < U; ++p) X[p] = static_cast<G>(between[p - 1]);
+                    const G w = static_cast<G>(magnitude);
+                    for (int p = 0; p < U; ++p)
+                        for (int s = p; s < U; ++s) M[p][s] += w * X[p] * X[s];
                     for (int v = 0; v < V; ++v) {
                         const double dW = Wj[v] - Wi[v];
-                        if constexpr (Mesh::with_weights) {
-                            for (int c = 0; c < D; ++c) grad[v][c] += weight[c] * static_cast<G>(dW);
-                        } else {
-                            const G w = static_cast<G>(magnitude);
-                            for (int p = 0; p < U; ++p) b[v][p] += w * X[p] * static_cast<G>(dW);
-                        }
+                        for (int p = 0; p < U; ++p) b[v][p] += w * X[p] * static_cast<G>(dW);
                         const G value = exact ? static_cast<G>(Wj[v]) : static_cast<G>(dW);
                         lo[v] = Kokkos::fmin(lo[v], value);
                         hi[v] = Kokkos::fmax(hi[v], value);
@@ -375,7 +365,7 @@ public:
             if constexpr (Grad) {
                 if (any_tiny) neighbour_range(i, Wi, tiny, lo, hi);
             }
-            if constexpr (Grad && !Mesh::with_weights) solve(M, b, grad);
+            if constexpr (Grad) solve(M, b, grad);
             if constexpr (Moving) {
                 double fraction = 0;
                 if (max_angle > 0.75 * cell_max_angle_factor)
