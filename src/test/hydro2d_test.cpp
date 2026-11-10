@@ -190,10 +190,10 @@ void conservation(Check& check) {
 }
 
 // The L1 error of rho of a sound wave along x after one period: exact polygon averages at start and end (a point value would add a term of the order measured).
-double wave_error(int n, double jitter, hydro::Motion motion) {
+double wave_error(int n, double jitter, hydro::Motion motion, double amplitude = 1e-4) {
     const hydro::Gas gas{5.0 / 3.0};
     const Box box(1.0);
-    const double amplitude = 1e-4, rho0 = 1, c = 1, p0 = rho0 * c * c / gas.gamma;
+    const double rho0 = 1, c = 1, p0 = rho0 * c * c / gas.gamma;
     const auto wave = [=](double x, double) {
         const double s = amplitude * std::sin(2 * M_PI * x);
         return State{rho0 * (1 + s), c * s, 0.0, p0 * (1 + gas.gamma * s)};
@@ -229,6 +229,10 @@ void sound_wave(Check& check) {
                 const std::string name = label(motion) + " jitter " + std::to_string(jitter);
                 check.expect(order > 1.5, name + ": sound wave order " + sci(order) + " (L1 " + sci(e1) + ", " + sci(e2) + ")");
             }
+    // Amplitude 1e-8 on the moving lattice (#23): with the mean point velocity, rounding grew the error (L1 / amplitude 0.39, 1.28).
+    const double e1 = wave_error(32, 0.0, hydro::Motion::moving, 1e-8), e2 = wave_error(64, 0.0, hydro::Motion::moving, 1e-8);
+    check.expect(std::log2(e1 / e2) > 1.8 && e2 < 1.1 * 3.92e-3,
+                 "moving lattice, amplitude 1e-8: sound wave order " + sci(std::log2(e1 / e2)) + ", L1 / amplitude " + sci(e2) + " < 1.1 x 3.92e-3 (A100)");
 }
 
 void sod(Check& check) {

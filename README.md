@@ -78,7 +78,7 @@ sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 
 - **Finite volumes on a Voronoi mesh.** `hydro::FiniteVolume<D>` (`src/hydro/finite_volume.hpp`) handles 3D and 2D from one template; 1D has its own fused kernel (`finite_volume_1d.hpp`).
 - **MUSCL-Hancock.** Least-squares gradients of the primitive variables, limited at the face centroids as in AREPO, a half step in time, then HLLC (default) or HLL along each face normal, with one global time step.
-- **Moving mesh.** Points follow the gas, with a small drift towards their cell centroids that keeps cells round. The mesh is repaired every step, and fluxes go through the moving faces. MUSCL-Hancock on a moving mesh takes the fluxes on the old mesh, half applied, moves the mesh, then takes them on the new mesh, half applied; that is the only moving step, in 1D, 2D and 3D. A single flux at the half step, an option until November 2026, is first order on a moving mesh and is gone.
+- **Moving mesh.** Points follow the gas, with a small drift towards their cell centroids that keeps cells round. The mesh is repaired every step, and fluxes go through the moving faces. MUSCL-Hancock on a moving mesh takes the fluxes on the old mesh, half applied, moves the mesh, then takes them on the new mesh, half applied; that is the only moving step, in 1D, 2D and 3D. A single flux at the half step, an option until November 2026, is first order on a moving mesh and is gone. Points move by whole steps of the grid the mesh snaps them to, and the face velocities come from those moves, so rounding no longer makes a cell's volume change differ from what its faces swept ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)).
 - **Precision.** 3D runs `grad32` by default: gradients and limiting in float, everything else in double, 8 to 12 % faster with no measurable loss of accuracy. 2D and 1D run in double.
 - **Bit-reproducible.** Every cell sums its faces in a fixed order, so an A100 run gives the same bits every time.
 
@@ -273,6 +273,7 @@ CI (`.github/workflows/checks.yml`) runs clang-tidy and the CPU tests in ordinar
 
 - **Speed.** The hydro step is below its target of 0.3 G cell updates/s static. It waits on memory, not arithmetic: the kernels spend 61 to 98 % of their time waiting for loads, and the gradient sweep is the slowest.
 - **1D moving mesh:** Woodward-Colella stalls near N = 2¹⁵; nothing removes points where gas leaves through an open wall.
+- **2D and 3D moving mesh on smooth flow:** on a jittered mesh, which the regularisation relaxes, the density carries an error that does not fall with N: about 3e-8 in 2D (jitter 0.4) and 1.5e-6 in 3D (jitter 0.25), the same with or without the grid fix, so not rounding; its cause is open. It is invisible at the usual amplitudes and decides the error of a 1e-3 sound wave in 3D from nx = 96. On a lattice the moving mesh equals static.
 - **Boxes:** periodic only in 3D and 2D; only 1D has walls.
 - **Memory:** `--precision=mixed` does not fit a moving 256³ run on a 40 GB A100; a forced rebuild beside a moving 256³ run runs out of memory ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)).
 - **Bits:** CPU builds can differ from the GPU in the last bits for some modes; A100 runs are identical run to run.

@@ -578,9 +578,16 @@ public:
         const auto x = x_;
         const auto w = w_;
         const exact_predicates::BoxN<D> box = mesh_->sides();
+        const bool on_grid = both_meshes_;
         Kokkos::parallel_for(
             "hydro::drift", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 for (int a = 0; a < D; ++a) {
+                    if (on_grid) {  // whole grid steps, as step_moving() set them
+                        const long long k = static_cast<long long>(Kokkos::round(x(i, a) * box.per_step)) + static_cast<long long>(Kokkos::round(w(i, a) * dt * box.per_step));
+                        const long long p = box.period[a];
+                        x(i, a) = static_cast<double>(((k % p) + p) % p) * box.step;
+                        continue;
+                    }
                     const double moved = x(i, a) + dt * w(i, a);
                     x(i, a) = moved - box.side[a] * Kokkos::floor(moved / box.side[a]);
                 }
@@ -741,14 +748,24 @@ public:
     };
 
     // MUSCL-Hancock on a moving mesh, AREPO next generation's step, replacing advance()+move() in step():
+    //  0. points to the mesh's grid, w to whole grid steps per dt, so each face moves as the snapped points do (luna-cpp #23)
     //  1. keep the centroids of t^n  2. apply() the fluxes of t^n (half dt)  3. move()  4. borrow_scratch()  5. apply() those of t^n+1 (half dt)
     // Used by: step().
     void step_moving(double dt, Timings* timings) {
         const auto old = old_centroid_;
         const Geometry geo = geometry_;
+        const auto x = x_;
+        const auto w = w_;
+        const exact_predicates::BoxN<D> box = mesh_->sides();
+        // The points go to the grid the mesh snaps them to, and w becomes their move between grid points over dt (#23).
         Kokkos::parallel_for(
             "hydro::keep_centroids", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
-                for (int a = 0; a < D; ++a) old(i, a) = geo.centroid(i, a);
+                for (int a = 0; a < D; ++a) {
+                    old(i, a) = geo.centroid(i, a);
+                    const int k0 = exact_predicates::snap(x(i, a), box, a), k1 = exact_predicates::snap(x(i, a) + dt * w(i, a), box, a);
+                    x(i, a) = static_cast<double>(k0) * box.step;
+                    w(i, a) = static_cast<double>(exact_predicates::delta(k0, k1, box.period[a])) * box.step / dt;
+                }
             });
         apply<1>(MovingFlux<false>{{q_, prims_, gradients_, exponents_, w_, geometry_, gas_, 0.0}, old_centroid_}, 0.5 * dt, timings);
         const long long first = fallbacks_;
