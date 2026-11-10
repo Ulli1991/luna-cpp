@@ -435,7 +435,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);
     if (args.size() < 2) {
-        std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]"
+        std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|none]"
                      " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f] [--watch]\n";
@@ -450,9 +450,7 @@ int main(int argc, char** argv) {
     o.loop = flag(argc, argv, "--update", o.order == 1 ? "face" : "cell");
     o.update = o.loop == "face" ? hydro::Update::per_face : hydro::Update::per_cell;
     o.limit = flag(argc, argv, "--limiter", "face");
-    o.limiter = o.limit == "none"   ? hydro::Limiter::none
-                : o.limit == "cell" ? hydro::Limiter::cell_centroid
-                                    : hydro::Limiter::face_centroid;
+    o.limiter = o.limit == "none" ? hydro::Limiter::none : hydro::Limiter::face_centroid;
     o.riemann = flag(argc, argv, "--riemann", "hllc");
     o.precision = flag(argc, argv, "--precision", "default");
     o.moving = flag(argc, argv, "--moving", "") == "1";

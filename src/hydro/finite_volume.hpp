@@ -18,9 +18,9 @@ namespace hydro {
 
 enum class Update { per_cell, per_face };
 
-// Used by: Sweep (limiter). Where the gradient limiter keeps the extrapolated values within the neighbours' range: face centroids, cell centroids, or nowhere.
+// Used by: Sweep (limiter). Where the gradient limiter keeps the extrapolated values within the neighbours' range: face centroids, or nowhere.
 // minmod and van_leer: the 1D hydro only, LUNA's limiters 0 and 2.
-enum class Limiter { face_centroid, cell_centroid, none, minmod, van_leer };
+enum class Limiter { face_centroid, none, minmod, van_leer };
 
 enum class Motion { static_mesh, moving };
 
@@ -386,10 +386,7 @@ public:
                         const Vec a = geo.area_of(f);
                         if (Kokkos::sqrt(dot(a, a)) < tiny) continue;
                     }
-                    const int j = geo.other(f, i);
-                    const Vec offset = limiter == Limiter::face_centroid
-                                           ? geo.face_offset(f, i)
-                                           : geo.separation(i, j) + geo.row(geo.centroid, j) - centroid;
+                    const Vec offset = geo.face_offset(f, i);
                     const hydro::Vec<D, G> rg = cast<G>(offset);
                     for (int v = 0; v < V; ++v) {
                         const G dp = dot(grad[v], rg);

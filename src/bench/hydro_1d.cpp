@@ -199,7 +199,7 @@ int main(int argc, char* argv[]) {
     luna::pin_notice();
     if (argc < 3) {
         std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
-                     " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|cell|none|minmod|vanleer]"
+                     " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|none|minmod|vanleer]"
                      " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused]"
                      " [--inflow-spacing=s] [--out=file.npy] [--series=name]\n";
         return 1;
@@ -227,8 +227,7 @@ int main(int argc, char* argv[]) {
     o.fused = !has(argc, argv, "--unfused");
     const int repeats = std::stoi(flag(argc, argv, "--repeats", "2"));
     const std::string out = flag(argc, argv, "--out", "");
-    o.limiter = limit == "cell"      ? hydro::Limiter::cell_centroid
-                : limit == "none"    ? hydro::Limiter::none
+    o.limiter = limit == "none"    ? hydro::Limiter::none
                 : limit == "minmod"  ? hydro::Limiter::minmod
                 : limit == "vanleer" ? hydro::Limiter::van_leer
                                      : hydro::Limiter::face_centroid;
