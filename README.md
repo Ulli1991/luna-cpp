@@ -226,8 +226,11 @@ Measured on one A100 at 1305 MHz, Sedov 3D, 40 steps, LUNA in the same job. G ce
 | moving mesh, whole step with the mesh update | 0.072 | 0.076 |
 | LUNA, MC, HLLC, FP64 | 0.47 to 0.76 | 0.87 |
 | LUNA, FP32 | 0.68 | 1.74 |
-| device memory, moving | 2255 B/cell | 2255 B/cell |
-| device memory, LUNA FP64 | 0.22 GB | 1.25 GB |
+| GPU memory, ours, moving | 2255 B/cell (4.7 GB) | 2255 B/cell (37.8 GB) |
+| GPU memory, LUNA FP64 | 113 B/cell (0.24 GB) | 80 B/cell (1.34 GB) |
+| GPU memory, LUNA FP32 | | 40 B/cell (0.68 GB) |
+
+Memory is in bytes per cell and in GB of 10⁹ bytes throughout. Ours is the peak of all the arrays the code allocates during a step; LUNA's is what JAX reports in use at a progress line (LUNA prints it in GiB, converted here), so it is not a peak and the two measure slightly different things.
 
 ### Against resolution
 

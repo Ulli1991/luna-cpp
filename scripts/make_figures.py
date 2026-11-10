@@ -71,6 +71,7 @@ cmp1d = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cmp1d)
 
 apply_style()
+LUNA_GIB = 1024 ** 3 / 1e9  # LUNA prints memory in GiB, labelled GB
 LUNA_C, STATIC_C, MOVING_C = "C0", "C1", "C2"
 LW = 2.2  # every curve; connectors, zoom boxes, cell edges and guide lines stay thin
 STYLE = {"luna": dict(color=LUNA_C, ls="-", marker="o", lw=LW, zorder=2),
@@ -983,7 +984,7 @@ def scaling_log():
             perf = [float(x) for x in re.findall(r"perf = ([\d.]+) Mcells", block)]
             if perf:
                 luna[int(head[1])].append(statistics.median(perf))
-                memory[int(head[1])] = 1e3 * float(re.findall(r"mem = ([\d.]+) GB", block)[-1])
+                memory[int(head[1])] = 1e3 * LUNA_GIB * float(re.findall(r"mem = ([\d.]+) GB", block)[-1])
     return {k: {f: statistics.median(r[f] for r in rows) for f in rows[0]} for k, rows in ours.items()}, luna, memory
 
 
@@ -1011,7 +1012,7 @@ def fig_throughput():
     low.loglog(x, [ours[s, "two-pass"]["gpu_MB"] / 1e3 for s in sides], color=MOVING_C, marker="D", label="ours, two passes, GPU in use", **style)
     low.loglog(x, [ours[s, "two-pass"]["views_MB"] / 1e3 for s in sides], color=MOVING_C, ls="--", marker="D", mfc="white", label="ours, Kokkos views", **style)
     kept = [s for s in shown if memory[s] >= 10]  # LUNA prints two decimals of a GB
-    low.loglog([s ** 3 for s in kept], [memory[s] / 1e3 for s in kept], color=LUNA_C, marker="o", label="LUNA, reported", **style)
+    low.loglog([s ** 3 for s in kept], [memory[s] / 1e3 for s in kept], color=LUNA_C, marker="o", label="LUNA, in use", **style)
     low.axhline(42.4, color="0.6", lw=0.8, ls=":")  # the A100's memory
     low.set_ylabel("peak GB")
     low.set_xlabel("cells")
@@ -1031,7 +1032,7 @@ def precision_log():
             if perf:
                 key = int(head[1]), "FP64" if head[2] == "x64=1" else "FP32"
                 luna[key].append(statistics.median(perf) * 1e-3)
-                memory[key] = float(re.findall(r"mem = ([\d.]+) GB", block)[-1])
+                memory[key] = LUNA_GIB * float(re.findall(r"mem = ([\d.]+) GB", block)[-1])
         elif head[0] == "ours":
             side, mesh, preset = int(head[1]), head[2], head[3].split("=")[1]
             speed = re.search(r"^throughput_M_per_s: (.*)$", block, re.M)
@@ -1091,7 +1092,7 @@ def dims_log(dim):
             perf = [float(x) for x in re.findall(r"perf = ([\d.]+) Mcells", block)]
             if perf:
                 luna[cells].append(statistics.median(perf) * 1e-3)
-                memory[cells] = float(re.findall(r"mem = ([\d.]+) GB", block)[-1])
+                memory[cells] = LUNA_GIB * float(re.findall(r"mem = ([\d.]+) GB", block)[-1])
             continue
         if head[0] != "ours":
             continue
