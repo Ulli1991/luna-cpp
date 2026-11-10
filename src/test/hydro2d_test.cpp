@@ -1,5 +1,5 @@
 // Checks 2D hydro (uniform, conservation, determinism, sound-wave order, Sod, Noh, Galilean invariance) on static and moving meshes.
-// Drives FiniteVolume<2>::time_step and step, and hydro::default_integrator (src/hydro/finite_volume.hpp).
+// Drives FiniteVolume<2>::time_step and step (src/hydro/finite_volume.hpp).
 
 #include "check.hpp"
 #include "exact_riemann.hpp"
@@ -122,29 +122,19 @@ std::uint64_t hash_of(const Fv& fv) {
     return hash;
 }
 
-// The integrators of a run at order 1: the default first.
-std::vector<hydro::Integrator> integrators(hydro::Motion motion) {
-    if (motion == hydro::Motion::moving) return {hydro::Integrator::two_pass, hydro::Integrator::one_pass};
-    return {hydro::Integrator::one_pass};
-}
-
-// A short name for a motion and integrator, for check messages. Used by: every check below.
-std::string label(hydro::Motion motion, hydro::Integrator integrator) {
-    if (motion != hydro::Motion::moving) return "static";
-    return integrator == hydro::Integrator::two_pass ? "moving, two passes" : "moving, one pass";
-}
+// A short name for a motion, for check messages. Used by: every check below.
+std::string label(hydro::Motion motion) { return motion == hydro::Motion::moving ? "moving" : "static"; }
 
 void uniform(Check& check) {
     const hydro::Gas gas{5.0 / 3.0};
     const Box box(1.0);
     for (double jitter : {0.0, 0.2, 0.4})
         for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving})
-            for (auto integrator : integrators(motion))
             for (double bulk : {0.0, 0.7}) {
                 Mesh mesh(Exec(), box);
                 mesh.update(lattice(32, 32, box, jitter));
                 mesh.update_cells();
-                Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion, integrator);
+                Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion);
                 fill(fv, mesh, gas, [&](double, double) { return State{1.5, bulk, -0.5 * bulk, 2.0}; });
                 advance(fv, 1.0, 0.3, 30);
                 const auto q = host(fv.state());
@@ -155,7 +145,7 @@ void uniform(Check& check) {
                     worst = std::max(worst, std::abs(q(i, 1) / volume(i) - 1.5 * bulk));
                     worst = std::max(worst, std::abs(q(i, 2) / q(i, 0) + 0.5 * bulk));
                 }
-                const std::string name = label(motion, integrator) + " jitter " + std::to_string(jitter) + " bulk " + std::to_string(bulk);
+                const std::string name = label(motion) + " jitter " + std::to_string(jitter) + " bulk " + std::to_string(bulk);
                 // Moving: the grid step shows in the volumes (~3e-8). jitter 0.4: the update on the start-of-step mesh keeps a uniform state only to first order.
                 const bool moving = motion == hydro::Motion::moving;
                 const double bound = !moving ? 1e-11 : jitter > 0.3 ? 1e-3 : 1e-7;
@@ -171,16 +161,15 @@ void conservation(Check& check) {
         return State{1 + 0.2 * std::sin(6 * x), 0.3, 0.1 * std::cos(4 * y), r2 < 0.01 ? 50.0 : 1.0};
     };
     for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving})
-        for (auto integrator : integrators(motion))
         for (auto update : {hydro::Update::per_face, hydro::Update::per_cell}) {
-            const std::string name = label(motion, integrator) + (update == hydro::Update::per_face ? " per-face" : " per-cell");
+            const std::string name = label(motion) + (update == hydro::Update::per_face ? " per-face" : " per-cell");
             std::uint64_t hash[2];
             std::array<long double, 4> before{}, after{};
             for (int r = 0; r < 2; ++r) {
                 Mesh mesh(Exec(), box);
                 mesh.update(lattice(64, 32, box, 0.3));
                 mesh.update_cells();
-                Fv fv(Exec(), mesh, gas, 1, update, hydro::Limiter::face_centroid, motion, integrator);
+                Fv fv(Exec(), mesh, gas, 1, update, hydro::Limiter::face_centroid, motion);
                 fill(fv, mesh, gas, blast);
                 auto sums = [&](std::array<long double, 4>& s) {
                     const auto q = host(fv.state());
@@ -201,7 +190,7 @@ void conservation(Check& check) {
 }
 
 // The L1 error of rho of a sound wave along x after one period: exact polygon averages at start and end (a point value would add a term of the order measured).
-double wave_error(int n, double jitter, hydro::Motion motion, hydro::Integrator integrator) {
+double wave_error(int n, double jitter, hydro::Motion motion) {
     const hydro::Gas gas{5.0 / 3.0};
     const Box box(1.0);
     const double amplitude = 1e-4, rho0 = 1, c = 1, p0 = rho0 * c * c / gas.gamma;
@@ -212,7 +201,7 @@ double wave_error(int n, double jitter, hydro::Motion motion, hydro::Integrator 
     Mesh mesh(Exec(), box);
     mesh.update(lattice(n, n, box, jitter));
     mesh.update_cells();
-    Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion, integrator);
+    Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion);
     {
         auto q = Kokkos::create_mirror_view(fv.state());
         const auto volume = host(mesh.volume());
@@ -234,13 +223,11 @@ double wave_error(int n, double jitter, hydro::Motion motion, hydro::Integrator 
 
 void sound_wave(Check& check) {
     for (double jitter : {0.0, 0.4})
-        for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving})
-            for (auto integrator : integrators(motion)) {
-                const double e1 = wave_error(32, jitter, motion, integrator), e2 = wave_error(64, jitter, motion, integrator);
+        for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving}) {
+                const double e1 = wave_error(32, jitter, motion), e2 = wave_error(64, jitter, motion);
                 const double order = std::log2(e1 / e2);
-                const std::string name = label(motion, integrator) + " jitter " + std::to_string(jitter);
-                const bool one_moving = motion == hydro::Motion::moving && integrator == hydro::Integrator::one_pass;
-                check.expect(order > (one_moving && jitter > 0 ? 1.0 : 1.5), name + ": sound wave order " + sci(order) + " (L1 " + sci(e1) + ", " + sci(e2) + ")");
+                const std::string name = label(motion) + " jitter " + std::to_string(jitter);
+                check.expect(order > 1.5, name + ": sound wave order " + sci(order) + " (L1 " + sci(e1) + ", " + sci(e2) + ")");
             }
 }
 
@@ -250,11 +237,10 @@ void sod(Check& check) {
     const exact_riemann::Solver exact(L, R, 1.4);
     const Box box(2.0, 2.0 / 16);
     for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving}) {
-        const hydro::Integrator integrator = hydro::default_integrator(motion, 1);
         Mesh mesh(Exec(), box);
         mesh.update(lattice(256, 16, box, 0));
         mesh.update_cells();
-        Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion, integrator);
+        Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion);
         fill(fv, mesh, gas, [&](double x, double) {
             const bool left = x >= 0.5 && x < 1.5;
             return left ? State{L.rho, 0.0, 0.0, L.p} : State{R.rho, 0.0, 0.0, R.p};
@@ -272,7 +258,7 @@ void sod(Check& check) {
             error += std::abs(q(i, 0) / V - exact.sample((x - 1.5) / t).rho) * V;
             mass += V;
         }
-        const std::string name = label(motion, integrator);
+        const std::string name = label(motion);
         check.expect(error / mass < 0.02, name + ": Sod along x, L1 rho " + sci(error / mass));
     }
 }
@@ -284,11 +270,10 @@ void sod(Check& check) {
     const Box box(2.0);
     const double t = 0.6;
     for (auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving}) {
-        const hydro::Integrator integrator = hydro::default_integrator(motion, 1);
         Mesh mesh(Exec(), box);
         mesh.update(lattice(256, 256, box, 0));
         mesh.update_cells();
-        Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion, integrator);
+        Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion);
         fill(fv, mesh, gas, [&](double x, double y) {
             const double dx = x - 1, dy = y - 1, r = std::hypot(dx, dy);
             return State{1.0, r > 0 ? -dx / r : 0.0, r > 0 ? -dy / r : 0.0, 1e-6};
@@ -313,7 +298,7 @@ void sod(Check& check) {
             if (rho > 8) swept += V;
         }
         const double shock = std::sqrt(swept / M_PI);
-        const std::string name = label(motion, integrator);
+        const std::string name = label(motion);
         check.expect(std::abs(inside / inside_v / 16 - 1) < 0.15 && outside / outside_v < 0.35 && std::abs(shock - t / 3) < 0.02,
                      name + ": Noh: rho inside " + sci(inside / inside_v) + " (16), L1 outside " + sci(outside / outside_v) +
                          ", shock at " + sci(shock) + " (0.2), " + std::to_string(run.steps) + " steps");
@@ -324,11 +309,11 @@ void galilean(Check& check) {
     const hydro::Gas gas{5.0 / 3.0};
     const Box box(1.0);
     const double u = 3.0, t = 0.1;
-    auto rho_at = [&](hydro::Motion motion, hydro::Integrator integrator, double bulk) {
+    auto rho_at = [&](hydro::Motion motion, double bulk) {
         Mesh mesh(Exec(), box);
         mesh.update(lattice(96, 96, box, 0.2));
         mesh.update_cells();
-        Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion, integrator);
+        Fv fv(Exec(), mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion);
         fill(fv, mesh, gas, [&](double x, double y) {
             const double r2 = (x - 0.5) * (x - 0.5) + (y - 0.5) * (y - 0.5);
             return State{1.0, bulk, 0.0, 1.0 + 9.0 * std::exp(-r2 / 0.002)};
@@ -345,9 +330,9 @@ void galilean(Check& check) {
         for (std::size_t i = 0; i < a.size(); ++i) s += std::abs(a[i] - b[i]);
         return s / a.size();
     };
-    for (auto integrator : integrators(hydro::Motion::moving)) {
-        const double moving = distance(rho_at(hydro::Motion::moving, integrator, 0.0), rho_at(hydro::Motion::moving, integrator, u));
-        check.expect(moving < 2e-3, label(hydro::Motion::moving, integrator) + ": a blast carried at Mach ~2.3 equals the blast at rest, cell by cell, L1 " + sci(moving));
+    {
+        const double moving = distance(rho_at(hydro::Motion::moving, 0.0), rho_at(hydro::Motion::moving, u));
+        check.expect(moving < 2e-3, label(hydro::Motion::moving) + ": a blast carried at Mach ~2.3 equals the blast at rest, cell by cell, L1 " + sci(moving));
     }
 }
 

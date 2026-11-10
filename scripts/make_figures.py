@@ -473,7 +473,7 @@ def fig_vortex():
         ax.set_xlabel(r"$n_x$")
         ax.set_ylabel(ylabel)
     axes[0].legend(handles=[key("luna", "LUNA MC", True), plt.Line2D([], [], color=LUNA_C, ls="--", lw=LW, marker="o", ms=MS, label="LUNA MC, point start"),
-                            key("static", "static", True), key("moving", "moving, one pass", True), key("two", "moving, two passes", True),
+                            key("static", "static", True), key("moving", "moving, one flux (removed)", True), key("two", "moving", True),
                             rkey(r"$O(h)$ floor", dict(color="k", ls=":", lw=LW))], **LEGEND, ncol=2)
     axes[0].set_ylim(top=axes[0].get_ylim()[1] * 9)
     save(fig, "vortex_3d")
@@ -496,7 +496,7 @@ def fig_kh():
     a.set_xlabel(r"$N$")
     a.set_ylabel(r"$\max\,|e|$")
     b.set_xlabel("GPU time (s)")
-    a.legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving, one pass", True), key("two", "moving, two passes", True)], **LEGEND)
+    a.legend(handles=[key("luna", "LUNA MC", True), key("static", "static", True), key("moving", "moving, one flux (removed)", True), key("two", "moving", True)], **LEGEND)
     save(fig, "kh_2d")
 
 
@@ -620,7 +620,7 @@ def fig_sedov():
 KPC, MSUN, YEAR, PC, MP, KB = 3.08568e21, 1.98892e33, 3.15576e7, 3.08568e18, 1.67262e-24, 1.38065e-16
 UNIT_T, UNIT_RHO, UNIT_P = KPC / 1e5, 1e10 * MSUN / KPC ** 3, 1e10 * MSUN / (KPC * (KPC / 1e5) ** 2)
 BOX = 0.05  # kpc
-RUNS_3D = {"moving": "moving, two passes", "static": "static", "luna": "LUNA MC"}
+RUNS_3D = {"moving": "moving", "static": "static", "luna": "LUNA MC"}
 SIDE = 256
 
 
@@ -738,7 +738,7 @@ def fig_sedov_shock():
     lo, hi = min(ours.min(), theirs.min()), max(ours.max(), theirs.max())
     L = BOX * KPC / PC
     spread = abs(ours - theirs).max()
-    panels = [(0, "moving, two passes", ours, dict(cmap="magma", vmin=lo, vmax=hi), None),
+    panels = [(0, "moving", ours, dict(cmap="magma", vmin=lo, vmax=hi), None),
               (1, "LUNA MC", theirs, dict(cmap="magma", vmin=lo, vmax=hi), r"$\Sigma$ [$10^{-4}$ g cm$^{-2}$]"),
               (3, "moving $-$ LUNA", ours - theirs, dict(cmap="RdBu_r", vmin=-spread, vmax=spread), r"$\Delta\Sigma$ [$10^{-4}$ g cm$^{-2}$]")]
     for slot, label, field, kw, title in panels:
@@ -855,7 +855,7 @@ def fig_kh_mesh():
     gradient = np.fromfile(f"{SEDOV_256}/kh_mesh512_t{t}.grad.bin").reshape(-1, 2)
     windows = KH_MESH_WINDOWS
     fig, axes = plt.subplots(1, 4, figsize=(WIDTH, WIDTH * 0.235), gridspec_kw=dict(wspace=0.09, left=0.005, right=0.925, top=0.99, bottom=0.01))
-    labels = (f"moving, two passes, $N = {n}$, $t = 4$", "(a)", "(b)", "(c)")
+    labels = (f"moving, $N = {n}$, $t = 4$", "(a)", "(b)", "(c)")
     pixels = 1000
     for ax, window, label, lw in zip(axes, windows, labels, (0.1, 0.15, 0.3, 0.5)):
         image = ax.imshow(smooth_map(rows, gradient, window, pixels).T, origin="lower", extent=(*window[0], *window[1]), cmap="magma", vmin=KH_VMIN, vmax=KH_VMAX,
@@ -943,7 +943,7 @@ def fig_sedov_mesh():
     axes[0].set_ylim(*box[1])
     axes[0].set_aspect("equal")
     corner(axes[0], "(a) moving, $z = 25$ pc", y=0.97)
-    for ax, run, label in ((axes[1], "moving", "(b) moving, two passes"), (axes[2], "static", "(c) static")):
+    for ax, run, label in ((axes[1], "moving", "(b) moving"), (axes[2], "static", "(c) static")):
         polygons, colours, p = plane_cells(run, shell, 1.5)
         cell_collection(ax, polygons, colours, "white", 0.3, cmap="magma", norm=norm)
         ax.plot(p[:, 0], p[:, 1], ls="none", marker=".", ms=1.5, color="k", zorder=3)
@@ -994,9 +994,9 @@ def fig_throughput():
     x = [ours[s, "static"]["n"] for s in sides]
     fig, (top, low) = plt.subplots(2, 1, figsize=(WIDTH, FIGSIZE[1] * 1.45), sharex=True, gridspec_kw=dict(height_ratios=(3, 1.25), hspace=0))
     style = dict(lw=LW, ms=MS)
-    curves = (("static", "hydro", STATIC_C, "-", "s", "hydro, static"), ("two-pass", "hydro", MOVING_C, ":", "^", "hydro, two passes"),
-              ("two-pass", "mesh", "0.5", "-", "v", "mesh only"), ("one-pass", "step", MOVING_C, "--", "o", "whole moving step, one pass"),
-              ("two-pass", "step", MOVING_C, "-", "D", "whole moving step, two passes"))
+    curves = (("static", "hydro", STATIC_C, "-", "s", "hydro, static"), ("two-pass", "hydro", MOVING_C, ":", "^", "hydro, moving"),
+              ("two-pass", "mesh", "0.5", "-", "v", "mesh only"), ("one-pass", "step", MOVING_C, "--", "o", "whole moving step, one flux (removed)"),
+              ("two-pass", "step", MOVING_C, "-", "D", "whole moving step"))
     for mesh, field, color, ls, marker, label in curves:
         top.loglog(x, [ours[s, mesh][field] / 1e3 for s in sides], color=color, ls=ls, marker=marker, label=label, **style)
     shown = [s for s in sorted(luna) if s >= 32]
@@ -1009,7 +1009,7 @@ def fig_throughput():
         ax.axvspan(24 ** 3, 48 ** 3, color="0.90", lw=0, zorder=0)
     TEXTS.append(top.text(32 ** 3, 1.1, "L2 to DRAM", ha="center", fontsize=LABEL))
     top.legend(loc="lower right", ncol=2, fontsize=LABEL, columnspacing=1.5)
-    low.loglog(x, [ours[s, "two-pass"]["gpu_MB"] / 1e3 for s in sides], color=MOVING_C, marker="D", label="ours, two passes, GPU in use", **style)
+    low.loglog(x, [ours[s, "two-pass"]["gpu_MB"] / 1e3 for s in sides], color=MOVING_C, marker="D", label="ours, moving, GPU in use", **style)
     low.loglog(x, [ours[s, "two-pass"]["views_MB"] / 1e3 for s in sides], color=MOVING_C, ls="--", marker="D", mfc="white", label="ours, Kokkos views", **style)
     kept = [s for s in shown if memory[s] >= 10]  # LUNA prints two decimals of a GB
     low.loglog([s ** 3 for s in kept], [memory[s] / 1e3 for s in kept], color=LUNA_C, marker="o", label="LUNA, in use", **style)
@@ -1053,7 +1053,7 @@ def fig_throughput_precision():
     cells = [s ** 3 for s in sides]
     fig, axes = plt.subplots(2, 2, figsize=(WIDTH, FIGSIZE[1] * 1.45), sharex=True, sharey="row", gridspec_kw=dict(height_ratios=(3, 1.25), hspace=0, wspace=0))
     style = dict(lw=LW, ms=MS)
-    for column, (mesh, field, title) in enumerate((("static", "hydro", "hydro, static"), ("two", "step", "whole moving step, two passes"))):
+    for column, (mesh, field, title) in enumerate((("static", "hydro", "hydro, static"), ("two", "step", "whole moving step"))):
         top, low = axes[0, column], axes[1, column]
         for preset, label, color, ls, marker in presets:
             have = [s for s in sides if (s, mesh, preset) in ours]
@@ -1133,9 +1133,9 @@ def dims_log(dim):
 def fig_throughput_dims():
     fig, axes = plt.subplots(2, 3, figsize=(WIDTH * 1.75, FIGSIZE[1] * 1.45), sharex="col", gridspec_kw=dict(height_ratios=(3, 1.25), hspace=0, wspace=0.24))
     style = dict(lw=LW, ms=MS)
-    curves = (("static", "hydro", STATIC_C, "-", "s", "hydro, static"), ("two-pass", "hydro", MOVING_C, ":", "^", "hydro, two passes"),
-              ("one-pass", "mesh", "0.5", "-", "v", "mesh only"), ("one-pass", "step", MOVING_C, "--", "o", "whole step, one pass"),
-              ("two-pass", "step", MOVING_C, "-", "D", "whole step, two passes"))
+    curves = (("static", "hydro", STATIC_C, "-", "s", "hydro, static"), ("two-pass", "hydro", MOVING_C, ":", "^", "hydro, moving"),
+              ("one-pass", "mesh", "0.5", "-", "v", "mesh only"), ("one-pass", "step", MOVING_C, "--", "o", "whole step, one flux (removed)"),
+              ("two-pass", "step", MOVING_C, "-", "D", "whole step"))
     for column, dim in enumerate((1, 2, 3)):
         ours, luna, memory, failed, _ = dims_log(dim)
         top, low = axes[0, column], axes[1, column]

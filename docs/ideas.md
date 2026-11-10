@@ -2,7 +2,7 @@
 
 Every idea from the research review of 2026-11-08, checked on 2026-11-09 against the code. Nothing is dismissed: each idea has what it could buy, a first test, and a status. Mesh ideas are in voronoi-cpp's `docs/ideas.md`.
 
-Where we stand: one A100, 128³ Sedov, `grad32`: static hydro 0.170 G cell updates/s, whole two-pass moving step 0.072; LUNA 0.47 to 0.76 FP64 in the same jobs. Memory 2255 B/cell moving. The profile says the hydro waits on memory, not flops: the gradient sweep at 0.268 G/s with 17 % of warps active, fluxes 0.571, update 0.805.
+Where we stand: one A100, 128³ Sedov, `grad32`: static hydro 0.170 G cell updates/s, whole moving step 0.072; LUNA 0.47 to 0.76 FP64 in the same jobs. Memory 2255 B/cell moving. The profile says the hydro waits on memory, not flops: the gradient sweep at 0.268 G/s with 17 % of warps active, fluxes 0.571, update 0.805.
 
 Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 
@@ -24,7 +24,7 @@ Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 
 | ID | Idea | Buys | First test | Status |
 |---|---|---|---|---|
-| O4, L4 | Geometric conservation: each cell's volume change over a step against the volume swept by its moving faces; uniform flow, and steps with flips | tests the two-pass time-centring | endpoint volumes against swept faces, no AD needed | next |
+| O4, L4 | Geometric conservation: each cell's volume change over a step against the volume swept by its moving faces; uniform flow, and steps with flips | tests the moving step's time-centring | endpoint volumes against swept faces, no AD needed | next |
 | L1 | Derivatives of reconstruction, half step, Riemann flux and update against finite differences on a fixed mesh and branch pattern | finds wrong derivatives and silent bugs | Enzyme on the host build: clang 18 to 21 on Raven, Enzyme built from source; no Kokkos support in Enzyme yet | next |
 | L2 | Differentiable Riemann solver | verification, sensitivity | after L1 | open |
 | L7 | Limiter sensitivity, piecewise | understanding the Sod ringing and stalls | after L1 | open |
@@ -34,7 +34,7 @@ Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 | O6 | Deterministic sums | reproducible bits | fixed order of every cell's faces | done |
 | R9 | Time to solution at fixed error | right decisions | the 1D and Kelvin-Helmholtz figures | done |
 | R17 | Local fault finding: per cell and face, area-vector closure, shared-face orientation, volume change against swept volume, uniform-state preservation, flux cancellation, positivity; reported by cell, not as a global total | turns a conservation failure into the failing cell, and a small regression case | inject known face and time-centring errors and check they are found | next |
-| T0 | One scheme, MUSCL-Hancock, in every dimension: on a moving mesh, fluxes on the old and new mesh, half each (today's "two-pass"); on a static mesh the usual step. 1D gets the moving step, `--integrator=one-pass` goes for moving meshes, and "two-pass" leaves options and docs | second order on every moving mesh (one pass is first order there) | the 1D sound wave of #23 before and after | next, decided |
+| T0 | One scheme, MUSCL-Hancock, in every dimension: on a moving mesh, fluxes on the old and new mesh, half each (once called "two-pass"); on a static mesh the usual step. 1D gets the moving step, `--integrator` and the one-pass option go | second order on every moving mesh (one pass is first order there) | the 1D sound wave of #23 before and after | done (fix-23) |
 | T1 | RK2 (Heun, SSP) with PLM against MUSCL-Hancock on the moving mesh: gradients and limiters recomputed on the new mesh, no half-step predictor; costs a second gradient sweep | possibly more robust in shear and on the 1D sound wave | GPU time to a target error on the 1D sound wave, 3D vortex and KH; stability on Sedov and Noh (#1) | open |
 | T2 | Mesh motion within a step: the start-of-step velocity held fixed (one mesh update) against Heun on the positions (velocity recomputed at stage 2, a second mesh update); not clear in advance which is better | accuracy, flips and mesh quality per GPU second | both under MUSCL-Hancock and RK2 with PLM: error at fixed N, time to target, flips per step, mesh quality (#1) | open |
 | T3 | Better results on tests with shocks and contacts, within the first-order limit any scheme has there: contact steepening for the static mesh, a less diffusive limiter in smooth regions, flattening only at shocks, damping of the ripples behind slow shocks; each a switch, off by default, kept only if it matches or beats today on all 30 1D tests and the super-hard tube | contacts to order about 1 on the static mesh; smaller errors at a given N; LA slow and colliding streams above 0.4-0.5 | each switch on the 30-test ladder and the super-hard tube, region by region | after #23 |

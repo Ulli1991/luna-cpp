@@ -64,11 +64,11 @@ Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the backend y
 
 ```text
 hydro_sedov <side> <jittered|uniform> [--moving] [--order=0|1] [--riemann=hllc|hll] [--limiter=face|cell|none]
-            [--precision=default|double|grad32|mixed|low|...] [--integrator=one-pass|two-pass] [--bulk=km/s]
+            [--precision=default|double|grad32|mixed|low|...] [--bulk=km/s]
             [--out=dir] [--snapshots=10] [--steps=max] [--memory] ...
-hydro_kh2d <N> [--moving] [--integrator=one-pass|two-pass] [--out-times=t,...] [--stop-after=<s>] [--resume] ...
+hydro_kh2d <N> [--moving] [--out-times=t,...] [--stop-after=<s>] [--resume] ...
 hydro_1d <problem> <N> [--moving] [--limiter=face|cell|none] [--dt=luna|arepo|fixed] [--courant=c] ...
-hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--integrator=one-pass|two-pass] [--precision=...]
+hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--precision=...]
 sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 ```
 
@@ -78,7 +78,7 @@ sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 
 - **Finite volumes on a Voronoi mesh.** `hydro::FiniteVolume<D>` (`src/hydro/finite_volume.hpp`) handles 3D and 2D from one template; 1D has its own fused kernel (`finite_volume_1d.hpp`).
 - **MUSCL-Hancock.** Least-squares gradients of the primitive variables, limited at the face centroids as in AREPO, a half step in time, then HLLC (default) or HLL along each face normal, with one global time step.
-- **Moving mesh.** Points follow the gas, with a small drift towards their cell centroids that keeps cells round. The mesh is repaired every step, and fluxes go through the moving faces. To stay second order, a moving step takes fluxes on the old mesh and on the new mesh, half each. The code calls this `--integrator=two-pass`, the default; the one-pass option is first order on a moving mesh and will be removed ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)). 1D still uses one pass for now.
+- **Moving mesh.** Points follow the gas, with a small drift towards their cell centroids that keeps cells round. The mesh is repaired every step, and fluxes go through the moving faces. MUSCL-Hancock on a moving mesh takes the fluxes on the old mesh, half applied, moves the mesh, then takes them on the new mesh, half applied; that is the only moving step, in 1D, 2D and 3D. A single flux at the half step, an option until November 2026, is first order on a moving mesh and is gone.
 - **Precision.** 3D runs `grad32` by default: gradients and limiting in float, everything else in double, 8 to 12 % faster with no measurable loss of accuracy. 2D and 1D run in double.
 - **Bit-reproducible.** Every cell sums its faces in a fixed order, so an A100 run gives the same bits every time.
 
@@ -182,7 +182,7 @@ Density at t = 1.0, 1.5, 2.5 and 3.0 for LUNA, static and moving (N = 2048), wit
 
 ![2D Kelvin-Helmholtz](docs/figures/kh_2d.png)
 
-The error of the instability's growth against the published reference curve, for N² cells. LUNA and static lead at the same N, and LUNA in GPU time. Moving with one pass stalls near 4e-4; with fluxes on both meshes it recovers.
+The error of the instability's growth against the published reference curve, for N² cells. LUNA and static lead at the same N, and LUNA in GPU time. Moving with a single flux at the half step (removed) stalled near 4e-4; the moving step on both meshes recovers.
 
 ## Results in 3D
 
@@ -190,13 +190,13 @@ The error of the instability's growth against the published reference curve, for
 
 ![3D Yee vortex](docs/figures/vortex_3d.png)
 
-A smooth isentropic vortex carried for ten time units, the standard test of order on smooth flow. With one pass the moving mesh is first order; with fluxes on both meshes it reaches order 2.2, then 1.5, close to static.
+A smooth isentropic vortex carried for ten time units, the standard test of order on smooth flow. With a single flux at the half step (removed) the moving mesh was first order; on both meshes it reaches order 2.2, then 1.5, close to static.
 
 ### Sedov blast
 
 ![Sedov 3D](docs/figures/sedov_3d.png)
 
-A point explosion (1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr). It tests shock capturing and the moving mesh's response to strong expansion, but cannot rank schemes: every code converges below first order (0.66 LUNA, 0.78 moving). Left, density in shells at 128³; right, error against resolution. These moving runs used one pass.
+A point explosion (1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr). It tests shock capturing and the moving mesh's response to strong expansion, but cannot rank schemes: every code converges below first order (0.66 LUNA, 0.78 moving). Left, density in shells at 128³; right, error against resolution. These moving runs used a single flux at the half step, removed since.
 
 ### Sedov at 256³ against LUNA
 
@@ -257,7 +257,7 @@ Run times are in [TESTING.md](TESTING.md). The mesh's own tests are in voronoi-c
 | Test | Specifies |
 |---|---|
 | `hydro` | HLLC and HLL fluxes, conservation, bit-identical runs, moving-mesh invariances (bulk velocity, Galilean blast) |
-| `hydro_wave` | moving 3D step on smooth flow, both integrators: Yee's vortex and a sound wave against measured bounds |
+| `hydro_wave` | moving 3D step on smooth flow: Yee's vortex and a sound wave against measured bounds |
 | `hydro2d` | 2D hydro, static and moving: uniform states, conservation, sound-wave order, Sod, Noh, a Galilean blast |
 | `hydro1d` | 1D hydro: conservation, inflow, cells from a wall with the budget through it, Sod against the exact solution; LUNA's final states of Sod, Shu-Osher and Woodward-Colella at N = 16 to 1e-12 |
 
@@ -280,14 +280,13 @@ CI (`.github/workflows/checks.yml`) runs clang-tidy and the CPU tests in ordinar
 
 ## Roadmap
 
-Done: 3D, 2D and 1D hydro on the exact mesh, second order on moving meshes in 3D and 2D, a first round of speed work, `grad32` in 3D.
+Done: 3D, 2D and 1D hydro on the exact mesh, one moving step (MUSCL-Hancock on both meshes) in every dimension, a first round of speed work, `grad32` in 3D.
 
 1. One `main` and one general runner for 1D, 2D and 3D, reading a LUNA-style parameter file ([#18](https://github.com/Ulli1991/luna-cpp/issues/18)).
-2. One scheme everywhere: MUSCL-Hancock with fluxes on the old and new mesh when the mesh moves, including 1D, and no one-pass option ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)).
-3. Hydro speed: towards 0.3 G cell updates/s static, starting with faces numbered by owner and fewer registers in the gradient sweep.
-4. A standing 3D test suite against LUNA ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)).
-5. Time integration study: RK2 with PLM against MUSCL-Hancock, and how the mesh should move within a step ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)).
-6. Local time steps ([#9](https://github.com/Ulli1991/luna-cpp/issues/9)), multi-GPU, refinement, self-gravity, and autodiff ([#12](https://github.com/Ulli1991/luna-cpp/issues/12)).
+2. Hydro speed: towards 0.3 G cell updates/s static, starting with faces numbered by owner and fewer registers in the gradient sweep.
+3. A standing 3D test suite against LUNA ([#7](https://github.com/Ulli1991/luna-cpp/issues/7)).
+4. Time integration study: RK2 with PLM against MUSCL-Hancock, and how the mesh should move within a step ([#1](https://github.com/Ulli1991/luna-cpp/issues/1)).
+5. Local time steps ([#9](https://github.com/Ulli1991/luna-cpp/issues/9)), multi-GPU, refinement, self-gravity, and autodiff ([#12](https://github.com/Ulli1991/luna-cpp/issues/12)).
 
 More ideas, each with a first test: [docs/ideas.md](docs/ideas.md).
 

@@ -402,7 +402,7 @@ public:
         }
 
         // Moving: W + g r, a whole step on (MUSCL-Hancock) when `second`; the cell's own W if rho or P would not stay positive.
-        // Used by: body(), the two passes.
+        // Used by: body(), on both meshes.
         KOKKOS_INLINE_FUNCTION State extrapolated(const State& W, const State& g, double r, int second) const {
             if constexpr (Order == 0) {
                 (void)g;
@@ -447,7 +447,7 @@ public:
         }
 
         // Per slot: load, gradients, point velocities (moving: the new keys), two face fluxes, Q update (fused: next dt).
-        // Moving: each flux is the mean of the passes on the meshes of t^n and t^n+1, as finite_volume.hpp's step_two_pass().
+        // Moving: each flux is the mean of those on the meshes of t^n and t^n+1, as finite_volume.hpp's step_moving().
         // Inner: no ghost in reach, nothing to wrap. Used by: operator().
         template <bool Inner>
         KOKKOS_INLINE_FUNCTION void body(int s, double& smallest, int& descents) const {
@@ -492,8 +492,8 @@ public:
                     const double travel = inside ? 0.5 * (moves[a] + moves[b]) * line.step : 0.0;
                     const double w = travel / dt;
                     const double ra = 0.5 * gap[a] - cell[a].c, rb = -0.5 * gap[a] - cell[b].c;
-                    // Pass 0 on the mesh of t^n, pass 1 on that of t^n+1 (W^n a whole step on, to where the face is then).
-                    const auto pass = [&](int second) {
+                    // On the mesh of t^n (second = 0), then on that of t^n+1 (W^n a whole step on, to where the face is then).
+                    const auto on_mesh = [&](int second) {
                         State L, R;
                         if (Inner || cell[a].real) L = extrapolated(cell[a].W, grad[a], ra + second * travel, second);
                         if (Inner || cell[b].real) R = extrapolated(cell[b].W, grad[b], rb + second * travel, second);
@@ -504,9 +504,9 @@ public:
                         return Riemann::flux(L, R, Vec<1>{1.0}, Vec<1>{w}, st.gas);
                     };
                     if constexpr (Order == 0) {
-                        F[f] = pass(0);
+                        F[f] = on_mesh(0);
                     } else {
-                        const State first = pass(0), second = pass(1);
+                        const State first = on_mesh(0), second = on_mesh(1);
                         for (int v = 0; v < V; ++v) F[f][v] = 0.5 * (first[v] + second[v]);
                     }
                 } else {
