@@ -17,7 +17,7 @@ out="$(realpath -m "${1:-speed-runs}")"
 mode="${2:-speed128}"
 mkdir -p "$out"
 nvidia-smi -L
-all="default double weight32 weight64 flux32 grad32 grad16 geo32 riemann32 mixed mixed16 low lowweights"
+all="default double weight32 flux32 grad32 grad16 mixed low lowweights"
 
 speed() {  # speed <build> <side> [flags]: the phase lines of a 40-step run
     local build="$1" side="$2"
@@ -32,7 +32,7 @@ speed128 | speed256)
     rounds="1 2"
     if [[ "$mode" == speed256 ]]; then
         side=256
-        options="${PRECISIONS:-mixed mixed16 low}"
+        options="${PRECISIONS:-mixed low}"
         rounds="1"
     fi
     # Particle order: Morton (default) and as generated (--input-order: lattice rows).
@@ -117,22 +117,5 @@ bits)
     ;;
 ctest)
     ctest --test-dir "$FIX" --output-on-failure | tail -5
-    ;;
-ncu)
-    # As the precision study (branch precision-study, scripts/precision_a100.sh:157-171):
-    # Raven's DCGM holds the counters unless paused.
-    dcgmi profile --pause
-    for p in ${PRECISIONS:-default}; do
-        for mesh in "" "--moving"; do
-            echo "== ncu FIX 128^3 ${mesh:-static} precision=$p ${NCU_FLAGS:-}"
-            /mpcdf/soft/SLE_15/packages/x86_64/nsight_compute/2026/ncu --target-processes all --clock-control none \
-                --print-kernel-base demangled --launch-skip 60 --launch-count 120 \
-                --metrics gpu__time_duration.sum,dram__bytes_read.sum,dram__bytes_write.sum,lts__t_bytes.sum,sm__warps_active.avg.pct_of_peak_sustained_active,smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct,launch__registers_per_thread,l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum,l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,sm__pipe_fp64_cycles_active.avg.pct_of_peak_sustained_elapsed \
-                --csv --page raw "$FIX/hydro_sedov" 128 jittered $mesh --steps=20 --precision=$p ${NCU_FLAGS:-} \
-                > "$out/ncu_${p}_${mesh:-static}${NCU_TAG:-}.csv" 2> "$out/ncu_${p}_${mesh:-static}${NCU_TAG:-}.err"
-            tail -2 "$out/ncu_${p}_${mesh:-static}${NCU_TAG:-}.err"
-        done
-    done
-    dcgmi profile --resume
     ;;
 esac

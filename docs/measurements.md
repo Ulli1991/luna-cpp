@@ -94,3 +94,9 @@ Woodward-Colella stall: the error stops falling near N = 2¹⁵ at every Courant
 ## Roadmap
 
 Hydro speed so far: 0.107 to 0.152 G cell updates/s static. Estimates for the next steps: an owner bit in the list entries (+8 % static, +5 % whole step); faces numbered by owner in the mesh (+8 % hydro measured with a copy, +5 % whole step estimated). Sorting cells by list length and reusing the half step between passes were measured and made it slower.
+
+## Removed, and where to find it
+
+Scripts and modes nothing maintained uses; each line names the last commit that had it (`git show <commit>:<path>`).
+
+- `scripts/hydro_ncu_table.py` and the `ncu` mode of `scripts/hydro_speed_a100.sh`, Nsight Compute tables for research_notes/hydro_speed_2026-11-04.md (jobs 31802044-46); no number here or in the README comes from them: c12980c.
