@@ -8,6 +8,8 @@ Where each number and figure in the [README](../README.md) comes from: jobs, com
 
 Sedov blast of 1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr; jittered points in Morton order; 40 steps. Job 31954615, ravg1020, 1305 MHz, bef77ed: medians of three rounds at 2.1M cells, one round at 16.8M, `--memory`. LUNA in the same job, 200 steps, median of the 20 perf lines. The same code varies by about 10 % between GPU jobs. LUNA FP64 at 2.1M cells moved between jobs: 0.47 here, 0.67 in job 31953960, 0.76 in job 31953468; at 16.8M 0.87, 0.90, 0.95; FP32 0.68, 1.01, 1.37 and 1.74, 1.91, 2.13.
 
+README speed table, `grad32`, job 31954615 at 1305 MHz: static HLLC 0.170 at 2.1M cells and 0.166 at 16.8M; whole moving step with the mesh update 0.072 and 0.076. GPU memory moving 2255 B/cell at both sizes. LUNA in the same job: FP64 0.47 to 0.76 (2.1M, varies by job) and 0.87 (16.8M), FP32 0.68 and 1.74.
+
 Hashes in job 31954615 at 128³, 50 steps, CUDA: `--precision=double` equals main 3449600 on static, moving, moving one pass, order 0, per-cell moving and HLL moving; `default` equals `grad32` static and moving.
 
 Rows left out of the README, same job: `--precision=double` static HLL 0.157 at 2.1M cells; first order 0.312 in both precisions. Peak device memory at 16.8M cells, GB in use: `grad32` static 38.2, two passes 39.4, one pass 39.0; double 39.3, 40.5, 40.1. `--precision=mixed`, two passes, 2445 B/cell, does not fit at 256³; one pass 2334 B/cell (40.7 GB, job 31925336). LUNA memory: job 31953468.
