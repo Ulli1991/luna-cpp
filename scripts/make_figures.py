@@ -1346,10 +1346,11 @@ def fig_noh():
 
 
 def fig_sound():
-    views = (((0.248, 0.252), [0.249, 0.250, 0.251], "a", "crest", (-9, 12)), ((0.498, 0.502), [0.499, 0.500, 0.501], "b", "node", (-9, 12)),
-             ((0.748, 0.752), [0.749, 0.750, 0.751], "c", "trough", (-9, 12)), ((0.995, 0.999), [0.996, 0.997, 0.998], "d", "near the seam", (-9, 12)))
-    fig_case("sound-right", 8192, "moving", "moving (#23)", views, (-1.35, 2.2), "sound right", scale=lambda r: (r - 1.0) / pr1d.EPS,
-             ylabel=r"$(\rho-1)/10^{-6}$", residual=(-9, 12), zoom_residual=True, res_scale=1e5,
+    lim = (-2.6, 3.2)
+    views = (((0.248, 0.252), [0.249, 0.250, 0.251], "a", "crest", lim), ((0.498, 0.502), [0.499, 0.500, 0.501], "b", "node", lim),
+             ((0.748, 0.752), [0.749, 0.750, 0.751], "c", "trough", lim), ((0.995, 0.999), [0.996, 0.997, 0.998], "d", "near the seam", lim))
+    fig_case("sound-right", 8192, "moving", "moving", views, (-1.35, 2.2), "sound right", scale=lambda r: (r - 1.0) / pr1d.EPS,
+             ylabel=r"$(\rho-1)/10^{-6}$", residual=lim, zoom_residual=True, res_scale=1e5,
              res_label=r"error $[10^{-5}]$")
 
 
