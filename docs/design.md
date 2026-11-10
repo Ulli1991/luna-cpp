@@ -118,6 +118,7 @@ Each line names the last commit that had it: `git show <commit>:<path>` brings i
 - Gradient weights stored by the mesh (the `Weight` slot of `Precision`, presets `weight32` and `lowweights`, their `hydro` cases; voronoi-cpp's `gradient_weights` goes with them): d814706, `src/hydro/precision.hpp`, `finite_volume.hpp`.
 - `hydro_sedov --precision=flux32` (float face fluxes alone; it measured no gain, job 31953468) and its line in `throughput_precision.png`: d814706, `src/bench/hydro_sedov.cpp`, `scripts/make_figures.py`.
 - `Limiter::cell_centroid` (`--limiter=cell`, limiting at the neighbours' centroids, AREPO's USE_MINMOD_SLOPE_LIMITING), which no test, script or figure ran: d814706, `src/hydro/finite_volume.hpp`, `finite_volume_1d.hpp`.
+- `hydro_sedov --watch`, a line per step with cells at the floors (it gave the floor counts of the `--cold` runs in measurements.md): d814706, `src/bench/hydro_sedov.cpp`.
 
 ## Benchmark programs (src/bench/)
 
@@ -129,7 +130,7 @@ The Sedov-Taylor blast of LUNA's `scripts/validation/runs/sedov3d_run.py` on the
                 [--limiter=face|none] [--riemann=hllc|hll] [--precision=<name>]
                 [--moving] [--bulk=<km/s>] [--no-blast] [--box=fx,fy,fz] [--out=<dir>]
                 [--snapshots=10] [--steps=<max>] [--input-order] [--memory] [--gradients]
-                [--cold=f] [--watch]
+                [--cold=f]
 
 side³ generating points in a 50 pc periodic box (jittered: a lattice moved by up to 0.1 spacings; uniform: uniform random). AREPO units (kpc, 1e10 Msun, km/s), gamma 5/3, n = 1 cm⁻³, T = 1e4 K, 1e51 erg into the cells nearest the centre whose volumes add up closest to LUNA's 8 central cells at the same resolution (8 (L / side)³), as extra pressure (gamma - 1) E / V_deposit over their actual volume V_deposit; run to 1e4 yr.
 
@@ -141,7 +142,7 @@ side³ generating points in a 50 pc periodic box (jittered: a lattice moved by u
 - Particles are numbered in Morton order of their positions (`--input-order`: as generated, lattice rows or random).
 - `--update`: the update loop, default face at order 1 and cell at order 0 (the faster on the A100, hydro_stage1_2026-10-31.md).
 - `--limiter`: `hydro::Limiter`, default face. `--riemann`: HLLC (default, as LUNA) or HLL. `--precision`: the hydro's precision policy (default `grad32`; `double` is double throughout).
-- `--cold`: multiplies the background pressure by f, a larger contrast at the blast. `--watch`: a line per step with fallbacks, cells at the floors, smallest rho and P, cells not finite.
+- `--cold`: multiplies the background pressure by f, a larger contrast at the blast.
 - `--no-blast`: no blast, a uniform stream (with `--bulk`), printing its largest deviation from uniform.
 - Prints per step phase medians and cell updates per second and a checksum of the final state, positions and volumes (bits), the face sides whose extrapolation fell back to the cell state (total, steps with any, most in one step) and what the mesh updates did. `--memory` adds device memory (Kokkos allocations) per phase.
 

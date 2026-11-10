@@ -178,7 +178,7 @@ struct Options {
     std::string kind, loop, limit, riemann, out, precision;
     hydro::Update update = hydro::Update::per_face;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
-    bool moving = false, input_order = false, blast = true, gradients = false, watch = false;
+    bool moving = false, input_order = false, blast = true, gradients = false;
     double cold = 1;
     double bulk = 0;
     long long max_steps = 0;
@@ -340,29 +340,6 @@ void run(const Options& o, Points points) {
         fallbacks = fv.fallbacks() < 0 ? -1 : fallbacks + fv.fallbacks();  // -1: not counted (per-cell loop)
         most_fallbacks = std::max(most_fallbacks, fv.fallbacks());
         steps_with_fallbacks += fv.fallbacks() > 0;
-        if (o.watch) {
-            const auto q = fv.state();
-            const auto V = mesh.volume();
-            const double smalle = gas.smallc * gas.smallc / gas.gamma / (gas.gamma - 1.0);
-            long long at_floor_rho = 0, at_floor_e = 0, bad = 0;
-            double rho_min = 0, P_min = 0, P_max = 0;
-            Kokkos::parallel_reduce(
-                "watch", Kokkos::RangePolicy<Exec>(exec, 0, n),
-                KOKKOS_LAMBDA(int i, long long& a, long long& b, long long& c, double& r, double& p, double& h) {
-                    const double rho = q(i, 0) / V(i), e = q(i, 4) / V(i);
-                    const double kinetic = 0.5 * (q(i, 1) * q(i, 1) + q(i, 2) * q(i, 2) + q(i, 3) * q(i, 3)) / (V(i) * q(i, 0));
-                    const double u = e - kinetic;
-                    a += rho < gas.smallr;
-                    b += u < smalle * rho;
-                    c += !Kokkos::isfinite(rho) || !Kokkos::isfinite(e);
-                    r = Kokkos::fmin(r, rho);
-                    p = Kokkos::fmin(p, (gas.gamma - 1.0) * u);
-                    h = Kokkos::fmax(h, (gas.gamma - 1.0) * u);
-                },
-                at_floor_rho, at_floor_e, bad, Kokkos::Min<double>(rho_min), Kokkos::Min<double>(P_min), Kokkos::Max<double>(P_max));
-            std::cout << "watch: step=" << steps << " t=" << t << " dt=" << dt << " fallbacks=" << fv.fallbacks() << " floor_rho=" << at_floor_rho
-                      << " floor_e=" << at_floor_e << " not_finite=" << bad << " rho_min=" << rho_min << " P_min=" << P_min << " P_max=" << P_max << "\n";
-        }
         t = snapshot ? t_next : t + dt;
         ++steps;
         if (snapshot) {
@@ -438,7 +415,7 @@ int main(int argc, char** argv) {
         std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|none]"
                      " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
-                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f] [--watch]\n";
+                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -455,7 +432,6 @@ int main(int argc, char** argv) {
     o.precision = flag(argc, argv, "--precision", "default");
     o.moving = flag(argc, argv, "--moving", "") == "1";
     o.blast = flag(argc, argv, "--no-blast", "") != "1";
-    o.watch = flag(argc, argv, "--watch", "") == "1";
     o.cold = std::stod(flag(argc, argv, "--cold", "1"));
     o.bulk = std::stod(flag(argc, argv, "--bulk", "0"));  // km/s along x
     o.out = flag(argc, argv, "--out", "");
