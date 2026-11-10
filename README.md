@@ -10,7 +10,7 @@ BSD 3-Clause, see [LICENSE](LICENSE).
 
 ## Where it stands
 
-- **Accuracy:** on shocks and contacts the moving mesh often beats LUNA at the same resolution, because cells follow the gas: sharper contacts on Sod, a smaller error on Shu-Osher and Woodward-Colella, and Sedov's low-density centre resolved down to 10⁻³ where fixed grids stop near 10⁻². On smooth flow the static mesh matches LUNA, and the moving mesh is second order in 3D and 2D but not yet on 1D sound waves ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)).
+- **Accuracy:** on shocks and contacts the moving mesh often beats LUNA at the same resolution, because cells follow the gas: sharper contacts on Sod, a smaller error on Shu-Osher and Woodward-Colella, and Sedov's low-density centre resolved down to 10⁻³ where fixed grids stop near 10⁻². On smooth flow the static mesh matches LUNA, and the moving mesh is second order in 3D, 2D and 1D.
 - **Speed:** in 2D and 3D LUNA is faster per cell update, by 2 to 6 times on the static hydro and more on the moving step; in 1D the two are level, and ours is faster below 4M cells. The moving mesh needs fewer steps (925 against LUNA's 4035 on Sedov at 256³), but not enough fewer to win on GPU time yet.
 - **Scale:** 256³ cells fit on one 40 GB A100, moving or static.
 
@@ -150,13 +150,13 @@ Gas streaming into a wall builds a shock that moves back out, with a well-known 
 
 ![Sound wave density](docs/figures/sound_right.png)
 
-A small sound wave travelling once across a periodic line, the cleanest test of order on smooth flow. Static and LUNA are second order; the moving mesh has noise from cell to cell instead, and its error stops falling and then grows with resolution ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)).
+A small sound wave travelling once across a periodic line, the cleanest test of order on smooth flow. Static, LUNA and the moving mesh are second order. The moving mesh's error is smooth, about twice static's where the limiter clips the crest and the trough, and falls with N to 2e-8 of the amplitude at N = 65536; at 131072 it turns up to 1.4e-7, the rounding floor, as LUNA's does (6e-8; static 2e-8). Until November 2026 the moving error was noise from cell to cell that grew with N: the face velocities came from the point velocities while the volumes came from the rounded positions, and the two disagreed by rounding at every step ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)). The faces now move exactly as the grid points do.
 
 ### All 30 tests against resolution
 
 ![1D ladder](docs/figures/ladder_1d.png)
 
-The density error against the number of cells for every 1D test, with the order at the bottom of each panel (S static, L LUNA, M moving, W moving on a wide line). Static and LUNA agree everywhere. The moving mesh is ahead on most shock tests, often by an order of magnitude, behind on Noh, and fails to converge on the sound and entropy waves (#23).
+The density error against the number of cells for every 1D test, with the order at the bottom of each panel (S static, L LUNA, M moving, W moving on a wide line). Static and LUNA agree everywhere. The moving mesh is ahead on most shock tests, often by an order of magnitude, behind on Noh, and second order on the sound waves; on the entropy wave, which the moving points carry exactly, it stays at rounding, below 1e-7.
 
 ## Results in 2D
 
@@ -272,7 +272,7 @@ CI (`.github/workflows/checks.yml`) runs clang-tidy and the CPU tests in ordinar
 ## Limitations
 
 - **Speed.** The hydro step is below its target of 0.3 G cell updates/s static. It waits on memory, not arithmetic: the kernels spend 61 to 98 % of their time waiting for loads, and the gradient sweep is the slowest.
-- **1D moving mesh:** sound waves are first order and then stall near 1e-5 ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)); Woodward-Colella stalls near N = 2¹⁵; nothing removes points where gas leaves through an open wall.
+- **1D moving mesh:** Woodward-Colella stalls near N = 2¹⁵; nothing removes points where gas leaves through an open wall.
 - **Boxes:** periodic only in 3D and 2D; only 1D has walls.
 - **Memory:** `--precision=mixed` does not fit a moving 256³ run on a 40 GB A100; a forced rebuild beside a moving 256³ run runs out of memory ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)).
 - **Bits:** CPU builds can differ from the GPU in the last bits for some modes; A100 runs are identical run to run.
