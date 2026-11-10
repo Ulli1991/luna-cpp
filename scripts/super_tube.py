@@ -43,7 +43,8 @@ def run_file(runs, s, n, t):
 
 def reference(runs, t):
     """The finest LUNA run at t as a ladder_1d.Reference, and its N."""
-    files = [f for f in glob.glob(f"{runs}/luna_{P}_*_t{t}.npz") if int(re.search(r"_(\d+)_t", f).group(1)) > max(NS)]
+    files = [f for f in glob.glob(f"{runs}/luna_{P}_*_t{t}.npz") if int(re.search(r"_(\d+)_t", f).group(1)) > max(NS)
+             and os.path.exists(f + ".json") and json.load(open(f + ".json")).get("reached")]   # a chunked run writes its npz before t
     if not files:
         return None, 0
     f = max(files, key=lambda f: int(re.search(r"_(\d+)_t", f).group(1)))
@@ -66,7 +67,7 @@ def score(runs, out):
         for s in SERIES:
             for n in (*NS, n_ref):
                 f = run_file(runs, s, n, t)
-                if (s != "luna" and n == n_ref) or not os.path.exists(f):
+                if (s != "luna" and n == n_ref) or not os.path.exists(f + ".json") or not json.load(open(f + ".json")).get("reached"):
                     continue
                 a, b, W = lad.cells(f, P)
                 x = 0.5 * (a + b)
