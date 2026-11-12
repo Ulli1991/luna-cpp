@@ -1388,7 +1388,7 @@ def fig_super_tube(t, views, ylim, n=SUPER_N):
     corner(ax, f"$t = {t}$, $N = {n}$", x=0.01, y=0.04, va="bottom")
     names = {"luna": "LUNA MC", "static": "static", "moving": "moving"}
     ax.legend(handles=[key(s, names[s]) for s in series] + [rkey(kw["label"], {k: v for k, v in kw.items() if k != "label"}) for *_, kw in refs],
-              **dict(LEGEND, loc="upper center", ncol=3))
+              **dict(LEGEND, loc="lower left", bbox_to_anchor=(0.0, 0.1), ncol=3))
     z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
     for a, (vx, ticks, letter, label, vy) in zip(z, views):
         zoom(ax, a, vx, ticks, runs, [r[:2] + ({k: v for k, v in r[2].items() if k != "label"},) for r in refs], letter, label, vy)
