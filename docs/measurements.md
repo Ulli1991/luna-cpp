@@ -12,6 +12,8 @@ Sedov blast of 1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr; jittered points in Mo
 
 README speed table, `grad32`, job 31954615 at 1305 MHz: static HLLC 0.170 at 2.1M cells and 0.166 at 16.8M; whole moving step with the mesh update 0.072 and 0.076. GPU memory moving 2255 B/cell at both sizes. LUNA in the same job: FP64 0.47 to 0.76 (2.1M, varies by job) and 0.87 (16.8M), FP32 0.68 and 1.74.
 
+voronoi-cpp 2c8c509 to 6ead543 (circumcentres in grid steps #45, edge representatives #48, step kernels, incremental face numbering, ring re-walk), job 32269986, both trees in the same A100 job (SM clock not recorded), two rounds: whole moving step 0.0704 to 0.0729 at 128³ and 0.0737 to 0.0762 at 256³, the mesh update in it 0.279 to 0.323 G; static 0.170 to 0.169. Memory moving 2255 to 2236 B/cell at both sizes (39410 to 39076 MB in use at 256³), static 2185 to 2166. The README's moving row and our memory are these after values.
+
 Hashes in job 31954615 at 128³, 50 steps, CUDA: `--precision=double` equals main 3449600 on static, moving, moving one pass, order 0, per-cell moving and HLL moving; `default` equals `grad32` static and moving.
 
 Rows left out of the README, same job: `--precision=double` static HLL 0.157 at 2.1M cells; first order 0.312 in both precisions. Peak device memory at 16.8M cells, GB in use: `grad32` static 38.2, two passes 39.4, one pass 39.0; double 39.3, 40.5, 40.1. `--precision=mixed`, two passes, 2445 B/cell, does not fit at 256³; one pass 2334 B/cell (40.7 GB, job 31925336). LUNA memory: job 31953468.

@@ -2,7 +2,7 @@
 
 Every idea from the research review of 2026-11-08, checked on 2026-11-09 against the code. Nothing is dismissed: each idea has what it could buy, a first test, and a status. Mesh ideas are in voronoi-cpp's `docs/ideas.md`.
 
-Where we stand: one A100, 128³ Sedov, `grad32`: static hydro 0.170 G cell updates/s, whole moving step 0.072; LUNA 0.47 to 0.76 FP64 in the same jobs. Memory 2255 B/cell moving. The profile says the hydro waits on memory, not flops: the gradient sweep at 0.268 G/s with 17 % of warps active, fluxes 0.571, update 0.805.
+Where we stand: one A100, 128³ Sedov, `grad32`: static hydro 0.170 G cell updates/s, whole moving step 0.073; LUNA 0.47 to 0.76 FP64 in the same jobs. Memory 2236 B/cell moving. The profile says the hydro waits on memory, not flops: the gradient sweep at 0.268 G/s with 17 % of warps active, fluxes 0.571, update 0.805.
 
 Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 

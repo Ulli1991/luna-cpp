@@ -226,15 +226,15 @@ A slice through the 3D mesh at 1e4 yr. The moving cells gather in the shell and 
 
 ## Speed
 
-Measured on one A100 at 1305 MHz, Sedov 3D, 40 steps, LUNA in the same job. G cell updates per second; jobs and the remaining rows are in [docs/measurements.md](docs/measurements.md).
+Measured on one A100 at 1305 MHz, Sedov 3D, 40 steps, LUNA in the same job; the moving row and our memory are from a later job, after voronoi-cpp 6ead543, clock not recorded. G cell updates per second; jobs and the remaining rows are in [docs/measurements.md](docs/measurements.md).
 
 | G cell updates/s | 128³ | 256³ |
 |---|---|---|
 | static mesh, HLLC | 0.170 | 0.166 |
-| moving mesh, whole step with the mesh update | 0.072 | 0.076 |
+| moving mesh, whole step with the mesh update | 0.073 | 0.076 |
 | LUNA, MC, HLLC, FP64 | 0.47 to 0.76 | 0.87 |
 | LUNA, FP32 | 0.68 | 1.74 |
-| GPU memory, ours, moving | 2255 B/cell (4.7 GB) | 2255 B/cell (37.8 GB) |
+| GPU memory, ours, moving | 2236 B/cell (4.7 GB) | 2236 B/cell (37.5 GB) |
 | GPU memory, LUNA FP64 | 113 B/cell (0.24 GB) | 80 B/cell (1.34 GB) |
 | GPU memory, LUNA FP32 | | 40 B/cell (0.68 GB) |
 
