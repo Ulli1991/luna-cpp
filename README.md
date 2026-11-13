@@ -63,11 +63,11 @@ Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the backend y
 ## Running
 
 ```text
-hydro_sedov <side> <jittered|uniform> [--moving] [--order=0|1] [--riemann=hllc|hll] [--limiter=face|cell|none]
+hydro_sedov <side> <jittered|uniform> [--moving] [--order=0|1] [--riemann=hllc|hll] [--limiter=face|none]
             [--precision=default|double|grad32|mixed|low|...] [--bulk=km/s]
             [--out=dir] [--snapshots=10] [--steps=max] [--memory] ...
 hydro_kh2d <N> [--moving] [--out-times=t,...] [--stop-after=<s>] [--resume] ...
-hydro_1d <problem> <N> [--moving] [--limiter=face|cell|none|minmod|vanleer] [--dt=luna|arepo|fixed] [--courant=c] ...
+hydro_1d <problem> <N> [--moving] [--limiter=face|none|minmod|vanleer] [--dt=luna|arepo|fixed] [--courant=c] ...
 hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--precision=...]
 sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 ```

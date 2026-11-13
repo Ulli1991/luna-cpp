@@ -68,7 +68,7 @@ Made by `scripts/make_figures.py` in LUNA's figure style (`scripts/figstyle.py`)
 | `sedov3d_radial.png` | n_x / 2 bins at 1e4 yr; static job 31953728, 5834 steps, the others as for `sedov3d_shock.png` |
 | `sedov3d_mesh.png` | slice z = 25 pc at 1e4 yr, exact plane section of the 3D Voronoi cells |
 | `throughput_scaling.png` | 32³ to 256³, 1095 MHz, 40 steps, LUNA median of the perf lines of three rounds. Job 31928911, mesh pin 0b433f0 |
-| `throughput_precision.png` | 32³ to 256³, 40 steps, 1305 MHz, job 31953468, e90a913. LUNA in the same job (200 steps, median of the perf lines). None of our options is FP32 throughout. At 128³ `grad16` gives +15 % hydro, +10 % whole step; `grad32` +12 % and +8 %; `mixed` +10 % and +6 %; `flux32` nothing. `mixed` two-pass does not fit at 256³ |
+| `throughput_precision.png` | 32³ to 256³, 40 steps, 1305 MHz, job 31953468, e90a913. LUNA in the same job (200 steps, median of the perf lines). None of our options is FP32 throughout. At 128³ `grad16` gives +15 % hydro, +10 % whole step; `grad32` +12 % and +8 %; `mixed` +10 % and +6 %. `mixed` two-pass does not fit at 256³ |
 | `throughput_dimensions.png` | HLLC, FP64. A blast in all three: LUNA's Sedov without units in 1D (gamma 1.4) and 2D (gamma 5/3), the Sedov above in 3D. 1D has no two-pass integrator. Jobs 31953276 and 31953278 at 1305 MHz, 31953467 at 1095 MHz; the 1D and 2D blast is not on main yet, runs at voronoi-cpp d077c41. At the largest size static hydro runs 2.66, 0.67 and 0.15 G cell updates/s against LUNA 2.96, 1.46 and 0.95. Two passes take the whole step to 0.29 in 2D and 0.07 in 3D |
 
 The precision table in the README is from job 31953468 at 256³, whose `default` is today's `--precision=double`. `grad32` against double on the final tree, job 31954615, 128³ and 256³: +12 % static, +8 % the whole step with two passes, +8 to +9 % with one, 64 B/cell less moving with two passes, 65 otherwise. An earlier job, 31928265, also 1305 MHz: +12 % static, +9 % the whole moving step, the same 64 B/cell.
@@ -94,3 +94,11 @@ Woodward-Colella stall: the error stops falling near N = 2¹⁵ at every Courant
 ## Roadmap
 
 Hydro speed so far: 0.107 to 0.152 G cell updates/s static. Estimates for the next steps: an owner bit in the list entries (+8 % static, +5 % whole step); faces numbered by owner in the mesh (+8 % hydro measured with a copy, +5 % whole step estimated). Sorting cells by list length and reusing the half step between passes were measured and made it slower.
+
+## Removed, and where to find it
+
+Scripts and modes nothing maintained uses; each line names the last commit that had it (`git show <commit>:<path>`).
+
+- `scripts/hydro_ncu_table.py` and the `ncu` mode of `scripts/hydro_speed_a100.sh`, Nsight Compute tables for research_notes/hydro_speed_2026-11-04.md (jobs 31802044-46); no number here or in the README comes from them: c12980c.
+- Modes `builds`, `accuracy`, `stream` and `repro` of `scripts/hydro_speed_a100.sh`, experiments of research_notes/hydro_speed_2026-11-04.md: c12980c.
+- Modes `library_check` (voronoi-cpp's own `scripts/bench_a100.sh` checks the library), `memory_compare`, `moving256face` and `ours128` of `scripts/hydro_a100.sh`, which no note or number names: c12980c.

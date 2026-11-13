@@ -178,7 +178,7 @@ struct Options {
     std::string kind, loop, limit, riemann, out, precision;
     hydro::Update update = hydro::Update::per_face;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
-    bool moving = false, input_order = false, blast = true, gradients = false, watch = false;
+    bool moving = false, input_order = false, blast = true, gradients = false;
     double cold = 1;
     double bulk = 0;
     long long max_steps = 0;
@@ -340,29 +340,6 @@ void run(const Options& o, Points points) {
         fallbacks = fv.fallbacks() < 0 ? -1 : fallbacks + fv.fallbacks();  // -1: not counted (per-cell loop)
         most_fallbacks = std::max(most_fallbacks, fv.fallbacks());
         steps_with_fallbacks += fv.fallbacks() > 0;
-        if (o.watch) {
-            const auto q = fv.state();
-            const auto V = mesh.volume();
-            const double smalle = gas.smallc * gas.smallc / gas.gamma / (gas.gamma - 1.0);
-            long long at_floor_rho = 0, at_floor_e = 0, bad = 0;
-            double rho_min = 0, P_min = 0, P_max = 0;
-            Kokkos::parallel_reduce(
-                "watch", Kokkos::RangePolicy<Exec>(exec, 0, n),
-                KOKKOS_LAMBDA(int i, long long& a, long long& b, long long& c, double& r, double& p, double& h) {
-                    const double rho = q(i, 0) / V(i), e = q(i, 4) / V(i);
-                    const double kinetic = 0.5 * (q(i, 1) * q(i, 1) + q(i, 2) * q(i, 2) + q(i, 3) * q(i, 3)) / (V(i) * q(i, 0));
-                    const double u = e - kinetic;
-                    a += rho < gas.smallr;
-                    b += u < smalle * rho;
-                    c += !Kokkos::isfinite(rho) || !Kokkos::isfinite(e);
-                    r = Kokkos::fmin(r, rho);
-                    p = Kokkos::fmin(p, (gas.gamma - 1.0) * u);
-                    h = Kokkos::fmax(h, (gas.gamma - 1.0) * u);
-                },
-                at_floor_rho, at_floor_e, bad, Kokkos::Min<double>(rho_min), Kokkos::Min<double>(P_min), Kokkos::Max<double>(P_max));
-            std::cout << "watch: step=" << steps << " t=" << t << " dt=" << dt << " fallbacks=" << fv.fallbacks() << " floor_rho=" << at_floor_rho
-                      << " floor_e=" << at_floor_e << " not_finite=" << bad << " rho_min=" << rho_min << " P_min=" << P_min << " P_max=" << P_max << "\n";
-        }
         t = snapshot ? t_next : t + dt;
         ++steps;
         if (snapshot) {
@@ -418,17 +395,10 @@ void run_precision(const Options& o, const Points& points) {
     if (p == "default") return run<hydro::DefaultPrecision<3>, R>(o, points);
     if (p == "double") return run<Precision<>, R>(o, points);
     if constexpr (std::is_same_v<R, hydro::HLLC>) {
-        if (p == "weight32") return run<Precision<double, float>, R>(o, points);
-        if (p == "weight64") return run<Precision<double, double>, R>(o, points);
-        if (p == "flux32") return run<Precision<double, void, double, float>, R>(o, points);
         if (p == "grad32") return run<hydro::Grad32, R>(o, points);
-        if (p == "grad16") return run<Precision<double, void, Half>, R>(o, points);
-        if (p == "geo32") return run<Precision<float>, R>(o, points);
-        if (p == "riemann32") return run<Precision<double, void, double, double, float>, R>(o, points);
-        if (p == "mixed") return run<Precision<float, void, float, float>, R>(o, points);
-        if (p == "mixed16") return run<Precision<float, void, Half, float>, R>(o, points);
-        if (p == "low") return run<Precision<float, void, Half, float, float>, R>(o, points);
-        if (p == "lowweights") return run<Precision<float, float, Half, float, float>, R>(o, points);
+        if (p == "grad16") return run<Precision<double, Half>, R>(o, points);
+        if (p == "mixed") return run<Precision<float, float, float>, R>(o, points);
+        if (p == "low") return run<Precision<float, Half, float, float>, R>(o, points);
     }
     throw std::invalid_argument("hydro_sedov: unknown --precision " + p + " (HLL: default or double only)");
 }
@@ -442,10 +412,10 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);
     if (args.size() < 2) {
-        std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|cell|none]"
-                     " [--riemann=hllc|hll] [--precision=default|double|weight32|weight64|flux32|grad32|grad16|geo32|riemann32|mixed|mixed16|low|lowweights]"
+        std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|none]"
+                     " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
-                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f] [--watch]\n";
+                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -457,14 +427,11 @@ int main(int argc, char** argv) {
     o.loop = flag(argc, argv, "--update", o.order == 1 ? "face" : "cell");
     o.update = o.loop == "face" ? hydro::Update::per_face : hydro::Update::per_cell;
     o.limit = flag(argc, argv, "--limiter", "face");
-    o.limiter = o.limit == "none"   ? hydro::Limiter::none
-                : o.limit == "cell" ? hydro::Limiter::cell_centroid
-                                    : hydro::Limiter::face_centroid;
+    o.limiter = o.limit == "none" ? hydro::Limiter::none : hydro::Limiter::face_centroid;
     o.riemann = flag(argc, argv, "--riemann", "hllc");
     o.precision = flag(argc, argv, "--precision", "default");
     o.moving = flag(argc, argv, "--moving", "") == "1";
     o.blast = flag(argc, argv, "--no-blast", "") != "1";
-    o.watch = flag(argc, argv, "--watch", "") == "1";
     o.cold = std::stod(flag(argc, argv, "--cold", "1"));
     o.bulk = std::stod(flag(argc, argv, "--bulk", "0"));  // km/s along x
     o.out = flag(argc, argv, "--out", "");

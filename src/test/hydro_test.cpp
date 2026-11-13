@@ -622,16 +622,15 @@ int main(int argc, char** argv) {
     mesh_tests<hydro::HLLC, hydro::Precision<>>(check, "jittered", "HLLC double");
     mesh_tests<hydro::HLL, hydro::Precision<>>(check, "jittered", "HLL double");
     // Precision options: mesh gradient weights (float); everything reduced (float rows and weights, FP16 gradients, float fluxes and Riemann).
-    mesh_tests<hydro::HLLC, hydro::Precision<double, float>>(check, "jittered", "HLLC weight32");
-    mesh_tests<hydro::HLLC, hydro::Precision<float, float, hydro::Half, float, float>>(check, "jittered", "HLLC lowweights");
+    mesh_tests<hydro::HLLC, hydro::Precision<float, hydro::Half, float, float>>(check, "jittered", "HLLC low");
     using Default = hydro::DefaultPrecision<3>;
     // Float gradients carry the frame's rounding into the profiles: measured 2.5e-10 on the CPU, 1.2e-10 on the A100; double 6e-14.
     moving_tests<Default>(check, "grad32", 1e-9);
     moving_tests<hydro::Precision<>>(check, "double", 1e-10);
     moving_step_tests<Default>(check, "grad32", 1e-13);
     moving_step_tests<hydro::Precision<>>(check, "double", 1e-13);
-    moving_step_tests<hydro::Precision<float, void, float, float>>(check, "mixed", 1e-6);
-    moving_step_tests<hydro::Precision<float, void, hydro::Half, float, float>>(check, "low", 1e-6);
+    moving_step_tests<hydro::Precision<float, float, float>>(check, "mixed", 1e-6);
+    moving_step_tests<hydro::Precision<float, hydro::Half, float, float>>(check, "low", 1e-6);
     lattice_tests<hydro::HLLC>(check, "HLLC");
     lattice_tests<hydro::HLL>(check, "HLL");
     lattice_tests<hydro::HLLC, hydro::Precision<>>(check, "HLLC double");

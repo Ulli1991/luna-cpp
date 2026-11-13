@@ -18,20 +18,14 @@ struct Half {};
 
 // The precision policy P of FiniteVolume; Q, volumes, centroids, W and the sums of the face fluxes are double in every policy.
 //   Geometry  face rows the hydro reads (area vector, centroid, owner, neighbour): double, or float rows of the mesh
-//   Weight    void: the least-squares fit is solved in the gradient sweep; float or double: the mesh stores each face
-//             side's fit weight and the gradient is a weighted sum
 //   Gradient  gradients, limiter and face-state change: double, float, or Half (float arithmetic, FP16 storage with one
 //             power-of-two exponent per group rho, v, P)
 //   Flux      the stored face fluxes (per-face loop): double or float, summed in double
 //   Riemann   the Riemann solve: double, or float in the frame of the face (flux back to the lab frame in double)
 // Used by: FiniteVolume (typedefs Mesh, G, GStore, FluxStore), hydro_sedov run<P, R>, hydro_wave3d run<P>.
-template <class Geometry = double, class Weight = void, class Gradient = double, class Flux = double,
-          class Riemann = double>
+template <class Geometry = double, class Gradient = double, class Flux = double, class Riemann = double>
 struct Precision {
     static_assert(std::is_same_v<Geometry, double> || std::is_same_v<Geometry, float>, "geometry: double or float");
-    static_assert(std::is_void_v<Weight> || std::is_same_v<Weight, double> || std::is_same_v<Weight, float>,
-                  "weight: void, double or float");
-    using weight = Weight;
     static_assert(std::is_same_v<Gradient, double> || std::is_same_v<Gradient, float> || std::is_same_v<Gradient, Half>,
                   "gradient: double, float or Half");
     static_assert(std::is_same_v<Flux, double> || std::is_same_v<Flux, float>, "flux: double or float");
@@ -46,7 +40,7 @@ struct Precision {
 
 // The gradients, limiter and face-state change in float, the rest double (`--precision=grad32`).
 // Used by: DefaultPrecision<3>, run_precision (hydro_sedov), main (hydro_wave3d).
-using Grad32 = Precision<double, void, float>;
+using Grad32 = Precision<double, float>;
 
 // The default P of FiniteVolume: Grad32 in 3D (L1 unchanged to ~1e-3, +8 to +12 %, 64 B/cell less; README); double in 2D and 1D.
 // Used by: FiniteVolume<D> default argument, run_precision / main (`--precision=default`).

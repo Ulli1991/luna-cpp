@@ -36,11 +36,11 @@ Per-cell and per-face data are rows (LayoutRight), so a random access reads one 
 
 ### Precision (src/hydro/precision.hpp)
 
-The default, `DefaultPrecision<D>`, is `grad32` in 3D (float gradients, limiter and face-state change, everything else double) and double in 2D, where `grad32` has not been measured; 1D has no policies. `Precision<>`, `--precision=double`, is double throughout, with the least-squares fit solved in the sweep (the bits from before `grad32` became the default). Reduced precision and stored weights are compile-time options of the weights, gradients, stored face fluxes, Riemann solve and face geometry rows. Q, volumes, centroids, W and the sums of the face fluxes stay double in every policy. With a float gradient type, the differences W_j - W_i and the separations are formed in double and rounded once, and a face state is W + (its change in float), so a uniform state stays exactly uniform. FP16 gradients use one power-of-two exponent per variable group (rho, v, P): the exponent k of a group whose largest magnitude is m satisfies m 2ᵏ in [2¹⁴, 2¹⁵) (k = 0 for m = 0), within [-114, 126], so there is no overflow and 11 bits relative to the group's largest component. The FP16 storage is the precision study's (branch precision-study 59ff9d1, src/hydro/precision.hpp). Weights are computed in double by the mesh at every update (`tet_mesh::gradient_weights`); the measured effect is in hydro_speed_2026-11-04.md.
+The default, `DefaultPrecision<D>`, is `grad32` in 3D (float gradients, limiter and face-state change, everything else double) and double in 2D, where `grad32` has not been measured; 1D has no policies. `Precision<>`, `--precision=double`, is double throughout, with the least-squares fit solved in the sweep (the bits from before `grad32` became the default). Reduced precision is a compile-time option of the gradients, stored face fluxes, Riemann solve and face geometry rows. Q, volumes, centroids, W and the sums of the face fluxes stay double in every policy. With a float gradient type, the differences W_j - W_i and the separations are formed in double and rounded once, and a face state is W + (its change in float), so a uniform state stays exactly uniform. FP16 gradients use one power-of-two exponent per variable group (rho, v, P): the exponent k of a group whose largest magnitude is m satisfies m 2ᵏ in [2¹⁴, 2¹⁵) (k = 0 for m = 0), within [-114, 126], so there is no overflow and 11 bits relative to the group's largest component. The FP16 storage is the precision study's (branch precision-study 59ff9d1, src/hydro/precision.hpp).
 
 ### Gradient limiter
 
-The limiter keeps the extrapolated values within the neighbours' range (AREPO next generation, mesh_gradients.cc:84-94): at the face centroids (AREPO's default), at the neighbours' centroids (AREPO's USE_MINMOD_SLOPE_LIMITING), or nowhere.
+The limiter keeps the extrapolated values within the neighbours' range (AREPO next generation, mesh_gradients.cc:84-94): at the face centroids (AREPO's default), or nowhere.
 
 ### One moving step
 
@@ -80,7 +80,7 @@ On the sorted line a cell's neighbours are the slots s - 1 and s + 1, so one thr
 
 Scheme, as finite_volume.hpp unless said:
 
-- Gradients: AREPO-ng's least-squares fit with an intercept over the face neighbours, weighted by the face area (mesh_gradients.cc; lines in the stage 1 notes). In 1D the two neighbours with weight 1 determine the fit exactly: g = (dW_R - dW_L) / (d_R - d_L), d the separations of the cell centroids. The limiter is AREPO-ng's (limit_gradient, mesh_gradients.cc:120-148): scaled face by face (left, then right) until the values extrapolated to the face centroids (or the neighbours' centroids) stay within the neighbours' range. On a uniform line this is the MC limiter of LUNA (slopes.py:22-24) on the central difference.
+- Gradients: AREPO-ng's least-squares fit with an intercept over the face neighbours, weighted by the face area (mesh_gradients.cc; lines in the stage 1 notes). In 1D the two neighbours with weight 1 determine the fit exactly: g = (dW_R - dW_L) / (d_R - d_L), d the separations of the cell centroids. The limiter is AREPO-ng's (limit_gradient, mesh_gradients.cc:120-148): scaled face by face (left, then right) until the values extrapolated to the face centroids stay within the neighbours' range. On a uniform line this is the MC limiter of LUNA (slopes.py:22-24) on the central difference.
 - The MUSCL-Hancock half step and HLLC/HLL in 1D (euler.hpp); each side's face state is the cell's if rho or P would not stay positive.
 - Moving: the point velocity is the fluid velocity plus AREPO-ng's regularisation. A face in 1D has no extent, so the face angle of the 2D/3D code does not exist; the criterion is AREPO-ng's other branch (Arepo2-nextgeneration, set_vertex_velocities, !REGULARIZE_MESH_FACE_ANGLE, with CellShapingFactor 1 and CellShapingSpeed 0.5 of its examples): a drift at fraction * c towards the cell's centroid, displaced towards higher density, fraction rising from 0 at an offset of 0.75 r to 0.5 at r, r = V / 2. It keeps generators from crossing, which would swap the two cells' volumes under their masses (stage1_1d_2026-11-04.md). Below 0.5 r the displaced centre stays below the threshold of 0.75 r. The face velocity is the mean of the two point velocities: AREPO-ng's prepare_face_velocity (mesh_fluxes.cc:294-331) with the face centroid at the generators' midpoint.
 - Moving step: MUSCL-Hancock with the fluxes on the meshes of both ends of the step, half each, as finite_volume.hpp's `step_moving()` (AREPO next generation's): the first on the mesh of t^n with W^n + g (x_f^n - c^n), the second on the mesh of t^n+1 with W^n - dt A(W^n) g + g (x_f^n+1 - c^n), the same W^n, g and face velocity. One thread computes both: its stencil gives the new positions of s - 1, s, s + 1. At order 0 the two are one flux. A single flux at the half step is first order on a moving mesh and is gone (luna-cpp #23).
@@ -110,6 +110,16 @@ Riemann solvers. Wave speeds after Davis as LUNA (fluxes.py:146-147, 65-66). LUN
 - `problems_3d.hpp`, gamma 1.4: sound, a right-going linear wave along x (c = 1), [0, 1) × [0, 1/4)², nx · nx/4 · nx/4 cells, t = 1, one period; simple, the exact isentropic simple wave of hydro_1d along x, the same box, t = 0.2; vortex, Yee's isentropic vortex (beta 5) in [-5, 5)² × [0, 2.5), nx · nx · nx/4 cells, t = 10, a steady state; tube, periodic Sod, left state in [0.5, 1.5) of [0, 2) × [0, 1/4)², 2 nx · nx/4 · nx/4 cells, t = 0.25.
 - `test/exact_riemann.hpp`: Toro 2009, ch. 4 (the pressure function, Newton's method for the star pressure, the sampling). Used for Sod against the exact cell averages, as LUNA's exact_riemann.cell_average (src/luna/hydro/exact_riemann.py:105-113: conservative averages of sub-samples per cell). Pressure function f_K(p) and derivative: eqs. 4.6, 4.7, 4.37.
 
+## Removed, and where to find it
+
+Each line names the last commit that had it: `git show <commit>:<path>` brings it back.
+
+- `hydro_sedov --precision=weight64|geo32|riemann32|mixed16`, presets no test, figure or measurement used: c12980c, `src/bench/hydro_sedov.cpp` (`run_precision`).
+- Gradient weights stored by the mesh (the `Weight` slot of `Precision`, presets `weight32` and `lowweights`, their `hydro` cases; voronoi-cpp's `gradient_weights` goes with them): d814706, `src/hydro/precision.hpp`, `finite_volume.hpp`.
+- `hydro_sedov --precision=flux32` (float face fluxes alone; it measured no gain, job 31953468) and its line in `throughput_precision.png`: d814706, `src/bench/hydro_sedov.cpp`, `scripts/make_figures.py`.
+- `Limiter::cell_centroid` (`--limiter=cell`, limiting at the neighbours' centroids, AREPO's USE_MINMOD_SLOPE_LIMITING), which no test, script or figure ran: d814706, `src/hydro/finite_volume.hpp`, `finite_volume_1d.hpp`.
+- `hydro_sedov --watch`, a line per step with cells at the floors (it gave the floor counts of the `--cold` runs in measurements.md): d814706, `src/bench/hydro_sedov.cpp`.
+
 ## Benchmark programs (src/bench/)
 
 ### hydro_sedov
@@ -117,10 +127,10 @@ Riemann solvers. Wave speeds after Davis as LUNA (fluxes.py:146-147, 65-66). LUN
 The Sedov-Taylor blast of LUNA's `scripts/validation/runs/sedov3d_run.py` on the Voronoi mesh (constants: sedov3d_run.py:19-26, src/luna/ic_generation/sedov3d.py:9-14).
 
     hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face]
-                [--limiter=face|cell|none] [--riemann=hllc|hll] [--precision=<name>]
+                [--limiter=face|none] [--riemann=hllc|hll] [--precision=<name>]
                 [--moving] [--bulk=<km/s>] [--no-blast] [--box=fx,fy,fz] [--out=<dir>]
                 [--snapshots=10] [--steps=<max>] [--input-order] [--memory] [--gradients]
-                [--cold=f] [--watch]
+                [--cold=f]
 
 side³ generating points in a 50 pc periodic box (jittered: a lattice moved by up to 0.1 spacings; uniform: uniform random). AREPO units (kpc, 1e10 Msun, km/s), gamma 5/3, n = 1 cm⁻³, T = 1e4 K, 1e51 erg into the cells nearest the centre whose volumes add up closest to LUNA's 8 central cells at the same resolution (8 (L / side)³), as extra pressure (gamma - 1) E / V_deposit over their actual volume V_deposit; run to 1e4 yr.
 
@@ -132,7 +142,7 @@ side³ generating points in a 50 pc periodic box (jittered: a lattice moved by u
 - Particles are numbered in Morton order of their positions (`--input-order`: as generated, lattice rows or random).
 - `--update`: the update loop, default face at order 1 and cell at order 0 (the faster on the A100, hydro_stage1_2026-10-31.md).
 - `--limiter`: `hydro::Limiter`, default face. `--riemann`: HLLC (default, as LUNA) or HLL. `--precision`: the hydro's precision policy (default `grad32`; `double` is double throughout).
-- `--cold`: multiplies the background pressure by f, a larger contrast at the blast. `--watch`: a line per step with fallbacks, cells at the floors, smallest rho and P, cells not finite.
+- `--cold`: multiplies the background pressure by f, a larger contrast at the blast.
 - `--no-blast`: no blast, a uniform stream (with `--bulk`), printing its largest deviation from uniform.
 - Prints per step phase medians and cell updates per second and a checksum of the final state, positions and volumes (bits), the face sides whose extrapolation fell back to the cell state (total, steps with any, most in one step) and what the mesh updates did. `--memory` adds device memory (Kokkos allocations) per phase.
 
@@ -141,7 +151,7 @@ side³ generating points in a 50 pc periodic box (jittered: a lattice moved by u
 Smooth Kelvin-Helmholtz after McNally, Lyra & Passy 2012.
 
     hydro_kh2d <N> [--moving] [--order=0|1] [--dt=luna|arepo|fixed] [--courant=<c>] [--fixed-dt=<dt>]
-               [--riemann=hllc|hll] [--limiter=face|cell|none] [--update=face|cell] [--jitter=<spacings>]
+               [--riemann=hllc|hll] [--limiter=face|none] [--update=face|cell] [--jitter=<spacings>]
                [--bulk=<u>] [--t-end=<t>] [--steps=<max>] [--repeats=<r>]
                [--phases] [--memory] [--out=<prefix>] [--out-times=t,...] [--stop-after=<s>] [--resume]
 
@@ -160,7 +170,7 @@ LUNA's 1D tests on the 1D Voronoi mesh, timed.
 
     hydro_1d <problem of problems_1d.hpp> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]
              [--dt=luna|arepo|fixed] [--courant=<c>] [--fixed-dt=<dt>] [--jitter=<spacings>]
-             [--limiter=face|cell|none|minmod|vanleer] [--steps=<max>] [--repeats=<r>] [--phases] [--memory]
+             [--limiter=face|none|minmod|vanleer] [--steps=<max>] [--repeats=<r>] [--phases] [--memory]
              [--no-regularise] [--unfused] [--inflow-spacing=<spacings>] [--amp=<a>] [--pad=<length>] [--max-wall=<s>] [--out=<file.npy>] [--series=<name>]
 
 Set-ups are LUNA's (`scripts/luna_1d_run.py` has the file:line of each), gamma 1.4: Sod (Toro 1: (1, 0, 1) | (0.125, 0, 0.1) at 0.5 on [0, 1], t = 0.25, zero-gradient walls); Shu-Osher (left = (3.857143, 2.629369, 10.33333) for x < -4, (1 + 0.2 sin 5x, 0, 1) beyond, on [-5, 5], t = 1.8, zero-gradient walls); Woodward-Colella (rho = 1, u = 0, p = 1000 | 0.01 | 100 split at 0.1 and 0.9 on [0, 1], t = 0.038, reflective walls). Every cell starts from the exact average of the initial state over its own interval (LUNA's: cell averages over its uniform cells; equal on a uniform line). N points on a uniform lattice, or moved by up to `--jitter` / 2 spacings.

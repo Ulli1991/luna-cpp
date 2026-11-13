@@ -192,8 +192,7 @@ public:
             }
             double g = ((right - Wi) - (left - Wi)) / (dR - dL);
             if (limiter == Limiter::none) return g;
-            const bool faces = limiter == Limiter::face_centroid;
-            const double r[2] = {faces ? -0.5 * gapL - me.c : dL, faces ? 0.5 * gapR - me.c : dR};
+            const double r[2] = {-0.5 * gapL - me.c, 0.5 * gapR - me.c};
             const double lo = Kokkos::fmin(left, right), hi = Kokkos::fmax(left, right);
             for (int f = 0; f < 2; ++f) {
                 const double dp = g * r[f];
