@@ -303,7 +303,7 @@ int run(const Options& o) {
                 "device_flips=%lld M_final=%.8e\n",
                 o.n, mesh_kind.c_str(), o.order, o.riemann.c_str(),
                 o.limiter == hydro::Limiter::face_centroid ? "face" : "none",
-                o.dt.c_str(), o.courant, o.jitter, o.bulk, o.update == hydro::Update::per_face ? "face" : "cell", steps_best, best,
+                o.dt.c_str(), o.courant, o.jitter, o.bulk, o.update == hydro::Update::per_face ? "face" : o.update == hydro::Update::by_owner ? "owner" : "cell", steps_best, best,
                 build_ms, n * double(steps_best) / best * 1e-6, same ? 1 : 0, stats_best.rebuilds, stats_best.stuck,
                 stats_best.host_flips, stats_best.device_flips, series.back()[1]);
     if (o.phases) {
@@ -344,7 +344,8 @@ int main(int argc, char** argv) {
     o.riemann = flag(argc, argv, "--riemann", "hllc");
     const std::string limiter = flag(argc, argv, "--limiter", "face");
     o.limiter = limiter == "none" ? hydro::Limiter::none : hydro::Limiter::face_centroid;
-    o.update = flag(argc, argv, "--update", "face") == "cell" ? hydro::Update::per_cell : hydro::Update::per_face;
+    const std::string loop = flag(argc, argv, "--update", "face");
+    o.update = loop == "cell" ? hydro::Update::per_cell : loop == "owner" ? hydro::Update::by_owner : hydro::Update::per_face;
     o.jitter = std::stod(flag(argc, argv, "--jitter", "0"));
     o.bulk = std::stod(flag(argc, argv, "--bulk", "0"));
     o.t_end = std::stod(flag(argc, argv, "--t-end", "1.5"));

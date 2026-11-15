@@ -7,6 +7,7 @@
 #include <Kokkos_Core.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -16,7 +17,9 @@
 // The state is the extensive Q per cell; the mesh (static or moving) is the only thing taken from voronoi-cpp. Design: docs/design.md.
 namespace hydro {
 
-enum class Update { per_cell, per_face };
+// per_face: one thread per face stores its flux, then each cell adds its list. by_owner: each cell computes the faces it
+// owns, adds them and stores them once; a second kernel adds the stored ones it does not own (sums: owned, then the rest).
+enum class Update { per_cell, per_face, by_owner };
 
 // Used by: Sweep (limiter). Where the gradient limiter keeps the extrapolated values within the neighbours' range: face centroids, or nowhere.
 // minmod and van_leer: the 1D hydro only, LUNA's limiters 0 and 2.
@@ -60,6 +63,7 @@ public:
     using Gradients = Kokkos::View<GStore* [gradient_width], Kokkos::LayoutRight, Memory, Unmanaged>;
     using Exponents = Kokkos::View<std::uint32_t*, Memory, Unmanaged>;  // FP16 gradients: one byte per group
     using FaceFluxes = Kokkos::View<FluxStore* [V], Kokkos::LayoutRight, Memory, Unmanaged>;
+    using Owned = Kokkos::View<double* [V], Kokkos::LayoutRight, Memory, Unmanaged>;  // Update::by_owner: the owned faces' sums
 
     // AREPO next generation's mesh regularisation, as its Sedov examples set it (docs/design.md).
     static constexpr double cell_shaping_speed = 0.5, cell_max_angle_factor = 2.25;
@@ -310,8 +314,9 @@ public:
     // Primitive, gradient (and FP16 exponent), then face flux rows in the mesh's scratch, 32-byte aligned; a moving step keeps the cell rows in held_.
     // Used by: time_step(), step(), step_moving(); must precede primitives().
     void borrow_scratch() {
-        const std::size_t flux_bytes =
-            update_ == Update::per_face ? sizeof(FluxStore) * V * static_cast<std::size_t>(faces_) : 0;
+        const bool stored = update_ != Update::per_cell, owner = update_ == Update::by_owner;
+        const std::size_t own_bytes = owner ? sectors(sizeof(double) * V * static_cast<std::size_t>(n_)) : 0;
+        const std::size_t flux_bytes = stored ? sectors(sizeof(FluxStore) * V * static_cast<std::size_t>(faces_)) + own_bytes : 0;
         const bool held = both_meshes_;
         char* base = held ? held_.data() : mesh_->scratch(cell_row_bytes() + flux_bytes).data();
         char* fluxes = held ? mesh_->scratch(flux_bytes).data() : base + cell_row_bytes();
@@ -319,7 +324,8 @@ public:
         base += prim_bytes();
         if (order_ == 1) gradients_ = Gradients(reinterpret_cast<GStore*>(base), n_);
         if (exponent_bytes() > 0) exponents_ = Exponents(reinterpret_cast<std::uint32_t*>(base + gradient_bytes()), n_);
-        if (update_ == Update::per_face) flux_ = FaceFluxes(reinterpret_cast<FluxStore*>(fluxes), faces_);
+        if (stored) flux_ = FaceFluxes(reinterpret_cast<FluxStore*>(fluxes), faces_);
+        if (owner) own_ = Owned(reinterpret_cast<double*>(fluxes + flux_bytes - own_bytes), n_);
     }
 
     // Stage 1 of a step: per-cell W, sound speed, radius into prims_. Used by: time_step(), step(); feeds sweep().
@@ -685,30 +691,50 @@ public:
         // As AREPO's prepare_state: extrapolate in time and space only if rho and P stay positive, else the cell's state.
         // r: offset from the centroid to the face point. Used by: operator().
         // Order 0 computes W here from Q instead of loading it, or the bits change (docs/design.md).
-        KOKKOS_INLINE_FUNCTION State side(int i, Vec r, int& fallbacks) const {
+        // What side() needs of cell i, apart from r: loaded once per cell by the owner pass (Update::by_owner).
+        // W (order 0: from Q), the gradient, and the half step: W advanced (double) or its rate (reduced precision).
+        struct Cell {
+            State W, half;
+            Gradient<D, G> grad;
+            StateT<D, G> rate;
+        };
+        KOKKOS_INLINE_FUNCTION Cell cell(int i) const {
+            Cell c;
+            if constexpr (Order == 0) {
+                c.W = primitive(geo.per_volume(q, i), gas);
+            } else {
+                c.W = primitive_row(prim, i);
+                c.grad = gradient(i);
+                if constexpr (std::is_same_v<G, double>) {
+                    c.half = half_step(c.W, c.grad, dt, gas);
+                } else {
+                    const StateT<D, G> Wg = make_state<D, G>([&](int v) { return static_cast<G>(c.W[v]); });
+                    c.rate = half_step_rate(Wg, c.grad, gas);
+                }
+            }
+            return c;
+        }
+        KOKKOS_INLINE_FUNCTION State side_of(const Cell& c, Vec r, int& fallbacks) const {
             if constexpr (Order == 0) {
                 (void)r;
                 (void)fallbacks;
-                return primitive(geo.per_volume(q, i), gas);
+                return c.W;
             } else {
-                const State W = primitive_row(prim, i);
-                const Gradient<D, G> grad = gradient(i);
                 State Wf;
                 if constexpr (std::is_same_v<G, double>) {
-                    Wf = half_step(W, grad, dt, gas);
-                    for (int v = 0; v < V; ++v) Wf[v] += dot(grad[v], r);
+                    Wf = c.half;
+                    for (int v = 0; v < V; ++v) Wf[v] += dot(c.grad[v], r);
                 } else {
-                    const StateT<D, G> Wg = make_state<D, G>([&](int v) { return static_cast<G>(W[v]); });
-                    const StateT<D, G> rate = half_step_rate(Wg, grad, gas);
                     const hydro::Vec<D, G> rg = cast<G>(r);
                     const G h = G(0.5) * static_cast<G>(dt);
-                    for (int v = 0; v < V; ++v) Wf[v] = W[v] + static_cast<double>(dot(grad[v], rg) - h * rate[v]);
+                    for (int v = 0; v < V; ++v) Wf[v] = c.W[v] + static_cast<double>(dot(c.grad[v], rg) - h * c.rate[v]);
                 }
                 if (Wf[0] > 0 && Wf[D + 1] > 0) return Wf;
                 ++fallbacks;
-                return W;
+                return c.W;
             }
         }
+        KOKKOS_INLINE_FUNCTION State side(int i, Vec r, int& fallbacks) const { return side_of(cell(i), r, fallbacks); }
         // AREPO-ng's face velocity: the mean point velocity plus a correction along n, |c| limited to 0.9 |d|. Used by: operator().
         KOKKOS_INLINE_FUNCTION Vec face_velocity(int f, int o, int j) const {
             const Vec wL = geo.row(w, o), wR = geo.row(w, j);
@@ -738,7 +764,16 @@ public:
         }
         // fallbacks_o, fallbacks_j: the sides of owner and neighbour that took the cell's state. Used by: apply().
         KOKKOS_INLINE_FUNCTION State operator()(int f, int& fallbacks_o, int& fallbacks_j) const {
-            const int o = geo.owner_of(f), j = geo.neighbour_of(f);
+            const int o = geo.owner_of(f);
+            return face(f, o, geo.neighbour_of(f), [&](Vec r, int& n) { return side(o, r, n); }, fallbacks_o, fallbacks_j);
+        }
+        // The owner pass: face f of cell i (its owner) with i's rows in c.
+        KOKKOS_INLINE_FUNCTION State owned(const Cell& c, int i, int f, int j, int& fallbacks_o, int& fallbacks_j) const {
+            return face(f, i, j, [&](Vec r, int& n) { return side_of(c, r, n); }, fallbacks_o, fallbacks_j);
+        }
+        // owner_side(r, fallbacks): the owner's face state. Used by: operator(), owned().
+        template <class OwnerSide>
+        KOKKOS_INLINE_FUNCTION State face(int f, int o, int j, const OwnerSide& owner_side, int& fallbacks_o, int& fallbacks_j) const {
             const Vec a = geo.area_of(f);
             const double magnitude = Kokkos::sqrt(dot(a, a));
             if (magnitude == 0) return State{};  // cospherical or cocircular corners (an exact lattice): no normal, no flux
@@ -746,11 +781,11 @@ public:
             if constexpr (Moving) wf = face_velocity(f, o, j);
             State L, R;
             if constexpr (Order == 0) {
-                L = side(o, Vec{}, fallbacks_o);
+                L = owner_side(Vec{}, fallbacks_o);
                 R = side(j, Vec{}, fallbacks_j);
             } else {
                 const Vec shift = wf * (0.5 * dt);
-                L = side(o, geo.face_offset(f, o) + shift, fallbacks_o);
+                L = owner_side(geo.face_offset(f, o) + shift, fallbacks_o);
                 R = side(j, geo.face_offset(f, j) + shift, fallbacks_j);
             }
             State F = solve(L, R, a * (1.0 / magnitude), wf, gas);
@@ -766,28 +801,38 @@ public:
         Points old_centroid;
 
         // Replaces FaceFlux::side() on both meshes. Used by: operator().
-        KOKKOS_INLINE_FUNCTION State pass_side(int i, Vec r, int& fallbacks) const {
+        using Cell = typename FaceFlux<1, true>::Cell;
+        // c: cell i's rows (FaceFlux::cell). Used by: pass_side(), owned().
+        KOKKOS_INLINE_FUNCTION State pass_side_of(const Cell& c, int i, Vec r, int& fallbacks) const {
             if constexpr (Second) {
                 const Vec moved = this->geo.row(this->w, i) * (0.5 * this->dt);
-                return this->side(i, r + this->geo.row(this->geo.centroid, i) - this->geo.row(old_centroid, i) + moved, fallbacks);
+                return this->side_of(c, r + this->geo.row(this->geo.centroid, i) - this->geo.row(old_centroid, i) + moved, fallbacks);
             } else {
-                const State W = primitive_row(this->prim, i);
-                const Gradient<D, G> grad = this->gradient(i);
                 const hydro::Vec<D, G> rg = cast<G>(r);
                 State Wf;
-                for (int v = 0; v < V; ++v) Wf[v] = W[v] + static_cast<double>(dot(grad[v], rg));
+                for (int v = 0; v < V; ++v) Wf[v] = c.W[v] + static_cast<double>(dot(c.grad[v], rg));
                 if (Wf[0] > 0 && Wf[D + 1] > 0) return Wf;
                 ++fallbacks;
-                return W;
+                return c.W;
             }
         }
+        KOKKOS_INLINE_FUNCTION State pass_side(int i, Vec r, int& fallbacks) const {
+            return pass_side_of(this->cell(i), i, r, fallbacks);
+        }
         KOKKOS_INLINE_FUNCTION State operator()(int f, int& fallbacks_o, int& fallbacks_j) const {
-            const int o = this->geo.owner_of(f), j = this->geo.neighbour_of(f);
+            const int o = this->geo.owner_of(f);
+            return face(f, o, this->geo.neighbour_of(f), [&](Vec r, int& n) { return pass_side(o, r, n); }, fallbacks_o, fallbacks_j);
+        }
+        KOKKOS_INLINE_FUNCTION State owned(const Cell& c, int i, int f, int j, int& fallbacks_o, int& fallbacks_j) const {
+            return face(f, i, j, [&](Vec r, int& n) { return pass_side_of(c, i, r, n); }, fallbacks_o, fallbacks_j);
+        }
+        template <class OwnerSide>
+        KOKKOS_INLINE_FUNCTION State face(int f, int o, int j, const OwnerSide& owner_side, int& fallbacks_o, int& fallbacks_j) const {
             const Vec a = this->geo.area_of(f);
             const double magnitude = Kokkos::sqrt(dot(a, a));
             if (magnitude == 0) return State{};
             const Vec wf = this->face_velocity(f, o, j);
-            const State L = pass_side(o, this->geo.face_offset(f, o), fallbacks_o);
+            const State L = owner_side(this->geo.face_offset(f, o), fallbacks_o);
             const State R = pass_side(j, this->geo.face_offset(f, j), fallbacks_j);
             State F = this->solve(L, R, a * (1.0 / magnitude), wf, this->gas);
             for (int v = 0; v < V; ++v) F[v] *= magnitude;
@@ -871,22 +916,54 @@ public:
         const bool next_prims = pass == 1;
         const auto prim = prims_;
         const Gas gas = gas_;
-        Kokkos::parallel_reduce(
-            "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
-            KOKKOS_LAMBDA(int f, long long& count) {
-                int fallbacks = 0;
-                const State value = flux(f, fallbacks, fallbacks);
-                count += fallbacks;
-                for (int v = 0; v < V; ++v) F(f, v) = static_cast<FluxStore>(value[v]);
-            },
-            fallbacks_[pass]);
+        const bool by_owner = update_ == Update::by_owner, owned_first = by_owner && !owner_check_;
+        const auto own = own_;
+        if (by_owner) {
+            // Each cell's owned faces in list order: the sum here, each flux stored once for the neighbour (as rounded).
+            Kokkos::parallel_reduce(
+                "hydro::owned_fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_),
+                KOKKOS_LAMBDA(int i, long long& count) {
+                    const auto c = flux.cell(i);
+                    State sum{};
+                    const int end = geo.start(i + 1);
+                    for (int k = geo.start(i);; ++k) {
+                        while (k < end && !geo.owned_at(k, geo.face_at(k), i)) ++k;
+                        if (k == end) break;
+                        const int f = geo.face_at(k);
+                        int fallbacks_o = 0, fallbacks_j = 0;
+                        const State value = flux.owned(c, i, f, geo.other_at(k, f, i), fallbacks_o, fallbacks_j);
+                        count += fallbacks_o + fallbacks_j;
+                        for (int v = 0; v < V; ++v) {
+                            const FluxStore stored = static_cast<FluxStore>(value[v]);
+                            F(f, v) = stored;
+                            sum[v] += static_cast<double>(stored);
+                        }
+                    }
+                    for (int v = 0; v < V; ++v) own(i, v) = sum[v];
+                },
+                fallbacks_[pass]);
+        } else {
+            Kokkos::parallel_reduce(
+                "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
+                KOKKOS_LAMBDA(int f, long long& count) {
+                    int fallbacks = 0;
+                    const State value = flux(f, fallbacks, fallbacks);
+                    count += fallbacks;
+                    for (int v = 0; v < V; ++v) F(f, v) = static_cast<FluxStore>(value[v]);
+                },
+                fallbacks_[pass]);
+        }
         phase_end(timings, &Timings::fluxes);
         Kokkos::parallel_for(
             "hydro::update", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 State sum{};
+                if (owned_first)
+                    for (int v = 0; v < V; ++v) sum[v] = own(i, v);
                 for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
                     const int f = geo.face_at(k);
-                    const double sign = geo.owned_at(k, f, i) ? 1.0 : -1.0;
+                    const bool owned = geo.owned_at(k, f, i);
+                    if (owned_first && owned) continue;
+                    const double sign = owned ? 1.0 : -1.0;
                     for (int v = 0; v < V; ++v) sum[v] += sign * static_cast<double>(F(f, v));
                 }
                 State next;
@@ -916,6 +993,8 @@ private:
     bool swept_ = false;
     mutable bool prims_ready_ = false;  // the last update wrote prims_ for the current Q and mesh
     StepRule rule_ = StepRule::arepo;
+    // LUNA_OWNER_CHECK=1: by_owner's update adds every face in list order, as per_face (the same bits if the fluxes are).
+    bool owner_check_ = std::getenv("LUNA_OWNER_CHECK") != nullptr;
     Kokkos::View<long long, Memory> fallbacks_[2] = {Kokkos::View<long long, Memory>("hydro_fallbacks"),
                                                       Kokkos::View<long long, Memory>("hydro_fallbacks_second")};
     Kokkos::Timer timer_;
@@ -927,6 +1006,7 @@ private:
     Gradients gradients_;
     Exponents exponents_;
     FaceFluxes flux_;
+    Owned own_;
     Geometry geometry_;
     MeshStats mesh_stats_;
 };
