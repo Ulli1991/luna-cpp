@@ -170,12 +170,12 @@ Can the step read each face's geometry fewer times, one thread per face kept? Br
 
 | lever (commit) | 128³ moving `grad32` | static `grad32` | bits | job |
 |---|---|---|---|---|
-| \|area\| of each face kept by the last flux pass on the mesh (pass 2 on a moving mesh, the first pass on a static one) in the flux scratch, so the sweep reads 8 B instead of the 24 B area row per list entry | sweep 6.36 -> 5.75 ms, pass 2 +0.19 ms; step 0.0780 -> 0.0799 G cell updates/s | sweep 5.70 -> 5.01; 0.199 -> 0.213 | equal to main | 32371742 |
+| \|area\| of each face kept by the last flux pass on the mesh (pass 2 on a moving mesh, the first pass on a static one) in the flux scratch, so the sweep reads 8 B instead of the 24 B area row per list entry | sweep 6.36 -> 5.75 ms, pass 2 +0.19 ms; step 0.0780 -> 0.0799 G cell updates/s | sweep 5.70 -> 5.01; 0.199 -> 0.213 | equal to main | 32371742, 32371745 |
 | the drift folded into pass 1's update (one kernel fewer) | update +0.13 ms, drift -0.16: no change | | equal | 32371268 |
 
-ncu (job 32371744): the sweep 5.60 -> 4.99 ms and 1007 -> 764 B/cell, pass 2 3.11 -> 3.31 ms (+80 B/cell, the magnitudes written); the ten kernels 17.44 -> 17.23 ms and 6430 -> 6358 B/cell. Memory +65 B/cell (8 B a face in the scratch, which sets the peak): 2236 -> 2300 moving, 2301 -> 2366 static. `double` 128³: moving 0.0713 -> 0.0732, static 0.173 -> 0.184. MAGS256
+ncu (job 32371744): the sweep 5.60 -> 4.99 ms and 1007 -> 764 B/cell, pass 2 3.11 -> 3.31 ms (+80 B/cell, the magnitudes written); the ten kernels 17.44 -> 17.23 ms and 6430 -> 6358 B/cell. Memory +65 B/cell (8 B a face in the scratch, which sets the peak): 2236 -> 2300 moving, 2301 -> 2366 static. `double` 128³: moving 0.0713 -> 0.0732, static 0.173 -> 0.184. 256³ (job 32371743): moving `grad32` 0.0852 -> 0.0865, static 0.204 -> 0.219; `double` moving 0.0771 -> 0.0783, static 0.178 -> 0.189.
 
-Bits: equal to main for all eight Sedov cases, the 3D vortex and both sound waves (`double`, `grad32`, `grad16`, moving and static, files equal byte for byte) and KH 2D 128 (hashes equal); the 1D code is not touched. So Sedov L1, the vortex, the sound waves, KH and the ladder are main's. TENDV2
+Bits: equal to main for all eight Sedov cases, the 3D vortex and both sound waves (`double`, `grad32`, `grad16`, moving and static, files equal byte for byte) and KH 2D 128 (hashes equal); the 1D code is not touched. So Sedov L1, the vortex, the sound waves, KH and the ladder are main's. Moving Sedov 128³ to t_end: GPU 10.00 -> 9.77 s, 349 steps both, field L1 rho 0.06479 both (job 32371746).
 
 Not tried, and why: a compact per-face struct shared by both halves (the halves read different meshes, and float geometry is the `mixed` preset, which loses the 1e-6 sound wave); fusing the update with anything (each neighbour kernel needs all faces' fluxes first; the update is at its gather floor for 40 B rows; storing fluxes by owner was lever 1 above, refuted).
 
