@@ -175,9 +175,7 @@ HostCells rough_state(int n, const hydro::Gas& gas) {
 }
 
 // Display name of an update loop. Used by: mesh_tests, moving_step_tests, lattice_tests.
-const char* name(hydro::Update u) {
-    return u == hydro::Update::per_cell ? "per cell" : u == hydro::Update::by_owner ? "by owner" : "per face";
-}
+const char* name(hydro::Update u) { return u == hydro::Update::per_cell ? "per cell" : "per face"; }
 
 // Precision: a hydro policy; with float face rows a cell's areas close only to ~1e-7, so a uniform state stays uniform only to that.
 template <class Riemann, class Precision = hydro::DefaultPrecision<3>>
@@ -191,7 +189,7 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
     const auto volume = to_host(mesh.volume());
 
     for (int order = 0; order <= 1; ++order)
-        for (const auto update : {hydro::Update::per_cell, hydro::Update::per_face, hydro::Update::by_owner}) {
+        for (const auto update : {hydro::Update::per_cell, hydro::Update::per_face}) {
             const std::string what = solver + ", " + kind + ", order " + std::to_string(order) + ", " + name(update);
             FV fv(Exec{}, mesh, gas, order, update);
             {
@@ -233,23 +231,17 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
         }
 
     // Bits: two runs of each loop, and the two loops against each other.
-    HostCells result[3][2];
-    for (const auto update : {hydro::Update::per_cell, hydro::Update::per_face, hydro::Update::by_owner})
+    HostCells result[2][2];
+    for (const auto update : {hydro::Update::per_cell, hydro::Update::per_face})
         for (int run = 0; run < 2; ++run) {
             FV fv(Exec{}, mesh, gas, 1, update);
             set_state(fv, mesh, rough_state(n, gas));
             for (int s = 0; s < 10; ++s) fv.step(fv.time_step(0.3));
-            result[static_cast<int>(update)][run] = host_state(fv, mesh);
+            result[update == hydro::Update::per_face][run] = host_state(fv, mesh);
         }
     auto same = [&](const HostCells& a, const HostCells& b) { return std::memcmp(a.data(), b.data(), sizeof(double) * 5 * n) == 0; };
-    check.expect(same(result[0][0], result[0][1]) && same(result[1][0], result[1][1]) && same(result[2][0], result[2][1]),
-                 solver + ", " + kind + ": two runs give the same bits (every loop, order 1, 10 steps)");
-    // By owner sums a cell's owned faces first: per face's fluxes in another order, equal to rounding.
-    double orders = 0;
-    for (int i = 0; i < n; ++i)
-        orders = std::max(orders, relative({result[1][0](i, 0), result[1][0](i, 1), result[1][0](i, 2), result[1][0](i, 3), result[1][0](i, 4)},
-                                           {result[2][0](i, 0), result[2][0](i, 1), result[2][0](i, 2), result[2][0](i, 3), result[2][0](i, 4)}));
-    check.expect(orders < 1e-12, solver + ", " + kind + ": by owner and per face agree to rounding (" + sci(orders) + ")");
+    check.expect(same(result[0][0], result[0][1]) && same(result[1][0], result[1][1]),
+                 solver + ", " + kind + ": two runs give the same bits (both loops, order 1, 10 steps)");
     // The loops compile the same face flux into different kernels (multiply-add contraction): equal to rounding, not bit for bit.
     double loops = 0;
     for (int i = 0; i < n; ++i)
@@ -508,7 +500,7 @@ void moving_step_tests(Check& check, const std::string& name_of_precision, doubl
     const hydro::Gas gas{5.0 / 3.0};
     const int n = 4096;
     const Points points = make_points("jittered", n);
-    for (const auto update : {hydro::Update::per_face, hydro::Update::per_cell, hydro::Update::by_owner}) {
+    for (const auto update : {hydro::Update::per_face, hydro::Update::per_cell}) {
         const std::string head = "moving step, " + name_of_precision + ", " + name(update) + ": ";
         auto make = [&](typename FV::Mesh& mesh) {
             mesh.update(to_device(points));
@@ -576,7 +568,7 @@ void lattice_tests(Check& check, const std::string& solver) {
     const int n = static_cast<int>(points.size());
     for (const auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving})
         for (int order = 0; order <= 1; ++order)
-            for (const auto update : {hydro::Update::per_cell, hydro::Update::per_face, hydro::Update::by_owner}) {
+            for (const auto update : {hydro::Update::per_cell, hydro::Update::per_face}) {
                 const bool moving = motion == hydro::Motion::moving;
                 if (moving && order == 0) continue;  // the moving mesh is second order
                 const std::string what = solver + ", lattice, " + (moving ? "moving" : "static") + ", order " +
