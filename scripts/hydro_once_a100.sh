@@ -33,7 +33,7 @@ speed)
                 for b in $RUNS; do
                     parse "$b"
                     echo "== $name ${side}^3 $mesh $p round $round $flags $envs"
-                    env $envs "$dir/hydro_sedov" "$side" jittered --steps=40 --memory --precision=$p ${mesh/static/} $flags | grep -E "^(mesh:|run|phases|throughput|memory: phase=steps)"
+                    env $envs "$dir/hydro_sedov" "$side" jittered $flags --steps=40 --memory --precision=$p ${mesh/static/} | grep -E "^(mesh:|run|phases|throughput|memory: phase=steps)"
                 done
             done
         done
