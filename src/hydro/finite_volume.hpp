@@ -980,9 +980,13 @@ public:
 #if defined(KOKKOS_ENABLE_CUDA)
             if constexpr (std::is_same_v<ExecSpace, Kokkos::Cuda>) lanes = owner_lanes_;
 #endif
-            Kokkos::parallel_reduce(
+            // A parallel_for: its CUDA threads take consecutive g on consecutive lanes from a block start (a reduce may not).
+            const auto counter = fallbacks_[pass];
+            Kokkos::deep_copy(exec_, counter, 0LL);
+            Kokkos::parallel_for(
                 "hydro::owned_fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, static_cast<std::int64_t>(n_) * lanes),
-                KOKKOS_LAMBDA(std::int64_t g, long long& count) {
+                KOKKOS_LAMBDA(std::int64_t g) {
+                    long long count = 0;
                     const int i = static_cast<int>(g / lanes), lane = static_cast<int>(g % lanes);
                     const auto c = flux.cell(i);
                     State sum{};
@@ -1002,14 +1006,16 @@ public:
                         }
                     }
 #if defined(__CUDA_ARCH__)
-                    const unsigned group = (lanes == 32 ? 0xffffffffu : (1u << lanes) - 1u) << (threadIdx.x % 32 / lanes * lanes);
+                    unsigned warp_lane;  // Kokkos may lay the threads along y: the hardware lane, not threadIdx.x
+                    asm("mov.u32 %0, %%laneid;" : "=r"(warp_lane));
+                    const unsigned group = (lanes == 32 ? 0xffffffffu : (1u << lanes) - 1u) << (warp_lane / lanes * lanes);
                     for (int step = lanes / 2; step > 0; step /= 2)
                         for (int v = 0; v < V; ++v) sum[v] += __shfl_down_sync(group, sum[v], step, lanes);
 #endif
                     if (lane == 0)
                         for (int v = 0; v < V; ++v) own(i, v) = sum[v];
-                },
-                fallbacks_[pass]);
+                    if (count > 0) Kokkos::atomic_add(&counter(), count);
+                });
         } else {
             Kokkos::parallel_reduce(
                 "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
