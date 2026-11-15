@@ -715,11 +715,10 @@ public:
             const Vec d = geo.separation(o, j);
             const double dist = Kokkos::sqrt(dot(d, d));
             const Vec c = geo.face_centroid_of(f) - d * 0.5;
-            const double inv_dist = 1.0 / dist;
-            double facv = dot(c, wL - wR) * inv_dist;
+            double facv = dot(c, wL - wR) / dist;
             const double cc = Kokkos::sqrt(dot(c, c));
             if (cc > 0.9 * dist) facv *= 0.9 * dist / cc;
-            return (wL + wR) * 0.5 + d * (facv * inv_dist);
+            return (wL + wR) * 0.5 + d * (facv / dist);
         }
         // The Riemann solve along the unit normal n; float: in the face's frame, the flux back in the lab frame in double.
         // n: unit normal, wf: face velocity. Used by: operator().
