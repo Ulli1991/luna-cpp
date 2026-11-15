@@ -152,6 +152,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     double t = 0;
     const bool fused = o.fused && !o.fixed && !o.phases && o.rule == hydro::TimeStep::luna;
     double next = fused ? fv.time_step(o.courant, o.rule) : 0;
+    double smallest = 1e300;
     while (t < pb.t_end * (1 - 1e-12) && (o.max_steps == 0 || r.steps < o.max_steps)) {
         double dt = fused ? next : o.fixed ? o.fixed_dt : fv.time_step(o.courant, o.rule, timings);
         if (!(dt > 1e-15 * pb.t_end) || (o.max_wall > 0 && timer.seconds() > o.max_wall)) break;
@@ -163,7 +164,14 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
             fv.step(dt, timings);
         t += dt;
         ++r.steps;
+        if (std::getenv("DIAG_SMALLEST") && o.motion == hydro::Motion::moving) {  // EXPERIMENT
+            const auto p = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.positions());
+            std::vector<double> at(p.data(), p.data() + fv.cells());
+            std::sort(at.begin(), at.end());
+            for (std::size_t i = 1; i + 1 < at.size(); ++i) smallest = std::min(smallest, 0.5 * (at[i + 1] - at[i - 1]));
+        }
     }
+    if (std::getenv("DIAG_SMALLEST")) std::printf("smallest_h=%.4g\n", smallest * n / pb.L);
     exec.fence();
     r.wall_s = timer.seconds();
     r.t = t;

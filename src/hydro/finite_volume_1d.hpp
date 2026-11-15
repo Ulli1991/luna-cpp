@@ -93,8 +93,8 @@ public:
         Limiter limiter;
         bool regularise, supply_left, supply_right;
         double spacing;
-        double pv_lo = 0, pv_hi = 0;  // EXPERIMENT
         double flat_k = 0;            // EXPERIMENT
+        double blend_a = 0;           // EXPERIMENT
 
         // Used by: wants_cell(). Whether end slot s has room for a cell from its wall, d grid steps from it.
         KOKKOS_INLINE_FUNCTION bool room_at(double volume, i64 d) const {
@@ -237,20 +237,21 @@ public:
             const double fraction = d > r ? cell_shaping_speed : cell_shaping_speed * (d - 0.75 * r) / (0.25 * r);
             return offset * (fraction * sound_speed(W, gas) / d);
         }
-        // The point velocity: the fluid's at the generator, linear between the centroids of the cell at *cell and its neighbour on the generator's side, plus drift().
-        // At the cell's mean alone, a point at the edge of a long cell runs with gas a cell length away (luna-cpp #25). Used by: time_step(), Kernel::body().
+        // The point velocity relative to the cell's mean velocity: drift(), plus, for a generator beyond 0.75 r of its centroid (where the drift starts),
+        // up to the fluid's velocity at the generator, linear between the centroids of this cell and its neighbour there (luna-cpp #25).
+        // Used by: time_step(), Kernel::body().
         KOKKOS_INLINE_FUNCTION double point_velocity(const Cell* cell, double gapL, double gapR, double g_rho, double volume) const {
             const Cell& me = *cell;
+            const double r = 0.5 * volume, d = Kokkos::fabs(me.c), weight = Kokkos::fmin(1.0, (d - 0.75 * r) / (0.25 * r));
+            const double drifting = drift(me.W, g_rho, me.c, volume);
+            if (!(weight > 0)) return drifting;
             const int side = me.c < 0 ? 1 : -1;
             const double between = side > 0 ? gapR + cell[1].c - me.c : gapL + me.c - cell[-1].c;
-            const double q = Kokkos::fabs(me.c) / (0.5 * volume);
-            const double weight = pv_hi <= pv_lo ? (q >= pv_lo ? 1.0 : 0.0) : Kokkos::fmin(1.0, Kokkos::fmax(0.0, (q - pv_lo) / (pv_hi - pv_lo)));
-            const double v = me.W[1] + weight * (cell[side].W[1] - me.W[1]) * (Kokkos::fabs(me.c) / between);
-            return v + drift(me.W, g_rho, me.c, volume);
+            return drifting + weight * (cell[side].W[1] - me.W[1]) * (d / between);
         }
     };
 
-    // The global time step (see TimeStep). |v - w|: point_velocity()'s difference from the fluid's.
+    // The global time step (see TimeStep). |v - w|: point_velocity().
     // Used by: the driver before step(); run_fused() when cells were added or the order changed.
     double time_step(double courant, TimeStep rule = TimeStep::arepo, Timings* timings = nullptr) {
         timer_.reset();
@@ -273,7 +274,7 @@ public:
                 double vi = Kokkos::fabs(Wi[1]);
                 if (moving) {
                     const double g = second_order ? st.gradient(cell + 1, gap[0], gap[1], 0) : 0.0;
-                    vi = Kokkos::fabs(st.point_velocity(cell + 1, gap[0], gap[1], g, volume) - Wi[1]);
+                    vi = Kokkos::fabs(st.point_velocity(cell + 1, gap[0], gap[1], g, volume));
                 }
                 if (luna) {
                     smallest = Kokkos::fmin(smallest, courant * volume / (vi + ci));
@@ -493,7 +494,7 @@ public:
                 if constexpr (Order == 1)
                     for (int v = 0; v < V; ++v) grad[k][v] = st.gradient(cell + k, gap[k - 1], gap[k], v);
                 if constexpr (Moving)
-                    point[k] = st.point_velocity(cell + k, gap[k - 1], gap[k], grad[k][0], 0.5 * (gap[k - 1] + gap[k]));
+                    point[k] = cell[k].W[1] + st.point_velocity(cell + k, gap[k - 1], gap[k], grad[k][0], 0.5 * (gap[k - 1] + gap[k]));
             }
             // Moving: each point's new key and its move in grid steps; a face moves by the mean of its generators' moves.
             sorted_mesh::Key key[5] = {0, 0, 0, 0, 0};
@@ -518,6 +519,12 @@ public:
                     const double travel = inside ? 0.5 * (moves[a] + moves[b]) * line.step : 0.0;
                     const double w = travel / dt;
                     const double ra = 0.5 * gap[a] - cell[a].c, rb = -0.5 * gap[a] - cell[b].c;
+                    double theta = st.blend_a < 0 ? -st.blend_a : 0;
+                    if (st.blend_a > 0) {
+                        double lo = cell[f].W[2], hi = lo;
+                        for (int k = f + 1; k <= f + 3; ++k) lo = Kokkos::fmin(lo, cell[k].W[2]), hi = Kokkos::fmax(hi, cell[k].W[2]);
+                        if (lo > 0 && cell[f].W[1] > cell[f + 3].W[1]) theta = Kokkos::fmin(1.0, Kokkos::fmax(0.0, (hi / lo - 1 - st.blend_a) / st.blend_a));
+                    }
                     // On the mesh of t^n (second = 0), then on that of t^n+1 (W^n a whole step on, to where the face is then).
                     const auto on_mesh = [&](int second) {
                         State L, R;
@@ -526,6 +533,12 @@ public:
                         if constexpr (!Inner) {
                             if (!cell[a].real) L = st.ghost_face(R, cell[b].W, true);
                             if (!cell[b].real) R = st.ghost_face(L, cell[a].W, false);
+                        }
+                        if (theta > 0) {
+                            const State h = HLL::flux(L, R, Vec<1>{1.0}, Vec<1>{w}, st.gas), c = Riemann::flux(L, R, Vec<1>{1.0}, Vec<1>{w}, st.gas);
+                            State F;
+                            for (int v = 0; v < V; ++v) F[v] = c[v] + theta * (h[v] - c[v]);
+                            return F;
                         }
                         return Riemann::flux(L, R, Vec<1>{1.0}, Vec<1>{w}, st.gas);
                     };
@@ -645,9 +658,9 @@ private:
     }
     // Used by: time_step(), supply_cells(), run(), run_fused().
     Stencil stencil() const {
-        static const double lo = std::getenv("PV_LO") ? std::atof(std::getenv("PV_LO")) : 0.0, hi = std::getenv("PV_HI") ? std::atof(std::getenv("PV_HI")) : 0.0;
         static const double fk = std::getenv("FLAT") ? std::atof(std::getenv("FLAT")) : 0.0;
-        return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_, lo, hi, fk};
+        static const double ba = std::getenv("BLEND") ? std::atof(std::getenv("BLEND")) : 0.0;
+        return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_, fk, ba};
     }
     // Whether to look at the end cells after this step: as the kernels asked while gas enters, else every 64 steps. Used by: step(), run_fused().
     bool due() {

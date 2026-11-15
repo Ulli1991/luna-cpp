@@ -464,12 +464,12 @@ int main(int argc, char* argv[]) {
         for (const Cell& c : r.cells) finite = finite && std::isfinite(c.W[0]) && std::isfinite(c.W[1]) && std::isfinite(c.W[2]);
         check.expect(r.reached && finite, "la-vacuum N=768 static: rho = 0 runs to t_end, finite, " + std::to_string(r.steps) + " steps");
     }
-    // Stage E of the super-hard tube alone at the spacing of N = 32768 (#25): at the cells' mean velocity the tube stalled at t = 0.134 (2.7e-10 h),
-    // a limited-gradient velocity here at t = 0.118 (6e-6 h); the fixed run's smallest cell is 1.85e-2 h in 9781 steps.
+    // Stage E of the super-hard tube alone at the spacing of N = 4096 (#25), to t = 0.2: at the cells' mean velocity it collapses (3.5e-7 h,
+    // stall at t = 0.132); interpolated beyond 0.75 r the smallest cell is 5.4e-3 h. At the spacing of 32768 stage E alone does not collapse.
     {
-        const double h = pr::super_tube_length / 32768;
-        const Run r = simulate("super-tube-e", 2960, Motion::moving, Limiter::face_centroid, 0, 0.125, true, 30000);
-        check.expect(r.reached && r.smallest > 5e-3 * h, "super-tube-e N=2960 moving to t = 0.125: smallest cell " + sci(r.smallest / h) + " h (> 5e-3 h), " + std::to_string(r.steps) + " steps");
+        const double h = pr::super_tube_length / 4096;
+        const Run r = simulate("super-tube-e", 370, Motion::moving, Limiter::face_centroid, 0, 0.2, true, 100000);
+        check.expect(r.reached && r.smallest > 1e-3 * h, "super-tube-e N=370 moving to t = 0.2: smallest cell " + sci(r.smallest / h) + " h (> 1e-3 h), " + std::to_string(r.steps) + " steps");
     }
     // Noh moving at AREPO's rule (#27): with no pair term at the wall the cold inflow took one step of 0.6; the mirror's term gives 4.9e-3 at 256 in 2220 steps.
     {
