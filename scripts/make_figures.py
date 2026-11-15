@@ -53,8 +53,8 @@ PRECISION = f"{RUNS}/build-roofline/logs/ladder-31953468.out"  # scripts/profile
 DIMS = f"{RUNS}/build-roofline/logs"  # scripts/dims_a100.sh
 SCALING = f"{RUNS}/build-roofline/logs/roof-31928911.out"  # scripts/roofline_a100.sh on branch roofline, job 31928911
 
-LAD_RUNS = f"{RUNS}/build-1dtests/runs"      # scripts/ladder_1d_a100.sh
-LADDER = f"{RUNS}/build-1dtests/report/ladder_1d.json"
+LAD_RUNS = os.environ.get("LADDER_RUNS", f"{RUNS}/build-1dtests/runs")      # scripts/ladder_1d_a100.sh
+LADDER = os.environ.get("LADDER_JSON", f"{RUNS}/build-1dtests/report/ladder_1d.json")
 LADDER_NAMES = {"toro-1": "Toro 1", "toro-2": "Toro 2", "toro-3": "Toro 3", "toro-4": "Toro 4", "toro-5": "Toro 5", "einfeldt-strong": "Einfeldt strong", "einfeldt-shear": "Einfeldt shear", "la-vacuum": "LA vacuum (rho = 0)", "la-peak": "LA Peak",
                 "la-rcvcr": "LA RCVCR", "la-stationary": "LA stationary", "la-slow": "LA slow", "la-streams": "LA streams", "la-near-vacuum": "LA near vacuum", "leblanc": "LeBlanc",
                 "noh": "Noh", "shu-osher": "Shu-Osher", "woodward-colella": "Woodward-Colella", "titarev-toro": "Titarev-Toro", "sound-right": "sound right", "sound-left": "sound left",
@@ -1219,7 +1219,7 @@ def fig_hard():
     """Density of the hard cases at one N: LUNA, static, moving, exact; a zoom under each."""
     cases = (("leblanc", "LeBlanc", "moving", True, (0.70, 0.76), [0.71, 0.73, 0.75], "shock", None, (7e-4, 2.5)),
              ("einfeldt-strong", "Einfeldt strong, moving: wide line", "moving-wide", False, (0.42, 0.58), [0.45, 0.50, 0.55], "near vacuum", None, (-0.03, 1.32)),
-             ("noh", "Noh, moving: fixed dt", "moving-fixed", False, (0.0, 0.03), [0.0, 0.01, 0.02], "wall heating", (2.9, 4.5), (0.5, 5.6)),
+             ("noh", "Noh", "moving", False, (0.0, 0.03), [0.0, 0.01, 0.02], "wall heating", (2.9, 4.5), (0.5, 5.6)),
              ("toro-3", "Toro 3", "moving", False, (0.76, 0.82), [0.77, 0.79, 0.81], "shock", (0.3, 8.8), (0, 10.5)))
     n = 1024
     fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.15))
@@ -1342,7 +1342,7 @@ def fig_leblanc():
 def fig_noh():
     views = (((0.0, 0.02), [0.0, 0.01, 0.02], "a", "wall heating", (3.2, 4.6)), ((0.08, 0.12), [0.09, 0.10, 0.11], "b", "post-shock gas", (3.96, 4.04)),
              ((0.19, 0.21), [0.19, 0.20, 0.21], "c", "shock", (0.5, 4.8)), ((0.25, 0.35), [0.27, 0.30, 0.33], "d", "inflow", (0.996, 1.004)))
-    fig_case("noh", 1024, "moving-fixed", "moving, fixed dt (#15)", views, (0.5, 6.2), "Noh", xlim=(0.0, 0.4), residual=(-1.0, 1.0))
+    fig_case("noh", 1024, "moving", "moving", views, (0.5, 6.2), "Noh", xlim=(0.0, 0.4), residual=(-1.0, 1.0))
 
 
 def fig_sound():
