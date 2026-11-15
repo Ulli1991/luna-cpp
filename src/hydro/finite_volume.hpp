@@ -786,10 +786,18 @@ public:
             const Vec d = geo.separation(o, j);
             const double dist = Kokkos::sqrt(dot(d, d));
             const Vec c = fc - d * 0.5;
+#if defined(LUNA_LEAN_FLUX)  // experiment: 1 / |d| once (other rounding)
+            const double inv_dist = 1.0 / dist;
+            double facv = dot(c, wL - wR) * inv_dist;
+            const double cc = Kokkos::sqrt(dot(c, c));
+            if (cc > 0.9 * dist) facv *= 0.9 * dist / cc;
+            return (wL + wR) * 0.5 + d * (facv * inv_dist);
+#else
             double facv = dot(c, wL - wR) / dist;
             const double cc = Kokkos::sqrt(dot(c, c));
             if (cc > 0.9 * dist) facv *= 0.9 * dist / cc;
             return (wL + wR) * 0.5 + d * (facv / dist);
+#endif
         }
         // The Riemann solve along the unit normal n; float: in the face's frame, the flux back in the lab frame in double.
         // n: unit normal, wf: face velocity. Used by: operator().
@@ -966,15 +974,22 @@ public:
         const bool by_owner = update_ == Update::by_owner, owned_first = by_owner && !owner_check_;
         const auto own = own_;
         if (by_owner) {
-            // Each cell's owned faces in list order: the sum here, each flux stored once for the neighbour (as rounded).
+            // T lanes per cell: lane l takes the cell's owned faces of rank l, l + T, ... in list order; the lanes' sums
+            // combine in a fixed tree (CUDA shuffles), so the bits do not depend on scheduling. Each flux stored once (as rounded).
+            int lanes = 1;
+#if defined(KOKKOS_ENABLE_CUDA)
+            if constexpr (std::is_same_v<ExecSpace, Kokkos::Cuda>) lanes = owner_lanes_;
+#endif
             Kokkos::parallel_reduce(
-                "hydro::owned_fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_),
-                KOKKOS_LAMBDA(int i, long long& count) {
+                "hydro::owned_fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, static_cast<std::int64_t>(n_) * lanes),
+                KOKKOS_LAMBDA(std::int64_t g, long long& count) {
+                    const int i = static_cast<int>(g / lanes), lane = static_cast<int>(g % lanes);
                     const auto c = flux.cell(i);
                     State sum{};
                     const int end = geo.start(i + 1);
+                    int rank = 0;
                     for (int k = geo.start(i);; ++k) {
-                        while (k < end && !geo.owned_at(k, geo.face_at(k), i)) ++k;
+                        while (k < end && !(geo.owned_at(k, geo.face_at(k), i) && rank++ % lanes == lane)) ++k;
                         if (k == end) break;
                         const int f = geo.face_at(k);
                         int fallbacks_o = 0, fallbacks_j = 0;
@@ -986,7 +1001,13 @@ public:
                             sum[v] += static_cast<double>(stored);
                         }
                     }
-                    for (int v = 0; v < V; ++v) own(i, v) = sum[v];
+#if defined(__CUDA_ARCH__)
+                    const unsigned group = (lanes == 32 ? 0xffffffffu : (1u << lanes) - 1u) << (threadIdx.x % 32 / lanes * lanes);
+                    for (int step = lanes / 2; step > 0; step /= 2)
+                        for (int v = 0; v < V; ++v) sum[v] += __shfl_down_sync(group, sum[v], step, lanes);
+#endif
+                    if (lane == 0)
+                        for (int v = 0; v < V; ++v) own(i, v) = sum[v];
                 },
                 fallbacks_[pass]);
         } else {
@@ -1042,6 +1063,8 @@ private:
     StepRule rule_ = StepRule::arepo;
     // LUNA_OWNER_CHECK=1: by_owner's update adds every face in list order, as per_face (the same bits if the fluxes are).
     bool owner_check_ = std::getenv("LUNA_OWNER_CHECK") != nullptr;
+    // Update::by_owner on CUDA: lanes per cell, 1, 2, 4, 8, 16 or 32 (LUNA_OWNER_LANES); 1 on other spaces.
+    int owner_lanes_ = std::getenv("LUNA_OWNER_LANES") ? std::atoi(std::getenv("LUNA_OWNER_LANES")) : 8;
     Kokkos::View<long long, Memory> fallbacks_[2] = {Kokkos::View<long long, Memory>("hydro_fallbacks"),
                                                       Kokkos::View<long long, Memory>("hydro_fallbacks_second")};
     Kokkos::Timer timer_;
