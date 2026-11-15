@@ -128,8 +128,9 @@ int main(int argc, char** argv) {
     if (precision == "double") return run<hydro::Precision<>>(argc, argv);
     if (precision == "grad32") return run<hydro::Grad32>(argc, argv);
     if (precision == "grad16") return run<hydro::Precision<double, hydro::Half>>(argc, argv);
+    if (precision == "riemann32") return run<hydro::Precision<double, float, double, float>>(argc, argv);
     if (precision == "single") return run<hydro::Precision<double, float, float, float>>(argc, argv);
     if (precision == "mixed") return run<hydro::Precision<float, float, float>>(argc, argv);
     if (precision == "low") return run<hydro::Precision<float, hydro::Half, float, float>>(argc, argv);
-    throw std::invalid_argument("hydro_wave3d: --precision=default|double|grad32|grad16|single|mixed|low");
+    throw std::invalid_argument("hydro_wave3d: --precision=default|double|grad32|grad16|riemann32|single|mixed|low");
 }

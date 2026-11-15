@@ -99,9 +99,15 @@ public:
 
     // The mesh layout the hydro reads fastest: the owner bit, and on a static mesh faces numbered by owner (on a moving mesh
     // that renumbering costs the mesh more than it saves here). Set it before the mesh's first update (faces are numbered there).
+    template <class L>
+    static void store_faces(L& layout, bool on) {
+        if constexpr (requires { layout.stored_faces; }) layout.stored_faces = on;
+    }
     static voronoi::Layout fast_layout(Motion motion, voronoi::Layout layout = {}) {
         layout.owner_bit = true;
         layout.owner_faces = layout.owner_faces || motion == Motion::static_mesh;
+        // R14 (a mesh that can compute face rows where read): stored rows unless LUNA_R14 is set.
+        store_faces(layout, std::getenv("LUNA_R14") == nullptr);
         return layout;
     }
 
@@ -206,6 +212,17 @@ public:
 
     // Snapshot of the mesh arrays and per-face/per-cell accessors (float face rows are rounded once by the mesh, read as double).
     // Used by: Sweep, FaceStep, FaceFlux, apply(), primitives(); rebuilt by refresh().
+    // R14: each face's area and centroid computed from its ring where read, if the mesh offers it (Mesh<3>::face_geometry).
+    struct NoRings {};
+    static auto rings_of(const Mesh& mesh) {
+        if constexpr (requires { mesh.face_geometry(); })
+            return mesh.face_geometry();
+        else
+            return NoRings{};
+    }
+    using Rings = decltype(rings_of(std::declval<const Mesh&>()));
+    static constexpr bool has_rings = !std::is_same_v<Rings, NoRings>;
+
     struct Geometry {
         static constexpr bool float_rows = Mesh::float_rows;
         Kokkos::View<const int*, Memory> owner, neighbour, start, face;
@@ -215,6 +232,8 @@ public:
         typename Mesh::Positions positions;
         exact_predicates::BoxN<D> box;
         bool bit = false;  // list entries carry the owner bit (voronoi::Layout::owner_bit)
+        Rings rings{};
+        bool computed = false;  // R14: the mesh stores no face rows; face_of() computes them from rings
 
         template <class Rows>
         KOKKOS_INLINE_FUNCTION Vec row(const Rows& v, int i) const {
@@ -242,17 +261,34 @@ public:
             else
                 return neighbour(f);
         }
+        // Face f's area vector and centroid (relative to the owner); computed: from its ring, the same bits.
+        KOKKOS_INLINE_FUNCTION void face_of(int f, Vec& a, Vec& c) const {
+            if constexpr (has_rings) {
+                if (computed) {
+                    tet_mesh::Vec3 A, C;
+                    rings.face(f, A, C);
+                    a = Vec{A.x, A.y, A.z};
+                    c = Vec{C.x, C.y, C.z};
+                    return;
+                }
+            }
+            if constexpr (float_rows) {
+                a = make_vec<D>([&](int k) { return static_cast<double>(rows(f, k)); });
+                c = make_vec<D>([&](int k) { return static_cast<double>(rows(f, 3 + k)); });
+            } else {
+                a = row(area, f);
+                c = row(face_centroid, f);
+            }
+        }
         KOKKOS_INLINE_FUNCTION Vec area_of(int f) const {
-            if constexpr (float_rows)
-                return make_vec<D>([&](int a) { return static_cast<double>(rows(f, a)); });
-            else
-                return row(area, f);
+            Vec a, c;
+            face_of(f, a, c);
+            return a;
         }
         KOKKOS_INLINE_FUNCTION Vec face_centroid_of(int f) const {
-            if constexpr (float_rows)
-                return make_vec<D>([&](int a) { return static_cast<double>(rows(f, 3 + a)); });
-            else
-                return row(face_centroid, f);
+            Vec a, c;
+            face_of(f, a, c);
+            return c;
         }
         // Both loads issued at once (no dependent second load).
         KOKKOS_INLINE_FUNCTION int other(int f, int i) const {
@@ -267,9 +303,11 @@ public:
             return face(k) >= 0 ? neighbour_of(f) : owner_of(f);
         }
         // Face centroid of face f relative to the centroid of cell i (a side of f).
-        KOKKOS_INLINE_FUNCTION Vec face_offset(int f, int i) const {
+        KOKKOS_INLINE_FUNCTION Vec face_offset(int f, int i) const { return face_offset(face_centroid_of(f), f, i); }
+        // c: face f's centroid (face_of).
+        KOKKOS_INLINE_FUNCTION Vec face_offset(const Vec& c, int f, int i) const {
             const int o = owner_of(f);
-            const Vec relative = o == i ? face_centroid_of(f) : face_centroid_of(f) + separation(i, o);
+            const Vec relative = o == i ? c : c + separation(i, o);
             return relative - row(centroid, i);
         }
     };
@@ -298,10 +336,16 @@ public:
     void refresh() {
         const Mesh& mesh = *mesh_;
         faces_ = mesh.faces();
+        bool computed = false;
+        if constexpr (has_rings && !Mesh::float_rows) computed = !mesh.layout().stored_faces;
         geometry_ = {mesh.owner(),     mesh.neighbour(), mesh.cell_face_start(), mesh.cell_face(),
-                     mesh.area(),      mesh.face_centroid(), mesh.centroid(),    mesh.face_rows(),
-                     mesh.volume(),    mesh.positions(),  mesh.sides()};
+                     computed ? typename Mesh::Rows{} : mesh.area(), computed ? typename Mesh::Rows{} : mesh.face_centroid(),
+                     mesh.centroid(),  mesh.face_rows(), mesh.volume(),    mesh.positions(),  mesh.sides()};
         if constexpr (D == 3) geometry_.bit = mesh.layout().owner_bit;
+        if constexpr (has_rings) {
+            geometry_.computed = computed;
+            if (computed) geometry_.rings = mesh.face_geometry();
+        }
     }
 
     // Sizes of the per-cell rows, each part on a 32-byte boundary. Used by: borrow_scratch(), the constructor.
@@ -736,11 +780,12 @@ public:
         }
         KOKKOS_INLINE_FUNCTION State side(int i, Vec r, int& fallbacks) const { return side_of(cell(i), r, fallbacks); }
         // AREPO-ng's face velocity: the mean point velocity plus a correction along n, |c| limited to 0.9 |d|. Used by: operator().
-        KOKKOS_INLINE_FUNCTION Vec face_velocity(int f, int o, int j) const {
+        // fc: the face's centroid (Geometry::face_of).
+        KOKKOS_INLINE_FUNCTION Vec face_velocity(const Vec& fc, int o, int j) const {
             const Vec wL = geo.row(w, o), wR = geo.row(w, j);
             const Vec d = geo.separation(o, j);
             const double dist = Kokkos::sqrt(dot(d, d));
-            const Vec c = geo.face_centroid_of(f) - d * 0.5;
+            const Vec c = fc - d * 0.5;
             double facv = dot(c, wL - wR) / dist;
             const double cc = Kokkos::sqrt(dot(c, c));
             if (cc > 0.9 * dist) facv *= 0.9 * dist / cc;
@@ -774,19 +819,20 @@ public:
         // owner_side(r, fallbacks): the owner's face state. Used by: operator(), owned().
         template <class OwnerSide>
         KOKKOS_INLINE_FUNCTION State face(int f, int o, int j, const OwnerSide& owner_side, int& fallbacks_o, int& fallbacks_j) const {
-            const Vec a = geo.area_of(f);
+            Vec a, fc;
+            geo.face_of(f, a, fc);
             const double magnitude = Kokkos::sqrt(dot(a, a));
             if (magnitude == 0) return State{};  // cospherical or cocircular corners (an exact lattice): no normal, no flux
             Vec wf{};
-            if constexpr (Moving) wf = face_velocity(f, o, j);
+            if constexpr (Moving) wf = face_velocity(fc, o, j);
             State L, R;
             if constexpr (Order == 0) {
                 L = owner_side(Vec{}, fallbacks_o);
                 R = side(j, Vec{}, fallbacks_j);
             } else {
                 const Vec shift = wf * (0.5 * dt);
-                L = owner_side(geo.face_offset(f, o) + shift, fallbacks_o);
-                R = side(j, geo.face_offset(f, j) + shift, fallbacks_j);
+                L = owner_side(geo.face_offset(fc, f, o) + shift, fallbacks_o);
+                R = side(j, geo.face_offset(fc, f, j) + shift, fallbacks_j);
             }
             State F = solve(L, R, a * (1.0 / magnitude), wf, gas);
             for (int v = 0; v < V; ++v) F[v] *= magnitude;
@@ -828,12 +874,13 @@ public:
         }
         template <class OwnerSide>
         KOKKOS_INLINE_FUNCTION State face(int f, int o, int j, const OwnerSide& owner_side, int& fallbacks_o, int& fallbacks_j) const {
-            const Vec a = this->geo.area_of(f);
+            Vec a, fc;
+            this->geo.face_of(f, a, fc);
             const double magnitude = Kokkos::sqrt(dot(a, a));
             if (magnitude == 0) return State{};
-            const Vec wf = this->face_velocity(f, o, j);
-            const State L = owner_side(this->geo.face_offset(f, o), fallbacks_o);
-            const State R = pass_side(j, this->geo.face_offset(f, j), fallbacks_j);
+            const Vec wf = this->face_velocity(fc, o, j);
+            const State L = owner_side(this->geo.face_offset(fc, f, o), fallbacks_o);
+            const State R = pass_side(j, this->geo.face_offset(fc, f, j), fallbacks_j);
             State F = this->solve(L, R, a * (1.0 / magnitude), wf, this->gas);
             for (int v = 0; v < V; ++v) F[v] *= magnitude;
             return F;
