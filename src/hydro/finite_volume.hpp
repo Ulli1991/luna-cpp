@@ -311,11 +311,16 @@ public:
     // Primitive, gradient (and FP16 exponent), then face flux rows in the mesh's scratch, 32-byte aligned; a moving step keeps the cell rows in held_.
     // Used by: time_step(), step(), step_moving(); must precede primitives().
     void borrow_scratch() {
-        const std::size_t flux_bytes =
-            update_ == Update::per_face ? sizeof(FluxStore) * V * static_cast<std::size_t>(faces_) : 0;
+        // After the flux rows: |area| per face, which the sweep reads; kept while the scratch stays where it is.
+        const bool per_face = update_ == Update::per_face;
+        const std::size_t row_bytes = per_face ? sectors(sizeof(FluxStore) * V * static_cast<std::size_t>(faces_)) : 0;
+        const std::size_t flux_bytes = row_bytes + (per_face && cache_magnitudes_ ? sizeof(double) * static_cast<std::size_t>(faces_) : 0);
         const bool held = both_meshes_;
         char* base = held ? held_.data() : mesh_->scratch(cell_row_bytes() + flux_bytes).data();
         char* fluxes = held ? mesh_->scratch(flux_bytes).data() : base + cell_row_bytes();
+        double* magnitudes = reinterpret_cast<double*>(fluxes + row_bytes);
+        if (magnitudes != magnitudes_.data() || faces_ != static_cast<int>(magnitudes_.extent(0))) magnitudes_valid_ = false;
+        if (per_face && cache_magnitudes_) magnitudes_ = Magnitudes(magnitudes, faces_);
         prims_ = Prims(reinterpret_cast<double*>(base), n_);
         base += prim_bytes();
         if (order_ == 1) gradients_ = Gradients(reinterpret_cast<GStore*>(base), n_);
@@ -588,7 +593,7 @@ public:
         if constexpr (Moving || Order == 1)
             Kokkos::parallel_for("hydro::sweep", cells,
                                  Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
-                                                           magnitudes_valid_ ? magnitudes_ : Kokkos::View<double*, Memory>()});
+                                                           magnitudes_valid_ ? magnitudes_ : Magnitudes()});
         double by_cell = 0, by_face = 0;
         if constexpr (D == 2) {
             if (rule_ == StepRule::luna) {
@@ -609,7 +614,6 @@ public:
         const exact_predicates::BoxN<D> box = mesh_->sides();
         const bool on_grid = both_meshes_;
         magnitudes_valid_ = false;
-        if (!drifted_)
         Kokkos::parallel_for(
             "hydro::drift", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 for (int a = 0; a < D; ++a) {
@@ -623,7 +627,6 @@ public:
                     x(i, a) = moved - box.side[a] * Kokkos::floor(moved / box.side[a]);
                 }
             });
-        drifted_ = false;
         phase_end(timings, &Timings::drift);
         geometry_ = {};  // no reference to what the update may reallocate
         const voronoi::Report report = mesh_->update(x_);
@@ -882,15 +885,8 @@ public:
         const Gas gas = gas_;
         // The magnitudes the next sweep reads: from a moving step's second pass, or once on a static mesh.
         const bool keep = cache_magnitudes_ && (pass == 1 || (motion_ == Motion::static_mesh && !magnitudes_valid_));
-        if (keep && static_cast<int>(magnitudes_.extent(0)) < faces_)
-            Kokkos::realloc(Kokkos::WithoutInitializing, magnitudes_, faces_ + faces_ / 32);
         const auto mag = magnitudes_;
-        // A moving step's first pass: its update also drifts the points (move() then skips its drift).
-        const bool drift = fuse_drift_ && both_meshes_ && pass == 0 && Order == 1;
-        const auto x = x_;
-        const auto w = w_;
-        const exact_predicates::BoxN<D> box = mesh_->sides();
-        const double step = 2 * dt;
+
         Kokkos::parallel_reduce(
             "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
             KOKKOS_LAMBDA(int f, long long& count) {
@@ -922,15 +918,8 @@ public:
                     prim(i, V) = sound_speed(W, gas);
                     prim(i, V + 1) = radius(geo.volume(i));
                 }
-                if (drift)  // as move(): whole grid steps
-                    for (int a = 0; a < D; ++a) {
-                        const long long k = static_cast<long long>(Kokkos::round(x(i, a) * box.per_step)) + static_cast<long long>(Kokkos::round(w(i, a) * step * box.per_step));
-                        const long long p = box.period[a];
-                        x(i, a) = static_cast<double>(((k % p) + p) % p) * box.step;
-                    }
             });
         if (keep) magnitudes_valid_ = true;
-        drifted_ = drift;
         prims_ready_ = next_prims;
         phase_end(timings, &Timings::update);
     }
@@ -948,10 +937,11 @@ private:
     bool swept_ = false;
     mutable bool prims_ready_ = false;  // the last update wrote prims_ for the current Q and mesh
     StepRule rule_ = StepRule::arepo;
-    // Face reads once (LUNA_NO_MAGNITUDES, LUNA_NO_FUSED_DRIFT turn them off for measurements).
-    Kokkos::View<double*, Memory> magnitudes_;
-    bool magnitudes_valid_ = false, drifted_ = false;
-    bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr, fuse_drift_ = std::getenv("LUNA_NO_FUSED_DRIFT") == nullptr;
+    // |area| per face kept for the sweep (LUNA_NO_MAGNITUDES turns it off, for measurements).
+    using Magnitudes = Kokkos::View<double*, Memory, Unmanaged>;
+    Magnitudes magnitudes_;
+    bool magnitudes_valid_ = false;
+    bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr;
     Kokkos::View<long long, Memory> fallbacks_[2] = {Kokkos::View<long long, Memory>("hydro_fallbacks"),
                                                       Kokkos::View<long long, Memory>("hydro_fallbacks_second")};
     Kokkos::Timer timer_;
