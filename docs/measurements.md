@@ -8,7 +8,7 @@ The records below keep the names of their time: "two passes" (`--integrator=two-
 
 ### Sedov speed table
 
-README table since 2026-11-14: ours from job 32319468 (128³, two rounds) and 32319469 (256³), 1410 MHz, branch `hydro-speed`; LUNA from job 32271240 (Pallas kernel, minmod, HLLC, 80 steps, snapshots and diagnostics off; details in "Hydro step profile and speed levers"). The LUNA numbers below, 0.47 to 0.76 FP64 at 128³, match its XLA kernel (0.48 in job 32271240), LUNA's default, which `hydro_a100.sh` runs since it passes no `hydro_kernel`; the job-to-job spread up to 0.76 is not explained. LUNA's Pallas kernel is the fast path: 0.82 FP64 and 1.46 FP32 at 128³, 1.04 and 2.35 at 256³. Older paragraphs follow.
+README table since 2026-11-15: jobs 32371742 (128³, two rounds) and 32371743 (256³), 1410 MHz, branch `face-once-read` (the cheaper flux and the kept face magnitudes); memory from the same jobs. Before, since 2026-11-14: ours from job 32319468 (128³, two rounds) and 32319469 (256³), 1410 MHz, branch `hydro-speed`; LUNA from job 32271240 (Pallas kernel, minmod, HLLC, 80 steps, snapshots and diagnostics off; details in "Hydro step profile and speed levers"). The LUNA numbers below, 0.47 to 0.76 FP64 at 128³, match its XLA kernel (0.48 in job 32271240), LUNA's default, which `hydro_a100.sh` runs since it passes no `hydro_kernel`; the job-to-job spread up to 0.76 is not explained. LUNA's Pallas kernel is the fast path: 0.82 FP64 and 1.46 FP32 at 128³, 1.04 and 2.35 at 256³. Older paragraphs follow.
 
 Sedov blast of 1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr; jittered points in Morton order; 40 steps. Job 31954615, ravg1020, 1305 MHz, bef77ed: medians of three rounds at 2.1M cells, one round at 16.8M, `--memory`. LUNA in the same job, 200 steps, median of the 20 perf lines. The same code varies by about 10 % between GPU jobs. LUNA FP64 at 2.1M cells moved between jobs: 0.47 here, 0.67 in job 31953960, 0.76 in job 31953468; at 16.8M 0.87, 0.90, 0.95; FP32 0.68, 1.01, 1.37 and 1.74, 1.91, 2.13.
 
@@ -163,6 +163,21 @@ Memory unchanged (2236 B/cell moving, 2301 static, `grad32`). ncu (jobs 32368970
 A float Riemann solve with double fluxes (`--precision=riemann32`, kept as an option): moving fluxes 6.45 -> 5.77 ms at 128³ (job 32367870), Sedov t_end 10.12 s and L1 0.06479 (job 32367863), the vortex and the 1e-3 wave unchanged, but the 1e-6 sound wave is lost: L1/amp 1.25 moving and 1.63 static against 3.7e-3 (job 32367861), as `single`.
 
 **Where this leaves the target.** The whole moving step is 27.0 ms at 128³ (12.9 ns per cell, 0.078 G cell updates/s): mesh and cells 9.8 ms (4.7 ns), hydro 17.2 ms (8.2 ns, 6632 B/cell at 50 % of peak). 3.3 to 5 ns per cell is 2.6 to 3.9 times away; the mesh alone already takes 4.7 ns. None of the three levers changes the data flow enough: the owner pass trades 290 B/cell of update reads for slower face evaluations, R14 trades 394 B/cell of memory for ring walks that read more than the rows, and the flux arithmetic is not what the passes wait on. The bytes floor of "Hydro step profile" (3900 B/cell with today's data flow) is unchanged.
+
+### Face reads once per step (2026-11-15)
+
+Can the step read each face's geometry fewer times, one thread per face kept? Branch `face-once-read`, against main (the cheaper flux, f86f704) in one A100 job each (gpu1, 1410 MHz), Sedov jittered, HLLC, 40 steps; script `scripts/hydro_once_a100.sh`. Where the reads are (ncu, one moving step at 128³, `grad32`): the sweep reads each face's area and centroid from both sides (1007 B/cell, latency-bound at 24 % of DRAM peak); each flux pass reads its mesh's rows once, contiguously; each update gathers every face's stored flux twice, 40 B rows that cost two 32 B sectors each, about 16 x 64 + list + Q = 1170 B/cell, which is what it moves (1150 and 1200). The two flux passes read different meshes (t^n and t^n+1); the mesh of t^n+1 is read by pass 2, then by the next step's sweep, face_step and pass 1, with a global barrier (new primitives, gradients, dt) between each. So a face's geometry can be carried only across those barriers, as a stored per-face value.
+
+| lever (commit) | 128³ moving `grad32` | static `grad32` | bits | job |
+|---|---|---|---|---|
+| \|area\| of each face kept by the last flux pass on the mesh (pass 2 on a moving mesh, the first pass on a static one) in the flux scratch, so the sweep reads 8 B instead of the 24 B area row per list entry | sweep 6.36 -> 5.75 ms, pass 2 +0.19 ms; step 0.0780 -> 0.0799 G cell updates/s | sweep 5.70 -> 5.01; 0.199 -> 0.213 | equal to main | 32371742, 32371745 |
+| the drift folded into pass 1's update (one kernel fewer) | update +0.13 ms, drift -0.16: no change | | equal | 32371268 |
+
+ncu (job 32371744): the sweep 5.60 -> 4.99 ms and 1007 -> 764 B/cell, pass 2 3.11 -> 3.31 ms (+80 B/cell, the magnitudes written); the ten kernels 17.44 -> 17.23 ms and 6430 -> 6358 B/cell. Memory +65 B/cell (8 B a face in the scratch, which sets the peak): 2236 -> 2300 moving, 2301 -> 2366 static. `double` 128³: moving 0.0713 -> 0.0732, static 0.173 -> 0.184. 256³ (job 32371743): moving `grad32` 0.0852 -> 0.0865, static 0.204 -> 0.219; `double` moving 0.0771 -> 0.0783, static 0.178 -> 0.189.
+
+Bits: equal to main for all eight Sedov cases, the 3D vortex and both sound waves (`double`, `grad32`, `grad16`, moving and static, files equal byte for byte) and KH 2D 128 (hashes equal); the 1D code is not touched. So Sedov L1, the vortex, the sound waves, KH and the ladder are main's. Moving Sedov 128³ to t_end: GPU 10.00 -> 9.77 s, 349 steps both, field L1 rho 0.06479 both (job 32371746).
+
+Not tried, and why: a compact per-face struct shared by both halves (the halves read different meshes, and float geometry is the `mixed` preset, which loses the 1e-6 sound wave); fusing the update with anything (each neighbour kernel needs all faces' fluxes first; the update is at its gather floor for 40 B rows; storing fluxes by owner was lever 1 above, refuted).
 
 ### 2D
 

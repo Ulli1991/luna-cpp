@@ -7,6 +7,7 @@
 #include <Kokkos_Core.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -310,11 +311,16 @@ public:
     // Primitive, gradient (and FP16 exponent), then face flux rows in the mesh's scratch, 32-byte aligned; a moving step keeps the cell rows in held_.
     // Used by: time_step(), step(), step_moving(); must precede primitives().
     void borrow_scratch() {
-        const std::size_t flux_bytes =
-            update_ == Update::per_face ? sizeof(FluxStore) * V * static_cast<std::size_t>(faces_) : 0;
+        // After the flux rows: |area| per face, which the sweep reads; kept while the scratch stays where it is.
+        const bool per_face = update_ == Update::per_face;
+        const std::size_t row_bytes = per_face ? sectors(sizeof(FluxStore) * V * static_cast<std::size_t>(faces_)) : 0;
+        const std::size_t flux_bytes = row_bytes + (per_face && cache_magnitudes_ ? sizeof(double) * static_cast<std::size_t>(faces_) : 0);
         const bool held = both_meshes_;
         char* base = held ? held_.data() : mesh_->scratch(cell_row_bytes() + flux_bytes).data();
         char* fluxes = held ? mesh_->scratch(flux_bytes).data() : base + cell_row_bytes();
+        double* magnitudes = reinterpret_cast<double*>(fluxes + row_bytes);
+        if (magnitudes != magnitudes_.data() || faces_ != static_cast<int>(magnitudes_.extent(0))) magnitudes_valid_ = false;
+        if (per_face && cache_magnitudes_) magnitudes_ = Magnitudes(magnitudes, faces_);
         prims_ = Prims(reinterpret_cast<double*>(base), n_);
         base += prim_bytes();
         if (order_ == 1) gradients_ = Gradients(reinterpret_cast<GStore*>(base), n_);
@@ -352,6 +358,14 @@ public:
         Geometry geo;
         Gas gas;
         Limiter limiter;
+        Kokkos::View<const double*, Memory> magnitudes;  // |area| per face from the last flux pass on this mesh, or empty
+
+        // |area| of face f: cached (the same bits) or from the area row.
+        KOKKOS_INLINE_FUNCTION double magnitude_of(int f) const {
+            if (magnitudes.data()) return magnitudes(f);
+            const Vec a = geo.area_of(f);
+            return Kokkos::sqrt(dot(a, a));
+        }
 
         KOKKOS_INLINE_FUNCTION void operator()(int i) const {
             constexpr bool exact = std::is_same_v<G, double>;
@@ -374,8 +388,7 @@ public:
                 const int f = geo.face_at(k), j = geo.other_at(k, f, i);
                 const State Wj = primitive_row(prim, j);
                 const Vec d = geo.separation(i, j);
-                const Vec a = geo.area_of(f);
-                const double magnitude = Kokkos::sqrt(dot(a, a));
+                const double magnitude = magnitude_of(f);
                 surface += magnitude;
                 smallest_face = Kokkos::fmin(smallest_face, magnitude);
                 if constexpr (Moving) max_angle = Kokkos::fmax(max_angle, face_angle(magnitude) / (0.5 * Kokkos::sqrt(dot(d, d))));
@@ -419,10 +432,7 @@ public:
                 for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
                     if (limiter == Limiter::none) break;
                     const int f = geo.face_at(k);
-                    if (any_tiny) {
-                        const Vec a = geo.area_of(f);
-                        if (Kokkos::sqrt(dot(a, a)) < tiny) continue;
-                    }
+                    if (any_tiny && magnitude_of(f) < tiny) continue;
                     const Vec offset = geo.face_offset(f, i);
                     const hydro::Vec<D, G> rg = cast<G>(offset);
                     for (int v = 0; v < V; ++v) {
@@ -453,8 +463,7 @@ public:
             }
             for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
                 const int f = geo.face_at(k), j = geo.other_at(k, f, i);
-                const Vec a = geo.area_of(f);
-                if (Kokkos::sqrt(dot(a, a)) < tiny) continue;
+                if (magnitude_of(f) < tiny) continue;
                 const State Wj = primitive_row(prim, j);
                 for (int v = 0; v < V; ++v) {
                     const G value = exact ? static_cast<G>(Wj[v]) : static_cast<G>(Wj[v] - Wi[v]);
@@ -583,7 +592,8 @@ public:
         const Kokkos::RangePolicy<ExecSpace> cells(exec_, 0, n_);
         if constexpr (Moving || Order == 1)
             Kokkos::parallel_for("hydro::sweep", cells,
-                                 Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_});
+                                 Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
+                                                           magnitudes_valid_ ? magnitudes_ : Magnitudes()});
         double by_cell = 0, by_face = 0;
         if constexpr (D == 2) {
             if (rule_ == StepRule::luna) {
@@ -603,6 +613,7 @@ public:
         const auto w = w_;
         const exact_predicates::BoxN<D> box = mesh_->sides();
         const bool on_grid = both_meshes_;
+        magnitudes_valid_ = false;
         Kokkos::parallel_for(
             "hydro::drift", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 for (int a = 0; a < D; ++a) {
@@ -872,6 +883,9 @@ public:
         const bool next_prims = pass == 1;
         const auto prim = prims_;
         const Gas gas = gas_;
+        // The magnitudes the next sweep reads: from a moving step's second pass, or once on a static mesh.
+        const bool keep = cache_magnitudes_ && (pass == 1 || (motion_ == Motion::static_mesh && !magnitudes_valid_));
+        const auto mag = magnitudes_;
         Kokkos::parallel_reduce(
             "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
             KOKKOS_LAMBDA(int f, long long& count) {
@@ -879,6 +893,10 @@ public:
                 const State value = flux(f, fallbacks, fallbacks);
                 count += fallbacks;
                 for (int v = 0; v < V; ++v) F(f, v) = static_cast<FluxStore>(value[v]);
+                if (keep) {
+                    const Vec a = geo.area_of(f);
+                    mag(f) = Kokkos::sqrt(dot(a, a));
+                }
             },
             fallbacks_[pass]);
         phase_end(timings, &Timings::fluxes);
@@ -900,6 +918,7 @@ public:
                     prim(i, V + 1) = radius(geo.volume(i));
                 }
             });
+        if (keep) magnitudes_valid_ = true;
         prims_ready_ = next_prims;
         phase_end(timings, &Timings::update);
     }
@@ -917,6 +936,11 @@ private:
     bool swept_ = false;
     mutable bool prims_ready_ = false;  // the last update wrote prims_ for the current Q and mesh
     StepRule rule_ = StepRule::arepo;
+    // |area| per face kept for the sweep (LUNA_NO_MAGNITUDES turns it off, for measurements).
+    using Magnitudes = Kokkos::View<double*, Memory, Unmanaged>;
+    Magnitudes magnitudes_;
+    bool magnitudes_valid_ = false;
+    bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr;
     Kokkos::View<long long, Memory> fallbacks_[2] = {Kokkos::View<long long, Memory>("hydro_fallbacks"),
                                                       Kokkos::View<long long, Memory>("hydro_fallbacks_second")};
     Kokkos::Timer timer_;

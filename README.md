@@ -232,17 +232,17 @@ Measured on one A100 at 1410 MHz, Sedov 3D, 40 steps, LUNA (Sedov 3D, minmod, HL
 
 | G cell updates/s | 128³ | 256³ |
 |---|---|---|
-| static mesh, HLLC | 0.197 | 0.194 |
-| moving mesh, whole step with the mesh update | 0.078 | 0.083 |
-| moving mesh, the hydro part | 0.122 | 0.121 |
+| static mesh, HLLC | 0.213 | 0.219 |
+| moving mesh, whole step with the mesh update | 0.080 | 0.087 |
+| moving mesh, the hydro part | 0.127 | 0.129 |
 | LUNA FP64 | 0.82 | 1.04 |
 | LUNA FP32 | 1.46 | 2.35 |
-| GPU memory, ours, moving | 2236 B/cell (4.7 GB) | 2236 B/cell (37.5 GB) |
-| GPU memory, ours, static | 2301 B/cell (4.8 GB) | 2301 B/cell (38.6 GB) |
+| GPU memory, ours, moving | 2300 B/cell (4.8 GB) | 2301 B/cell (38.6 GB) |
+| GPU memory, ours, static | 2366 B/cell (5.0 GB) | 2366 B/cell (39.7 GB) |
 | GPU memory, LUNA FP64 | 113 B/cell (0.24 GB) | 80 B/cell (1.34 GB) |
 | GPU memory, LUNA FP32 | | 40 B/cell (0.68 GB) |
 
-Per face the gap is smaller: a LUNA cell has 3 faces of its own, ours 7.95, so our static hydro runs 1.57 G face fluxes/s at 128³ against LUNA's 2.46 G in FP64, 64 % of its rate. LUNA's default XLA kernel runs 0.48 FP64 at 128³, the 0.47 earlier versions of this table quoted. Moving Sedov 128³ takes 9.97 GPU seconds to 1e4 yr (349 steps).
+Per face the gap is smaller: a LUNA cell has 3 faces of its own, ours 7.95, so our static hydro runs 1.69 G face fluxes/s at 128³ against LUNA's 2.46 G in FP64, 69 % of its rate. LUNA's default XLA kernel runs 0.48 FP64 at 128³, the 0.47 earlier versions of this table quoted. Moving Sedov 128³ takes 9.77 GPU seconds to 1e4 yr (349 steps).
 
 Memory is in bytes per cell and in GB of 10⁹ bytes throughout. Ours is the peak of all the arrays the code allocates during a step; LUNA's is what JAX reports in use at a progress line (LUNA prints it in GiB, converted here), so it is not a peak and the two measure slightly different things.
 
@@ -286,7 +286,7 @@ CI (`.github/workflows/checks.yml`) runs clang-tidy (ordinary build) and the CPU
 
 ## Limitations
 
-- **Speed.** The moving hydro takes 8.2 ns per cell at 128³, 2.6 times its target of 3.1 ns (faster than the mesh, and LUNA's FP64 rate per face). Today's data flow, with face rows and fluxes stored and read back, has a floor of about 3900 B/cell, 3.1 ns at 80 % of the A100's bandwidth, so the target needs fewer bytes, not only better kernels; the gradient sweep is latency-bound at 22 % of warps active.
+- **Speed.** The moving hydro takes 7.9 ns per cell at 128³, 2.5 times its target of 3.1 ns (faster than the mesh, and LUNA's FP64 rate per face). Today's data flow, with face rows and fluxes stored and read back, has a floor of about 3900 B/cell, 3.1 ns at 80 % of the A100's bandwidth, so the target needs fewer bytes, not only better kernels; the gradient sweep is latency-bound at 22 % of warps active.
 - **1D moving mesh:** Woodward-Colella stalls near N = 2¹⁵; nothing removes points where gas leaves through an open wall.
 - **2D and 3D moving mesh on smooth flow:** on a jittered mesh, which the regularisation relaxes, the density carries an error that does not fall with N: about 3e-8 in 2D (jitter 0.4) and 1.5e-6 in 3D (jitter 0.25), the same with or without the grid fix, so not rounding; its cause is open. It is invisible at the usual amplitudes and decides the error of a 1e-3 sound wave in 3D from nx = 96. On a lattice the moving mesh equals static.
 - **Boxes:** periodic only in 3D and 2D; only 1D has walls.
