@@ -401,6 +401,7 @@ void run_precision(const Options& o, const Points& points) {
     if constexpr (std::is_same_v<R, hydro::HLLC>) {
         if (p == "grad32") return run<hydro::Grad32, R>(o, points);
         if (p == "grad16") return run<Precision<double, Half>, R>(o, points);
+        if (p == "riemann32") return run<Precision<double, float, double, float>, R>(o, points);
         if (p == "single") return run<Precision<double, float, float, float>, R>(o, points);
         if (p == "mixed") return run<Precision<float, float, float>, R>(o, points);
         if (p == "low") return run<Precision<float, Half, float, float>, R>(o, points);
@@ -418,7 +419,7 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);
     if (args.size() < 2) {
         std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|none]"
-                     " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|single|mixed|low]"
+                     " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|riemann32|single|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]"
                      " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces]\n";

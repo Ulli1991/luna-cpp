@@ -168,7 +168,7 @@ KOKKOS_INLINE_FUNCTION Side<D, T> side(const StateT<D, T>& W, Vec<D, T> n, Vec<D
     s.vn = dot(s.v, n);
     const T c2 = T(gas.gamma) * W[P] / W[0];
     s.c = c2 > 0 ? Kokkos::sqrt(c2) : T(0);
-    s.E = W[P] / (T(gas.gamma) - T(1)) + W[0] * (T(0.5) * dot(s.v, s.v));
+    s.E = W[P] * (T(1) / (T(gas.gamma) - T(1))) + W[0] * (T(0.5) * dot(s.v, s.v));
     const T m = W[0] * s.vn;
     s.F = make_state<D, T>([&](int k) { return k == 0 ? m : k == P ? (s.E + W[P]) * s.vn : m * s.v[k - 1] + W[P] * n[k - 1]; });
     s.U = make_state<D, T>([&](int k) { return k == 0 ? W[0] : k == P ? s.E : W[0] * s.v[k - 1]; });
@@ -222,7 +222,9 @@ struct HLLC {
         constexpr int P = D + 1;
         // Wave speeds and the contact speed from the normal velocities and sound speeds alone; the flux is then built for one side only.
         const T vnL = dot(velocity(L) - w, n), vnR = dot(velocity(R) - w, n);
-        const T c2L = T(gas.gamma) * L[P] / L[0], c2R = T(gas.gamma) * R[P] / R[0];
+        // 1 / rho once per side, for c^2 and E* (products, not divisions: rounding differs from a division).
+        const T inv_rhoL = T(1) / L[0], inv_rhoR = T(1) / R[0];
+        const T c2L = T(gas.gamma) * L[P] * inv_rhoL, c2R = T(gas.gamma) * R[P] * inv_rhoR;
         const bool ok = c2L >= 0 && c2R >= 0;
         const T cL = c2L > 0 ? Kokkos::sqrt(c2L) : T(0), cR = c2R > 0 ? Kokkos::sqrt(c2R) : T(0);
         const T SL = Kokkos::fmin(vnL - cL, vnR - cR);
@@ -238,7 +240,7 @@ struct HLLC {
         // The star state: rho*, rho* (v_t + S_M n), rho* E*.
         const T S = left ? SL : SR, denom = left ? denomL : denomR;
         const T rho_star = denom / nonzero(S - SM);
-        const T E_star = s.E * (T(1) / W[0]) + (SM - s.vn) * (SM + W[P] * (T(1) / nonzero(denom)));
+        const T E_star = s.E * (left ? inv_rhoL : inv_rhoR) + (SM - s.vn) * (SM + W[P] * (T(1) / nonzero(denom)));
         const Vec<D, T> v_star = s.v + n * (SM - s.vn);
         const StateT<D, T> U_star = make_state<D, T>(
             [&](int k) { return k == 0 ? rho_star : k == P ? rho_star * E_star : rho_star * v_star[k - 1]; });

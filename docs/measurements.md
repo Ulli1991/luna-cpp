@@ -116,6 +116,54 @@ The README's 0.47 to 0.76 FP64 at 128³ were the XLA kernel (`hydro_a100.sh` pas
 
 Every option keeps Sedov, the vortex and the 1e-3 sound wave to the digits printed, so on those GPU time to the same error is GPU time: `single` is 10 % (moving) and 15 % (static) ahead of `grad32`. But a float Riemann solve or float stored fluxes lose a 1e-6 wave: with `single` and `low` the error exceeds the wave itself, `mixed` doubles it moving and is 6.5 times worse static. `grad16` matches double on every test, is 2 to 4 % faster than `grad32` and saves 28 B/cell; it does not make a larger run fit: 384³ (56.6M cells) needs 707 B/cell on 40 GB, three times less than any option, so 256³ stays the largest power-of-two size. 2D has no presets; KH 2D runs double.
 
+### Faces once by the owner, R14 and cheaper fluxes (2026-11-15)
+
+Three levers for the moving step, each against main e350dd7 in one A100 job (gpu1, 1410 MHz), Sedov jittered, HLLC, 40 steps, `grad32` unless stated; branch `hydro-once`, script `scripts/hydro_once_a100.sh` (modes speed, bits, ncu, tend, waves, kh; RUNS as in `hydro_bytes_a100.sh` of branch `hydro-bytes`). The variants are the branch's WIP commits; the branch head keeps lever 3, the script and the `riemann32` preset. Times in ms per step at 128³.
+
+**1. Each face once by its owner** (`--update=owner`, commits 952771e to b9f402e). Each cell computes the faces it owns, adds them and stores each flux once; a second kernel adds the stored fluxes it does not own (sums: owned faces first, then the rest, in list order; T lanes per cell take owned faces of rank l, l + T, ... and combine in a fixed shuffle tree). The update gains as estimated, the flux pass loses three to eight times that:
+
+| 128³, `grad32` | fluxes (both passes) | update | hydro | job |
+|---|---|---|---|---|
+| main, moving | 6.49 | 4.31 | 17.2 (0.122 G cell updates/s) | 32368509 |
+| owner, 1 lane per cell, moving | 14.36 | 3.14 | 23.9 | 32368509 |
+| owner, 4 lanes, moving | 13.87 | 3.14 | 23.4 (0.090 G) | 32368509 |
+| owner, 8 and 16 lanes (as a reduce), moving | 21.1, 27.6 | 3.14 | 30.7, 37.2 | 32367499 |
+| main, static | 2.72 | 1.91 | 10.7 | 32368509 |
+| owner, 4 lanes, static | 5.69 | 1.44 | 13.2 | 32368509 |
+
+`double` and 256³ (jobs 32367870, 32367871, 32367873, the reduce version, 4 lanes): the same picture, 256³ moving fluxes 56.1 -> 144 (`grad32`) and 64.3 -> 172 (`double`), update 33.0 -> 23.4. Memory +41 B/cell (the owned sums). ncu (jobs 32367151, 32367874): the update reads 883 instead of 1172 B/cell (1.50 instead of 2.16 ms a pass); the owner pass with one lane per cell moves 4914 B/cell (scattered 40 B stores of each flux in face order, neighbours gathered in cell order) at 127 registers and 19 of 32 threads active per instruction; with 4 lanes 2441 B/cell in pass 1 and, at 158 registers and 12.5 % warps active, 9.75 ms in pass 2. Face evaluations grouped by cell wait on each other and diverge; one thread per face (main) hides that latency. GPU time to t_end, moving Sedov 128³: 10.08 s main, 11.98 s owner (4 lanes), 12.16 s (1 lane), job 32368508.
+
+Bits: with `LUNA_OWNER_CHECK=1` (the second kernel adds every face in list order, as main) `--precision=double --moving` equals main's hash after 50 steps, so the owner pass computes main's fluxes bit for bit in double; `grad32`, order 0 and HLL differ by contraction (job 32366698). The owner sums change bits at rounding level: Sedov 128³ field L1 rho 0.06479 against 0.06479, 349 steps in both; 3D vortex 64 field1 L1 and the sound wave 64 x 16 x 16 at 1e-3 and 1e-6 equal main's to the 4 to 5 digits printed for `double`, `grad32` and `grad16`, moving and static (sound 1e-6 moving 3.6837e-3 in both); KH 2D 128 to t = 1.5, mode amplitude M 0.14321249 static and 0.13071275 moving, equal to main's printed digits, totals equal to 1e-15 (jobs 32368508, 32368510 to 32368512, 32368513). A100 hydro_test with the owner loop in every update test: 233 checks pass; the new check that owner and per face agree to 1e-12 after 10 steps of a rough state fails at 4e-9 to 2e-6 (`low`): float gradients and limiter branches carry the rounding difference (job 32368507). Refuted: the update's saving (1.2 ms of 17.2 moving) is smaller than any grouping of the face evaluations by cell costs. A first 4-lane version ran as a reduce, whose CUDA ranges do not start on a lane group: wrong sums at random (Sedov L1 0.495, job 32367863); the parallel_for in b9f402e fixes it.
+
+**2. R14: face rows computed in the kernels** (voronoi-cpp `step-v1-r14` adef168, copied unchanged; luna 25159e3: `Geometry::face_of` reads the stored rows or calls `face_geometry().face(f, a, c)`, the flux pass computes it once per face, the sweep once per list entry in each of its two loops; `LUNA_R14=1` sets `Layout::stored_faces = false`). Jobs 32367455, 32367456, 32367874; stored against computed in the same build:
+
+| 128³ | sweep | fluxes | update | cells | mesh | hydro | step | memory B/cell |
+|---|---|---|---|---|---|---|---|---|
+| main (pin 6ead543), moving | 6.37 | 6.50 | 4.33 | 3.04 | 6.75 | 17.2 | 27.2 | 2236 |
+| R14 build, stored rows, moving | 7.51 | 6.25 | 5.26 | 3.04 | 23.8 | 19.0 | 46.1 | 2244 |
+| R14 build, computed rows, moving | 26.06 | 9.85 | 5.25 | 8.09 | 22.0 | 41.2 | 71.4 | 1850 |
+| R14 build, stored, static | 6.58 | 2.58 | 2.46 | | | 11.9 | | 2309 |
+| R14 build, computed, static | 28.27 | 5.42 | 2.46 | | | 36.5 | | 1915 |
+
+`double` the same (moving hydro 22.6 -> 45.5). Bits: computed rows give the stored rows' hashes on all eight cases (static, moving, order 0, HLL, `double` and `grad16` static and moving). Memory -394 B/cell, as expected. Bytes (ncu): a flux pass 2.78 -> 4.56 ms and 1161 -> 1415 B/cell (the ring and its circumcentres cost more than the 48 B row), FP64 pipe 42 -> 57 %; the sweep 6.74 -> 25.4 ms, 879 -> 1956 B/cell at 10 % of DRAM peak, 154 registers, four ring walks per face. The mesh saves 1.8 ms (no rows written); update_cells, which sums from the rings, costs 5 ms more. The R14 build's mesh (23.8 ms) is that branch's work in progress, not R14. Even with one walk per face in the sweep the walks cost more than the stored rows save: R14 buys memory, not time.
+
+**3. A cheaper face flux (kept).** ncu of main (job 32367151): the flux passes run the FP64 pipe at 39 to 41 % and issue 40 % of slots, 60 to 68 % of warps waiting on loads, 80 and 96 registers; arithmetic is a large share but not the limit. Exact-arithmetic rewrites with fewer divisions (commit f86f704): 1 / rho once per side in HLLC, shared by c² and E* (two divisions fewer), 1 / (gamma - 1) and 1 / |d| as products (one each). The rounding changes; the formulas do not.
+
+Main against these rewrites in one job each (32368968 at 128³, two rounds, equal to 0.01 ms; 32368969 at 256³), G cell updates/s of the whole step, ms of both flux passes:
+
+| | 128³ main | 128³ rewrites | 256³ main | 256³ rewrites |
+|---|---|---|---|---|
+| moving, `grad32` | 0.0776 (fluxes 6.49) | 0.0782 (6.26) | 0.0824 (56.2) | 0.0852 (49.4) |
+| static, `grad32` | 0.197 (2.72) | 0.199 (2.59) | 0.194 (24.9) | 0.204 (20.3) |
+| moving, `double` | 0.0716 (7.54) | 0.0715 (7.55) | 0.0757 (64.3) | 0.0773 (60.1) |
+| static, `double` | 0.171 (3.30) | 0.174 (3.09) | 0.170 (28.8) | not run (time limit) |
+
+Memory unchanged (2236 B/cell moving, 2301 static, `grad32`). ncu (jobs 32368970, 32368971, one moving step at 128³): flux instructions 0.44 -> 0.34 G (pass 1) and 0.51 -> 0.42 G (pass 2), but registers 80 -> 86 and warps active 35 -> 25 % in pass 1, so time moves little: the hydro's ten kernels 17.51 -> 17.29 ms and 6632 -> 6379 B/cell (`grad32`), 19.80 -> 19.81 ms (`double`). GPU time to t_end, moving Sedov 128³: 10.07 -> 9.98 s, 349 steps both, field L1 rho 0.06479 both (job 32368972). Accuracy (jobs 32368974 to 32368979): the vortex, the sound waves at 1e-3 and 1e-6 (`double`, `grad32`, `grad16`, moving and static) and KH 2D 128 (M 0.14321249 static, 0.13071275 moving) equal main's printed digits; the 1D ladder, static and moving, every problem at N = 256 to 2048: 12 of 138 rows differ, in the fourth digit of the 1e-6 sound waves and in the entropy wave at its 1e-10 floor; orders unchanged. Every hash differs (rounding). Cost: the HLLC rotation check of hydro_test (rotated states, normal and face velocity give the rotated flux) rises from 3.7e-14 to 1.06e-13 and fails its 1e-13 bound (A100 ctest, job 32369101); the other four tests pass. Kept (owner, 2026-11-15): +1 % at 128³ and +3 to +6 % at 256³, 20 % fewer flux instructions, accuracy unchanged; the rotation bound is now 2e-13.
+
+A float Riemann solve with double fluxes (`--precision=riemann32`, kept as an option): moving fluxes 6.45 -> 5.77 ms at 128³ (job 32367870), Sedov t_end 10.12 s and L1 0.06479 (job 32367863), the vortex and the 1e-3 wave unchanged, but the 1e-6 sound wave is lost: L1/amp 1.25 moving and 1.63 static against 3.7e-3 (job 32367861), as `single`.
+
+**Where this leaves the target.** The whole moving step is 27.0 ms at 128³ (12.9 ns per cell, 0.078 G cell updates/s): mesh and cells 9.8 ms (4.7 ns), hydro 17.2 ms (8.2 ns, 6632 B/cell at 50 % of peak). 3.3 to 5 ns per cell is 2.6 to 3.9 times away; the mesh alone already takes 4.7 ns. None of the three levers changes the data flow enough: the owner pass trades 290 B/cell of update reads for slower face evaluations, R14 trades 394 B/cell of memory for ring walks that read more than the rows, and the flux arithmetic is not what the passes wait on. The bytes floor of "Hydro step profile" (3900 B/cell with today's data flow) is unchanged.
+
 ### 2D
 
 | Figure | Setup | Jobs |
