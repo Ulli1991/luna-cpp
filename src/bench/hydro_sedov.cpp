@@ -183,6 +183,8 @@ struct Options {
     double bulk = 0;
     long long max_steps = 0;
     Box box{1.0};
+    bool plain_faces = false;  // --plain-faces: the mesh layout as the flags set it (the hydro's default: owner bit, and faces by owner when static)
+    voronoi::Layout layout;  // the mesh's memory layout (--curve, --every, --far, --owner-faces, --owner-bit)
 };
 
 // The whole run with the hydro's precision policy P (the mesh carries float face rows if P asks for them) and Riemann solver R.
@@ -201,6 +203,7 @@ void run(const Options& o, Points points) {
 
     Kokkos::Timer timer;
     Mesh mesh(exec, box);
+    mesh.set_layout(o.plain_faces ? o.layout : FV::fast_layout(o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh, o.layout));
     {
         if (!o.input_order) points = morton_order(points, box);
         const Positions x = to_device(points);
@@ -245,7 +248,8 @@ void run(const Options& o, Points points) {
               << " deposit_cells=" << deposit << " deposit_volume=" << deposited << " luna_volume=" << target
               << " deposit_radius_max=" << (deposit > 0 ? r[by_distance[deposit - 1]] : 0.0) << " p_inject=" << p_inject << "\n";
 
-    FV fv(exec, mesh, gas, o.order, o.update, o.limiter, o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh);
+    FV fv(exec, mesh, gas, o.order, o.update, o.limiter, o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh,
+          !o.plain_faces);
     {  // Q = U V: the background moving with the bulk velocity, the blast's pressure on top
         auto Q = Kokkos::create_mirror_view(fv.state());
         for (long long i = 0; i < n; ++i) {
@@ -362,7 +366,7 @@ void run(const Options& o, Points points) {
     std::cout << "fallbacks: total=" << fallbacks << " steps_with=" << steps_with_fallbacks << " most_in_a_step=" << most_fallbacks
               << " face_sides_per_step=" << 2 * static_cast<long long>(mesh.faces()) << "\n";
     const hydro::MeshStats& ms = fv.mesh_stats();
-    std::cout << "mesh_updates: updates=" << ms.updates << " rebuilds=" << ms.rebuilds << " stuck=" << ms.stuck
+    std::cout << "mesh_updates: updates=" << ms.updates << " rebuilds=" << ms.rebuilds << " resorts=" << ms.resorts << " stuck=" << ms.stuck
               << " host_flips=" << ms.host_flips << " device_flips=" << ms.device_flips << "\n";
     auto rate = [&](double ms) { return ms > 0 ? n / (ms * 1e-3) / 1e6 : 0.0; };
     std::cout << "phases_ms_median: primitives=" << median(prim_ms) << " sweep=" << median(sweep_ms) << " fluxes=" << median(flux_ms)
@@ -397,6 +401,7 @@ void run_precision(const Options& o, const Points& points) {
     if constexpr (std::is_same_v<R, hydro::HLLC>) {
         if (p == "grad32") return run<hydro::Grad32, R>(o, points);
         if (p == "grad16") return run<Precision<double, Half>, R>(o, points);
+        if (p == "single") return run<Precision<double, float, float, float>, R>(o, points);
         if (p == "mixed") return run<Precision<float, float, float>, R>(o, points);
         if (p == "low") return run<Precision<float, Half, float, float>, R>(o, points);
     }
@@ -413,9 +418,10 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);
     if (args.size() < 2) {
         std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|none]"
-                     " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|mixed|low]"
+                     " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|single|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
-                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]\n";
+                     " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]"
+                     " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -439,6 +445,15 @@ int main(int argc, char** argv) {
     o.gradients = flag(argc, argv, "--gradients", "") == "1";
     o.max_steps = std::stoll(flag(argc, argv, "--steps", "0"));
     o.input_order = flag(argc, argv, "--input-order", "") == "1";
+    const std::map<std::string, voronoi::Curve> curves = {{"morton", voronoi::Curve::morton}, {"hilbert", voronoi::Curve::hilbert},
+                                                          {"moore", voronoi::Curve::moore},   {"gray", voronoi::Curve::gray},
+                                                          {"row", voronoi::Curve::row_major}, {"rcm", voronoi::Curve::rcm}};
+    if (const std::string curve = flag(argc, argv, "--curve", ""); !curve.empty()) o.layout.curve = curves.at(curve);
+    o.layout.every = std::stoi(flag(argc, argv, "--every", "0"));
+    o.layout.far = std::stod(flag(argc, argv, "--far", "0"));
+    o.layout.owner_faces = flag(argc, argv, "--owner-faces", "") == "1";
+    o.layout.owner_bit = flag(argc, argv, "--owner-bit", "") == "1";
+    o.plain_faces = flag(argc, argv, "--plain-faces", "") == "1";
     // The periodic box: --box=fx,fy,fz times 50 pc (a cube by default); the lattice keeps about equal spacings per axis.
     const Sedov sedov;
     const std::string shape_arg = flag(argc, argv, "--box", "1,1,1");

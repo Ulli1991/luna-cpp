@@ -8,6 +8,8 @@ The records below keep the names of their time: "two passes" (`--integrator=two-
 
 ### Sedov speed table
 
+README table since 2026-11-14: ours from job 32319468 (128³, two rounds) and 32319469 (256³), 1410 MHz, branch `hydro-speed`; LUNA from job 32271240 (Pallas kernel, minmod, HLLC, 80 steps, snapshots and diagnostics off; details in "Hydro step profile and speed levers"). The LUNA numbers below, 0.47 to 0.76 FP64 at 128³, match its XLA kernel (0.48 in job 32271240), LUNA's default, which `hydro_a100.sh` runs since it passes no `hydro_kernel`; the job-to-job spread up to 0.76 is not explained. LUNA's Pallas kernel is the fast path: 0.82 FP64 and 1.46 FP32 at 128³, 1.04 and 2.35 at 256³. Older paragraphs follow.
+
 Sedov blast of 1e51 erg, n = 1 cm⁻³, 50 pc box, 1e4 yr; jittered points in Morton order; 40 steps. Job 31954615, ravg1020, 1305 MHz, bef77ed: medians of three rounds at 2.1M cells, one round at 16.8M, `--memory`. LUNA in the same job, 200 steps, median of the 20 perf lines. The same code varies by about 10 % between GPU jobs. LUNA FP64 at 2.1M cells moved between jobs: 0.47 here, 0.67 in job 31953960, 0.76 in job 31953468; at 16.8M 0.87, 0.90, 0.95; FP32 0.68, 1.01, 1.37 and 1.74, 1.91, 2.13.
 
 README speed table, `grad32`, job 31954615 at 1305 MHz: static HLLC 0.170 at 2.1M cells and 0.166 at 16.8M; whole moving step with the mesh update 0.072 and 0.076. GPU memory moving 2255 B/cell at both sizes. LUNA in the same job: FP64 0.47 to 0.76 (2.1M, varies by job) and 0.87 (16.8M), FP32 0.68 and 1.74.
@@ -31,6 +33,88 @@ These L1 values are sampled at the mesh generators, which flatters a moving mesh
 Field L1 of density, r < 1.5 R_s (one pass, two passes): 128³ 0.0629, 0.0648; 256³ 0.0369, 0.0377 (research_notes/two_pass_2026-11-05.md).
 
 The one-pass step of the moving mesh keeps the bits it had before the two-pass default; hash in research_notes/two_pass_2026-11-05.md, which also compares cost and accuracy of the two.
+
+### Hydro step profile and speed levers (2026-11-13)
+
+Moving Sedov 128³ jittered, `grad32`, HLLC, one A100; luna-cpp ac1d2b3 (voronoi-cpp 6ead543) against branch `hydro-speed`. Scripts: `scripts/hydro_profile_a100.sh` (nsys, ncu), `scripts/hydro_levers_a100.sh` (speed, bits, t_end), `scripts/hydro_precision_a100.sh`, `scripts/luna_speed_a100.sh`, `scripts/luna_profile_a100.sh`. The clock is the job's; nvidia-smi read 1410 MHz unless stated.
+
+**Profile before** (ncu job 32271238, one moving step; nsys job 32271234, 20 steps). DRAM is read plus write per cell.
+
+| kernel | ms | DRAM B/cell | registers | warps active | DRAM % of peak |
+|---|---|---|---|---|---|
+| primitives | 0.30 | 97 | 36 | 64 % | 44 % |
+| gradient sweep (moving) | 6.12 | 999 | 112 | 22 % | 22 % |
+| cell_step + face_step (time step) | 0.73 | 286 | 29, 38 | 94, 58 % | 83, 46 % |
+| keep_centroids | 0.27 | 136 | 38 | 68 % | 67 % |
+| fluxes, pass 1 (mesh of t^n) | 3.04 | 1388 | 80 | 35 % | 62 % |
+| update, pass 1 | 2.67 | 1481 | 40 | 70 % | 75 % |
+| drift | 0.14 | 65 | 34 | 64 % | 61 % |
+| fluxes, pass 2 (mesh of t^n+1) | 3.12 | 1215 | 96 | 25 % | 53 % |
+| update, pass 2 | 2.67 | 1481 | 40 | 70 % | 75 % |
+| hydro, sum | 19.1 | 7147 | | | 49 % on average |
+
+The sweep is latency-bound (long-scoreboard stalls 70 % of warp slots at 22 % of DRAM peak); `update` is at the bandwidth roof and reads 3 times its unique bytes (the face rows are in tetrahedron order); the fluxes sit between. Run twice, once per mesh: the flux and update kernels (gathers of both sides' primitive and gradient rows, face rows, the flux rows). Read twice with the same values: the primitive and gradient rows of t^n; the face geometry differs between the passes. nsys per step: 72 kernels (10 of them the hydro's), 0.64 ms with the GPU idle in 115 gaps, 35 fences and blocking copies, mostly the mesh's. 3D vortex 128 (n = 524288, job 32271236): hydro kernels 4.99 ms of a 9.3 ms step, the same pattern.
+
+**Floor.** Each byte read once at 80 % of 1555 GB/s, with the face rows and fluxes stored as now: primitives 104, sweep 706 (face rows 382 of it), old centroids and snapping 144, each pass's fluxes 956 to 980 and update 466, drift 72: about 3900 B/cell, 6.6 ms at 128³, 3.1 ns per cell. The target "hydro faster than the mesh" (3.1 ns per cell, both passes) is that floor: no kernel layout of today's data flow reaches it. It needs fewer bytes: fluxes not stored (summed where computed: -1270 B/cell, 4.4 ms) and the sweep's latency fixed; face rows computed in place (R14) would take off at most another 1150 B/cell of reads but costs ring walks of about the same bytes (plan below).
+
+**Levers, each against main in one job.**
+
+| lever | effect at 128³ moving | static | bits | job |
+|---|---|---|---|---|
+| owner bit in the lists (default, 3D) | sweep 6.78 -> 6.34 ms, update 5.35 -> 4.32 (both passes, with the next item) | sweep 6.43 -> 6.03, update 2.61 -> 2.09 | equal | 32319468, 32272653 |
+| faces numbered by owner | hydro -0.7 ms but the mesh +2.6 ms (number_by_owner, voronoi-cpp #53), +168 B/cell: off on moving meshes | sweep 6.03 -> 5.69, update 2.09 -> 1.91: on for static meshes, +135 B/cell | equal | 32319468, 32272653 |
+| next step's primitives written by pass 2's update; fallbacks counted on the device | primitives 0.31 -> 0 ms, two fences fewer | — | equal | 32272653 |
+| sweep: launch bounds to 80 or 64 registers | sweep +19 % and +117 % slower (spills) | | equal | 32272227 (1095 MHz) |
+| sweep: face loop unrolled by 2 | no change | | equal | 32272227 |
+| sweep: time-step terms folded in | sweep +22 % slower (registers) | | equal | 32271602 |
+| fluxes: launch bounds, 85 registers | no change | | equal | 32272227 |
+| per-cell fluxes and update (`--update=cell`) | fluxes 5.9 times slower | 5.7 times | equal | 32272653 |
+| reuse between passes | refuted earlier (research_notes/profile_2026-11-06.md, -2.5 %) | | | |
+
+The kept levers change no bits (job 32319470): hashes of Q, x and volume after 50 steps at 128³ equal main's for static, moving, order 0, per-cell moving, HLL moving and `--precision=double` moving; the 3D vortex 64 files (static, moving), the 1D Sod hashes and the KH 2D 128 hashes (static ef63946b023e78a7, moving 4ec3a18a6b578ba6) are equal. The arithmetic is unchanged, so the 1D ladder, Sedov L1, vortex and KH results are main's. Moving Sedov 128³ to 1e4 yr (job 32319471): 349 steps, GPU 10.67 -> 9.97 s (-6.6 %), field L1 rho 0.06479 in both.
+
+**Before and after** (jobs 32319468 at 128³, two rounds, and 32319469 at 256³, 1410 MHz). G cell updates/s; hydro ns per cell in brackets; memory peak B/cell:
+
+| | 128³ main | 128³ now | 256³ main | 256³ now |
+|---|---|---|---|---|
+| moving, whole step, `grad32` | 0.0729 | 0.0782 | 0.0763 | 0.0826 |
+| moving, hydro part | 0.110 (9.09 ns) | 0.122 (8.17 ns) | 0.108 | 0.121 |
+| static, `grad32` | 0.170 | 0.197 | 0.165 | 0.194 |
+| moving, whole step, double | 0.0677 | 0.0721 | 0.0707 | 0.0758 |
+| static, double | 0.151 | 0.171 | 0.149 | 0.170 |
+| memory moving / static | 2236 / 2166 | 2236 / 2301 | 2236 / 2166 | 2236 / 2301 |
+
+Other options now, 128³ moving step and static, then 256³: `grad16` 0.0797, 0.203; 0.0843, 0.196. `single` 0.0885, 0.233; 0.0963, 0.239. `mixed` 0.0829, 0.211. `low` 0.0865, 0.231. In `single`, `mixed` and `low` the float flux rows halve `update` (4.3 -> 2.0 ms).
+
+**Profile after** (ncu job 32319473, one moving step): sweep 5.58 ms (995 B/cell), cell and face step 0.73, keep_centroids 0.28, fluxes 3.00 and 3.12 (unchanged), update 2.09 and 2.22 (1140 and 1193 B/cell, 44 registers), drift 0.14, no primitives kernel: 17.2 ms and 6415 B/cell against 19.1 ms and 7147, at 50 % of DRAM peak. The hydro is now 8.2 ns per cell against the mesh's 3.1 (update) to 4.6 (with update_cells): 2.6 times the target.
+
+**R14, a plan.** Face geometry inside the flux kernel needs from voronoi-cpp a device view of each face's ring (the tetrahedra around its Delaunay edge, in order) and the tetrahedra's circumcentres, plus a function that turns a ring into area vector and centroid exactly as `tet_mesh::faces` does (same summation order, so the same bits). Bytes: the ring of a face (about 5 tetrahedra, 4 B each) and their circumcentres (24 B, shared by about 6 faces each) cost about 50-60 B per face from L2-friendly arrays, against 48 B of stored rows read now; the gain is the mesh's write of 382 B/cell of face rows (and the float rows), and about 380 B/cell of memory, not read traffic. It costs a dependent load chain per face in the sweep and both flux passes, the kernels that already wait on latency. Order of work: (1) voronoi-cpp exposes rings and circumcentres read-only (it has them, `FaceRings`); (2) a luna kernel computes the rows from them and checks the bits against `face_rows`; (3) only then fold it into the sweep and pass 2, measured against the stored rows. Before R14, the larger lever by bytes is not storing the fluxes.
+
+**LUNA on the same A100** (job 32271240, LUNA 60cf841, Sedov 3D as `sedov3d_run`, minmod, HLLC, snapshots and diagnostics off, 80 steps; "perf" = cells x steps / wall seconds over 10-step windows, whole MUSCL-Hancock steps; the first window holds the compile and is left out). G cell updates/s:
+
+| | 128³ | 256³ |
+|---|---|---|
+| XLA (LUNA's default kernel), FP64 | 0.48 | 0.63 |
+| XLA, FP32 | 0.83 | 1.10 |
+| Pallas, FP64 | 0.82 | 1.04 |
+| Pallas, FP32 | 1.46 | 2.35 |
+
+The README's 0.47 to 0.76 FP64 at 128³ were the XLA kernel (`hydro_a100.sh` passes no `hydro_kernel`); Pallas is the fast path and the fair yardstick: about 1 G FP64 and 2.3 G FP32 at 256³. DRAM per step from ncu on the Pallas FP64 kernels (job 32271533): about 430 B/cell, 143 B per face (3 faces per cell); at 2.56 ms a step that is about 350 GB/s, so LUNA's FP64 step is not bandwidth-bound.
+
+**Per face.** A LUNA cell has 3 faces of its own, ours 7.95. Face-flux updates per second: LUNA Pallas FP64 2.46 G at 128³ and 3.13 G at 256³, FP32 4.37 and 7.04 G. Ours `grad32` static 0.170 G cells -> 1.35 G faces (main), 0.197 G -> 1.57 G faces now; the moving hydro (two flux passes, 15.9 face fluxes per cell) 0.110 -> 1.75 G and 0.122 -> 1.94 G. Matching LUNA FP64 per face means 0.31 G cell updates/s static at 128³ (0.39 at 256³) and about 0.15 G for the moving hydro part, 6.5 ms a step: the same as the target of a hydro faster than the mesh. We are at 63 % of LUNA's per-face rate static; the gap is bytes and latency: about 510 B per face against LUNA's 143 (stored face rows read three times, fluxes stored and read back, gradients and states gathered through an index), and the least-squares sweep at 22 % of DRAM peak, where LUNA's slopes come from contiguous neighbours inside one fused kernel.
+
+**Precision options with the levers** (jobs 32272271 Sedov at 1095 MHz, 32272272 waves at 1410 MHz; build `hydro-speed` before the last cleanup, same arithmetic). `single` is new: double geometry, float gradients, float stored fluxes and float Riemann solve in the face's frame. Sedov 128³ to 1e4 yr, GPU seconds (moving, static), field L1 of rho/rho0 (moving, static), peak B/cell moving; the 3D vortex 64 L1 of rho to 4 digits; the 3D sound wave 64 x 16 x 16 after one period, L1(rho)/amplitude (moving, static):
+
+| precision | Sedov GPU s | Sedov L1 | B/cell | vortex | sound 1e-3 | sound 1e-6 |
+|---|---|---|---|---|---|---|
+| double | 12.2, 23.4 | 0.0648, 0.0776 | 2300 | as double | 4.32e-3, 4.32e-3 | 3.68e-3, 3.68e-3 |
+| grad32 (default) | 11.1, 20.3 | 0.0648, 0.0776 | 2236 | equal to 4 digits | 4.32e-3, 4.32e-3 | 3.68e-3, 3.68e-3 |
+| grad16 | 10.9, 19.4 | 0.0648, 0.0776 | 2208 | equal | 4.32e-3, 4.32e-3 | 3.68e-3, 3.68e-3 |
+| single | 10.0, 17.2 | 0.0648, 0.0776 | 2163 | equal | 4.31e-3, 4.31e-3 | 1.25, 1.60 |
+| mixed (float face rows too, Riemann double) | 10.8, 19.2 | 0.0648, 0.0776 | 2426 | equal | 4.32e-3, 4.32e-3 | 7.2e-3, 2.4e-2 |
+| low (mixed with FP16 gradients and float Riemann) | 10.4, 17.8 | 0.0648, 0.0776 | 2398 | equal | 4.30e-3, 4.32e-3 | 1.24, 1.56 |
+
+Every option keeps Sedov, the vortex and the 1e-3 sound wave to the digits printed, so on those GPU time to the same error is GPU time: `single` is 10 % (moving) and 15 % (static) ahead of `grad32`. But a float Riemann solve or float stored fluxes lose a 1e-6 wave: with `single` and `low` the error exceeds the wave itself, `mixed` doubles it moving and is 6.5 times worse static. `grad16` matches double on every test, is 2 to 4 % faster than `grad32` and saves 28 B/cell; it does not make a larger run fit: 384³ (56.6M cells) needs 707 B/cell on 40 GB, three times less than any option, so 256³ stays the largest power-of-two size. 2D has no presets; KH 2D runs double.
 
 ### 2D
 
@@ -81,7 +165,7 @@ Radial profile of the Galilean test (`hydro`): double 6e-14; `grad32` 1.2e-10 on
 
 ## Limitations and open items
 
-Hydro speed target: 0.3 G cell updates/s static, 0.15 G the whole two-pass step. At 128³, job 31954615, `grad32`: 0.170 static, hydro part 0.164 on a moving mesh (one pass), whole moving step 0.091 with one pass and 0.072 with two. Double: 0.152, 0.142, 0.084 and 0.067.
+Hydro speed target: the moving hydro faster than the mesh, 3.1 ns per cell (0.32 G/s); matching LUNA's Pallas FP64 per face gives the same, 0.31 G static. At 128³, job 32319468, `grad32`: 0.197 static, the moving hydro 0.122 (8.2 ns per cell), the whole moving step 0.078. Earlier (job 31954615): 0.170 static, whole moving step 0.072.
 
 Roofline at 1095 MHz (luna-cpp 28a647d, voronoi-cpp 0b433f0, older than this tree): the step sits at about 1.9 flop/B, at 45 % of the sustained 1.40 TB/s and 16 % of the FP64 peak; only `update` is at the bandwidth roof, the gradient sweep is latency-bound. Bytes alone would allow 0.34 G static and 0.14 G for the whole two-pass step, which achieved 0.059 there.
 

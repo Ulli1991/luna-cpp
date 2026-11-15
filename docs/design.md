@@ -38,6 +38,8 @@ Per-cell and per-face data are rows (LayoutRight), so a random access reads one 
 
 The default, `DefaultPrecision<D>`, is `grad32` in 3D (float gradients, limiter and face-state change, everything else double) and double in 2D, where `grad32` has not been measured; 1D has no policies. `Precision<>`, `--precision=double`, is double throughout, with the least-squares fit solved in the sweep (the bits from before `grad32` became the default). Reduced precision is a compile-time option of the gradients, stored face fluxes, Riemann solve and face geometry rows. Q, volumes, centroids, W and the sums of the face fluxes stay double in every policy. With a float gradient type, the differences W_j - W_i and the separations are formed in double and rounded once, and a face state is W + (its change in float), so a uniform state stays exactly uniform. FP16 gradients use one power-of-two exponent per variable group (rho, v, P): the exponent k of a group whose largest magnitude is m satisfies m 2ᵏ in [2¹⁴, 2¹⁵) (k = 0 for m = 0), within [-114, 126], so there is no overflow and 11 bits relative to the group's largest component. The FP16 storage is the precision study's (branch precision-study 59ff9d1, src/hydro/precision.hpp).
 
+The benchmarks' presets (`--precision=` of `hydro_sedov` and `hydro_wave3d`): `double`, `grad32`, `grad16` (FP16 gradient rows), `single` (double geometry; float gradients, stored fluxes and Riemann solve), `mixed` (float face rows, gradients and stored fluxes; double Riemann solve), `low` (float face rows, FP16 gradients, float fluxes and Riemann solve). A float Riemann solve or float stored fluxes lose a sound wave of amplitude 1e-6 (docs/measurements.md, "Hydro step profile and speed levers").
+
 ### Gradient limiter
 
 The limiter keeps the extrapolated values within the neighbours' range (AREPO next generation, mesh_gradients.cc:84-94): at the face centroids (AREPO's default), or nowhere.
@@ -131,6 +133,7 @@ The Sedov-Taylor blast of LUNA's `scripts/validation/runs/sedov3d_run.py` on the
                 [--moving] [--bulk=<km/s>] [--no-blast] [--box=fx,fy,fz] [--out=<dir>]
                 [--snapshots=10] [--steps=<max>] [--input-order] [--memory] [--gradients]
                 [--cold=f]
+                [--curve=hilbert|morton|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces]
 
 side³ generating points in a 50 pc periodic box (jittered: a lattice moved by up to 0.1 spacings; uniform: uniform random). AREPO units (kpc, 1e10 Msun, km/s), gamma 5/3, n = 1 cm⁻³, T = 1e4 K, 1e51 erg into the cells nearest the centre whose volumes add up closest to LUNA's 8 central cells at the same resolution (8 (L / side)³), as extra pressure (gamma - 1) E / V_deposit over their actual volume V_deposit; run to 1e4 yr.
 
@@ -144,6 +147,7 @@ side³ generating points in a 50 pc periodic box (jittered: a lattice moved by u
 - `--limiter`: `hydro::Limiter`, default face. `--riemann`: HLLC (default, as LUNA) or HLL. `--precision`: the hydro's precision policy (default `grad32`; `double` is double throughout).
 - `--cold`: multiplies the background pressure by f, a larger contrast at the blast.
 - `--no-blast`: no blast, a uniform stream (with `--bulk`), printing its largest deviation from uniform.
+- `--curve`, `--every`, `--far`, `--owner-faces`, `--owner-bit`, `--plain-faces`: the mesh's `voronoi::Layout`. By default the hydro asks for the owner bit, and on a static mesh for faces by owner (`FiniteVolume::fast_layout`); `--plain-faces` keeps the layout the other flags give, all off without them. After a re-sort `FiniteVolume::move` renumbers Q, positions, point velocities and, in a step on both meshes, the old centroids and pass 1's cell rows (`follow_resort`); the mesh line counts the re-sorts.
 - Prints per step phase medians and cell updates per second and a checksum of the final state, positions and volumes (bits), the face sides whose extrapolation fell back to the cell state (total, steps with any, most in one step) and what the mesh updates did. `--memory` adds device memory (Kokkos allocations) per phase.
 
 ### hydro_kh2d
@@ -189,7 +193,7 @@ Set-ups are LUNA's (`scripts/luna_1d_run.py` has the file:line of each), gamma 1
 3D problems with an exact solution (problems_3d.hpp, above), on the hydro's default paths.
 
     hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--courant=c]
-                 [--jitter=spacings] [--amp=a] [--limiter=face|none] [--t-end=t] [--max-steps=m] [--precision=default|double|grad32|grad16] [--out=file.npy]
+                 [--jitter=spacings] [--amp=a] [--limiter=face|none] [--t-end=t] [--max-steps=m] [--precision=default|double|grad32|grad16|single|mixed|low] [--plain-faces] [--out=file.npy]
 
 Prints steps, GPU seconds of the steps and cell updates per second. `--out`: rows generator xyz, centroid xyz, V, rho, vx, vy, vz, P in box coordinates plus the origin, id order, for `scripts/norm3d.py`.
 

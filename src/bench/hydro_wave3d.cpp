@@ -53,10 +53,11 @@ int run(int argc, char** argv) {
     const long long n = static_cast<long long>(points.size());
     const Exec exec;
     typename FV::Mesh mesh(exec, box);
+    if (!has(argc, argv, "--plain-faces")) mesh.set_layout(FV::fast_layout(moving ? hydro::Motion::moving : hydro::Motion::static_mesh));
     mesh.update(to_device(points));
     mesh.update_cells();
     FV fv(exec, mesh, gas, 1, hydro::Update::per_face, has(argc, argv, "--limiter=none") ? hydro::Limiter::none : hydro::Limiter::face_centroid,
-          moving ? hydro::Motion::moving : hydro::Motion::static_mesh);
+          moving ? hydro::Motion::moving : hydro::Motion::static_mesh, !has(argc, argv, "--plain-faces"));
     {
         const auto x = to_host(mesh.positions());
         const auto c = to_host(mesh.centroid());
@@ -126,5 +127,8 @@ int main(int argc, char** argv) {
     if (precision == "double") return run<hydro::Precision<>>(argc, argv);
     if (precision == "grad32") return run<hydro::Grad32>(argc, argv);
     if (precision == "grad16") return run<hydro::Precision<double, hydro::Half>>(argc, argv);
-    throw std::invalid_argument("hydro_wave3d: --precision=default|double|grad32|grad16");
+    if (precision == "single") return run<hydro::Precision<double, float, float, float>>(argc, argv);
+    if (precision == "mixed") return run<hydro::Precision<float, float, float>>(argc, argv);
+    if (precision == "low") return run<hydro::Precision<float, hydro::Half, float, float>>(argc, argv);
+    throw std::invalid_argument("hydro_wave3d: --precision=default|double|grad32|grad16|single|mixed|low");
 }

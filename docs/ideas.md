@@ -2,7 +2,7 @@
 
 Every idea from the research review of 2026-11-08, checked on 2026-11-09 against the code. Nothing is dismissed: each idea has what it could buy, a first test, and a status. Mesh ideas are in voronoi-cpp's `docs/ideas.md`.
 
-Where we stand: one A100, 128³ Sedov, `grad32`: static hydro 0.170 G cell updates/s, whole moving step 0.073; LUNA 0.47 to 0.76 FP64 in the same jobs. Memory 2236 B/cell moving. The profile says the hydro waits on memory, not flops: the gradient sweep at 0.268 G/s with 17 % of warps active, fluxes 0.571, update 0.805.
+Where we stand (2026-11-14): one A100, 128³ Sedov, `grad32`: static hydro 0.197 G cell updates/s, the moving hydro 0.122 (8.2 ns per cell), whole moving step 0.078; LUNA's Pallas kernel 0.82 FP64 and 1.46 FP32. Memory 2236 B/cell moving, 2301 static. The hydro waits on memory and latency, not flops: the gradient sweep at 22 % of warps active and 24 % of DRAM peak, the updates at 73 % (docs/measurements.md, "Hydro step profile and speed levers").
 
 Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 
@@ -10,14 +10,17 @@ Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 
 | ID | Idea | Buys | First test | Status |
 |---|---|---|---|---|
-| — | Owner bit in list entries; faces numbered by owner in the mesh | +8 % static, +5 % whole step (estimate, partly measured) | from the profile notes | next |
-| — | Fewer registers in the gradient sweep (148 now, 3 of 16 warps) | sweep +30 to +50 % (estimate) | the fluxes kernel at 80 registers is the model | open |
+| — | Owner bit in list entries; faces numbered by owner in the mesh | owner bit: sweep -8 %, update -20 %; faces by owner on a static mesh: static hydro +16 % for +135 B/cell | job 32272653 (docs/measurements.md, "Hydro speed levers") | done: the bit by default in 3D, faces by owner on static meshes only. On a moving mesh the mesh's renumbering costs 2.6 ms a step at 128³ against 0.7 ms saved here (voronoi-cpp #53) |
+| — | Fewer registers in the gradient sweep (110 with `grad32`, 22 % of warps active) | sweep +30 to +50 % (estimate) | launch bounds to 80 and 64 registers: spills, sweep 19 % and 117 % slower; unrolling the face loop by 2: no change; the time-step terms folded into the sweep: 22 % slower (job 32272227) | open: needs a different sweep, not a cap (see R14 row for the byte floor) |
+| — | The next step's primitive rows written by the second pass's update (moving), fallback counts kept on the device | one kernel (0.3 ms at 128³) and two fences a step | same bits | done |
+| — | Per-cell fluxes and update in one kernel (`--update=cell`, no stored fluxes) | 636 B/cell less traffic a pass | measured: fluxes 5.9 times slower (each face twice, 127 registers) | refuted as it stands |
+| — | Reuse between the two flux passes | flops | per-cell half step and shift once: pass 2 -2.5 % slower (research_notes/profile_2026-11-06.md); nothing else is computed identically twice: the geometry differs and the gradients are already shared | refuted |
 | R4 | Reuse last step's gradients, limiter state or wave speeds where a conservative test says it is safe | less work per step | how often the test passes, and what a missed change costs | open |
 | R3 | Read only the geometry the scheme needs | memory | the array reader list, with voronoi-cpp's R3 | next |
 | R6 | Precision by condition | memory, speed | `grad32` is done in 3D; 2D next (#19) | next |
 | #9 | Local time steps from AREPO-ng | fewer cell updates | Sedov, as in the issue | open |
 | #10 | A CPU path for few active cells | speed with local steps | after #9 | research |
-| R14 | Fuse face geometry from the mesh with the flux kernel, so faces are not stored and read back | memory and memory traffic | see voronoi-cpp's R14 | research |
+| R14 | Fuse face geometry from the mesh with the flux kernel, so faces are not stored and read back | memory (about 380 B/cell of face rows) more than traffic: a ring walk reads about as many bytes as the stored rows | plan in docs/measurements.md, "Hydro speed levers" | research |
 | R15 | Memory order of cells by Morton, Hilbert or the graph, on a long run | locality in the sweep and fluxes | with voronoi-cpp's #34 | next |
 
 ## Accuracy and checks

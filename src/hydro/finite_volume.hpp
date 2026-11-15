@@ -34,7 +34,7 @@ struct Timings {
 
 // Used by: move(), mesh_stats(). What the mesh updates of a moving run did, summed over steps.
 struct MeshStats {
-    long long updates = 0, rebuilds = 0, stuck = 0, host_flips = 0, device_flips = 0;
+    long long updates = 0, rebuilds = 0, stuck = 0, host_flips = 0, device_flips = 0, resorts = 0;
 };
 
 template <int D, class ExecSpace = Kokkos::DefaultExecutionSpace, class Riemann = HLLC,
@@ -66,11 +66,18 @@ public:
 
     // mesh: built, update_cells() done. Static: its geometry must not change. Moving: this object owns the positions.
     // Moving at order 1: MUSCL-Hancock on a moving mesh, step_moving().
+    // owner_layout (3D): the lists carry the owner bit (voronoi::Layout::owner_bit), set here if the mesh lacks it. Same bits.
     FiniteVolume(const ExecSpace& exec, Mesh& mesh, const Gas& gas, int order, Update update,
-                 Limiter limiter = Limiter::face_centroid, Motion motion = Motion::static_mesh)
+                 Limiter limiter = Limiter::face_centroid, Motion motion = Motion::static_mesh, bool owner_layout = true)
         : exec_(exec), mesh_(&mesh), gas_(gas), order_(order), update_(update), limiter_(limiter), motion_(motion),
           both_meshes_(motion == Motion::moving && order == 1), n_(mesh.particles()) {
         if (order != 0 && order != 1) throw std::invalid_argument("hydro::FiniteVolume: order 0 or 1");
+        if constexpr (D == 3) {
+            if (owner_layout && !mesh.layout().owner_bit) {
+                mesh.set_layout(fast_layout(motion, mesh.layout()));
+                mesh.update_cells();
+            }
+        }
         q_ = Cells("hydro_Q", n_);
         if (order == 0 && update == Update::per_cell)
             next_ = Cells(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_Q_next")), n_);
@@ -86,8 +93,20 @@ public:
         refresh();
     }
 
+    // The mesh layout the hydro reads fastest: the owner bit, and on a static mesh faces numbered by owner (on a moving mesh
+    // that renumbering costs the mesh more than it saves here). Set it before the mesh's first update (faces are numbered there).
+    static voronoi::Layout fast_layout(Motion motion, voronoi::Layout layout = {}) {
+        layout.owner_bit = true;
+        layout.owner_faces = layout.owner_faces || motion == Motion::static_mesh;
+        return layout;
+    }
+
     // The extensive conserved state Q(i, v) = (mass, momentum, energy); set it before stepping.
-    Cells state() const { return q_; }
+    // A caller may change Q through it, so the primitive rows of the last update are not trusted after this call.
+    Cells state() const {
+        prims_ready_ = false;
+        return q_;
+    }
     // Moving: the positions of the mesh-generating points and their velocities.
     Points positions() const { return x_; }
     Points point_velocities() const { return w_; }
@@ -122,7 +141,8 @@ public:
         timer_.reset();
         refresh();
         borrow_scratch();
-        primitives();
+        if (!prims_ready_) primitives();
+        prims_ready_ = false;
         phase_end(timings, &Timings::primitives);
         const double dt = sweep(courant);
         swept_ = true;
@@ -137,7 +157,8 @@ public:
         refresh();
         if (!swept_) {
             borrow_scratch();
-            primitives();
+            if (!prims_ready_) primitives();
+            prims_ready_ = false;
             phase_end(timings, &Timings::primitives);
             sweep(1.0);
             phase_end(timings, &Timings::sweep);
@@ -155,7 +176,14 @@ public:
     }
 
     // Face sides of the last step that took the cell's state because the extrapolated one was not physical.
-    long long fallbacks() const { return fallbacks_; }
+    // Read back from the device here, so the flux passes need no fence of their own.
+    long long fallbacks() const {
+        long long first = 0, second = 0;
+        Kokkos::deep_copy(exec_, first, fallbacks_[0]);
+        Kokkos::deep_copy(exec_, second, fallbacks_[1]);
+        exec_.fence();
+        return first + second;
+    }
 
     // The radius of a sphere (D = 3) or circle (D = 2) of volume v. Used by: primitives().
     KOKKOS_INLINE_FUNCTION static double radius(double v) {
@@ -182,6 +210,7 @@ public:
         Kokkos::View<const double*, Memory> volume;
         typename Mesh::Positions positions;
         exact_predicates::BoxN<D> box;
+        bool bit = false;  // list entries carry the owner bit (voronoi::Layout::owner_bit)
 
         template <class Rows>
         KOKKOS_INLINE_FUNCTION Vec row(const Rows& v, int i) const {
@@ -226,6 +255,13 @@ public:
             const int o = owner_of(f), n = neighbour_of(f);
             return o == i ? n : o;
         }
+        // List entry k of cell i: its face, whether i owns it, the other cell (one load with the mesh's owner bit).
+        KOKKOS_INLINE_FUNCTION int face_at(int k) const { return tet_mesh::list_face(face(k)); }
+        KOKKOS_INLINE_FUNCTION bool owned_at(int k, int f, int i) const { return bit ? face(k) >= 0 : owner_of(f) == i; }
+        KOKKOS_INLINE_FUNCTION int other_at(int k, int f, int i) const {
+            if (!bit) return other(f, i);
+            return face(k) >= 0 ? neighbour_of(f) : owner_of(f);
+        }
         // Face centroid of face f relative to the centroid of cell i (a side of f).
         KOKKOS_INLINE_FUNCTION Vec face_offset(int f, int i) const {
             const int o = owner_of(f);
@@ -261,6 +297,7 @@ public:
         geometry_ = {mesh.owner(),     mesh.neighbour(), mesh.cell_face_start(), mesh.cell_face(),
                      mesh.area(),      mesh.face_centroid(), mesh.centroid(),    mesh.face_rows(),
                      mesh.volume(),    mesh.positions(),  mesh.sides()};
+        if constexpr (D == 3) geometry_.bit = mesh.layout().owner_bit;
     }
 
     // Sizes of the per-cell rows, each part on a 32-byte boundary. Used by: borrow_scratch(), the constructor.
@@ -334,7 +371,7 @@ public:
             G b[V][U] = {};
             const Vec centroid = geo.row(geo.centroid, i);
             for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                const int f = geo.face(k), j = geo.other(f, i);
+                const int f = geo.face_at(k), j = geo.other_at(k, f, i);
                 const State Wj = primitive_row(prim, j);
                 const Vec d = geo.separation(i, j);
                 const Vec a = geo.area_of(f);
@@ -381,7 +418,7 @@ public:
             if constexpr (Grad) {
                 for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
                     if (limiter == Limiter::none) break;
-                    const int f = geo.face(k);
+                    const int f = geo.face_at(k);
                     if (any_tiny) {
                         const Vec a = geo.area_of(f);
                         if (Kokkos::sqrt(dot(a, a)) < tiny) continue;
@@ -415,7 +452,7 @@ public:
                 hi[v] = -Kokkos::Experimental::finite_max_v<G>;
             }
             for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                const int f = geo.face(k), j = geo.other(f, i);
+                const int f = geo.face_at(k), j = geo.other_at(k, f, i);
                 const Vec a = geo.area_of(f);
                 if (Kokkos::sqrt(dot(a, a)) < tiny) continue;
                 const State Wj = primitive_row(prim, j);
@@ -582,6 +619,8 @@ public:
         phase_end(timings, &Timings::drift);
         geometry_ = {};  // no reference to what the update may reallocate
         const voronoi::Report report = mesh_->update(x_);
+        if (report.resorted) follow_resort();
+        mesh_stats_.resorts += report.resorted;
         mesh_stats_.updates += 1;
         mesh_stats_.rebuilds += report.rebuilt;
         mesh_stats_.stuck += report.stuck;
@@ -591,6 +630,28 @@ public:
         mesh_->update_cells();
         phase_end(timings, &Timings::cells);
         refresh();
+    }
+
+    // The mesh renumbered its cells (voronoi::Layout): every per-cell array that outlives the update follows. Used by: move().
+    void follow_resort() {
+        if constexpr (D == 3) {
+            mesh_->permute(q_);
+            mesh_->permute(x_);
+            mesh_->permute(w_);
+            if (!both_meshes_) return;
+            mesh_->permute(old_centroid_);
+            // Pass 2 reads pass 1's cell rows (in held_) by cell: each gathered back from a copy.
+            auto carry = [&](const auto& rows) {
+                using Rows = std::decay_t<decltype(rows)>;
+                Kokkos::View<typename Rows::data_type, typename Rows::array_layout, Memory> copy(
+                    Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_rows_copy")), rows.layout());
+                Kokkos::deep_copy(exec_, copy, rows);
+                mesh_->permute(copy, rows);
+            };
+            carry(prims_);
+            if (order_ == 1) carry(gradients_);
+            if (exponents_.data()) carry(exponents_);
+        }
     }
 
     // The flux through face f (times its area, owner to neighbour); `fallbacks` counts the sides that took the cell's state.
@@ -755,11 +816,9 @@ public:
                 }
             });
         apply<1>(MovingFlux<false>{{q_, prims_, gradients_, exponents_, w_, geometry_, gas_, 0.0}, old_centroid_}, 0.5 * dt, timings);
-        const long long first = fallbacks_;
         move(dt, timings);
         borrow_scratch();
-        apply<1>(MovingFlux<true>{{q_, prims_, gradients_, exponents_, w_, geometry_, gas_, 2 * dt}, old_centroid_}, 0.5 * dt, timings);
-        fallbacks_ += first;
+        apply<1>(MovingFlux<true>{{q_, prims_, gradients_, exponents_, w_, geometry_, gas_, 2 * dt}, old_centroid_}, 0.5 * dt, timings, 1);
     }
 
     // Picks the Moving instantiation. Used by: step().
@@ -778,8 +837,10 @@ public:
     }
 
     // Q -= dt * sum over the cell's faces of the outgoing flux; flux: a FaceFlux or MovingFlux. Used by: advance(), step_moving().
+    // pass: which fallback counter the flux pass writes (0, or 1 for a moving step's second pass).
     template <int Order, class Flux>
-    void apply(const Flux& flux, double dt, Timings* timings) {
+    void apply(const Flux& flux, double dt, Timings* timings, int pass = 0) {
+        if (pass == 0) Kokkos::deep_copy(exec_, fallbacks_[1], 0LL);
         const Geometry geo = geometry_;
         const auto q = q_;
         if (update_ == Update::per_cell) {
@@ -790,22 +851,26 @@ public:
                 KOKKOS_LAMBDA(int i, long long& count) {
                     State sum{};
                     for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                        const int f = geo.face(k);
+                        const int f = geo.face_at(k);
                         int fallbacks_o = 0, fallbacks_j = 0;
                         const State F = flux(f, fallbacks_o, fallbacks_j);
-                        const bool owned = geo.owner_of(f) == i;
+                        const bool owned = geo.owned_at(k, f, i);
                         count += owned ? fallbacks_o : fallbacks_j;
                         const double sign = owned ? 1.0 : -1.0;
                         for (int v = 0; v < V; ++v) sum[v] += sign * F[v];
                     }
                     for (int v = 0; v < V; ++v) next(i, v) = q(i, v) - dt * sum[v];
                 },
-                fallbacks_);
+                fallbacks_[pass]);
             phase_end(timings, &Timings::fluxes);
             if constexpr (Order == 0) std::swap(q_, next_);
             return;
         }
         const auto F = flux_;
+        // A moving step's second pass is on the next step's mesh: its update also writes the next primitive rows (as primitives()).
+        const bool next_prims = pass == 1;
+        const auto prim = prims_;
+        const Gas gas = gas_;
         Kokkos::parallel_reduce(
             "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
             KOKKOS_LAMBDA(int f, long long& count) {
@@ -814,18 +879,27 @@ public:
                 count += fallbacks;
                 for (int v = 0; v < V; ++v) F(f, v) = static_cast<FluxStore>(value[v]);
             },
-            fallbacks_);
+            fallbacks_[pass]);
         phase_end(timings, &Timings::fluxes);
         Kokkos::parallel_for(
             "hydro::update", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 State sum{};
                 for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                    const int f = geo.face(k);
-                    const double sign = geo.owner_of(f) == i ? 1.0 : -1.0;
+                    const int f = geo.face_at(k);
+                    const double sign = geo.owned_at(k, f, i) ? 1.0 : -1.0;
                     for (int v = 0; v < V; ++v) sum[v] += sign * static_cast<double>(F(f, v));
                 }
-                for (int v = 0; v < V; ++v) q(i, v) = q(i, v) - dt * sum[v];
+                State next;
+                for (int v = 0; v < V; ++v) q(i, v) = next[v] = q(i, v) - dt * sum[v];
+                if (next_prims) {
+                    const double inv = 1.0 / geo.volume(i);
+                    const State W = primitive(make_state<D>([&](int v) { return next[v] * inv; }), gas);
+                    for (int v = 0; v < V; ++v) prim(i, v) = W[v];
+                    prim(i, V) = sound_speed(W, gas);
+                    prim(i, V + 1) = radius(geo.volume(i));
+                }
             });
+        prims_ready_ = next_prims;
         phase_end(timings, &Timings::update);
     }
 
@@ -840,8 +914,10 @@ private:
     bool both_meshes_;  // moving at order 1: step_moving()
     int n_, faces_ = 0;
     bool swept_ = false;
+    mutable bool prims_ready_ = false;  // the last update wrote prims_ for the current Q and mesh
     StepRule rule_ = StepRule::arepo;
-    long long fallbacks_ = 0;
+    Kokkos::View<long long, Memory> fallbacks_[2] = {Kokkos::View<long long, Memory>("hydro_fallbacks"),
+                                                      Kokkos::View<long long, Memory>("hydro_fallbacks_second")};
     Kokkos::Timer timer_;
     Cells q_, next_;
     Prims prims_;
