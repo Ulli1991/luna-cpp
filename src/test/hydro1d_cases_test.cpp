@@ -471,6 +471,12 @@ int main(int argc, char* argv[]) {
         const Run r = simulate("super-tube-e", 2960, Motion::moving, Limiter::face_centroid, 0, 0.125, true, 30000);
         check.expect(r.reached && r.smallest > 5e-3 * h, "super-tube-e N=2960 moving to t = 0.125: smallest cell " + sci(r.smallest / h) + " h (> 5e-3 h), " + std::to_string(r.steps) + " steps");
     }
+    // Noh moving at AREPO's rule (#27): with no pair term at the wall the cold inflow took one step of 0.6; the mirror's term gives 4.9e-3 at 256 in 2220 steps.
+    {
+        const Run r = simulate("noh", 256, Motion::moving);
+        const Three l1 = l1_of("noh", r.cells);
+        check.expect(r.reached && r.steps > 1000 && l1[0] < 1.3 * 4.912e-3, "noh N=256 moving, AREPO's rule: " + std::to_string(r.steps) + " steps (> 1000), L1 rho " + sci(l1[0]) + " (< 1.3 x 4.91e-3)");
+    }
     // Teeth: a run stopped at 0.9 t misses the bound (LUNA's test_bound_catches_a_short_run).
     {
         const Run r = simulate("toro-1", 512, Motion::static_mesh, Limiter::face_centroid, 0, 0.9 * 0.25);

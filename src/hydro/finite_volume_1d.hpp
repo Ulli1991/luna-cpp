@@ -6,6 +6,18 @@
 // Same scheme as FiniteVolume<D> in finite_volume.hpp; an inflow wall supplies cells split from the end cell. Design: docs/design.md.
 namespace hydro {
 
+// HLLC, but HLL at a compressive face whose pressures differ by more than Ratio: HLLC keeps the entropy a shock leaves in each moving cell.
+// EXPERIMENT (T3, post-shock ripples). Used by: hydro_1d --riemann=hllc-s<Ratio x 100>.
+template <int Percent>
+struct HLLCShock {
+    template <int D, class T>
+    KOKKOS_INLINE_FUNCTION static StateT<D, T> flux(const StateT<D, T>& L, const StateT<D, T>& R, Vec<D, T> n, Vec<D, T> w, const Gas& gas) {
+        const T dv = dot(velocity(L) - velocity(R), n), lo = Kokkos::fmin(L[D + 1], R[D + 1]);
+        if (dv > 0 && Kokkos::fabs(R[D + 1] - L[D + 1]) > T(Percent) * T(0.01) * lo) return HLL::flux(L, R, n, w, gas);
+        return HLLC::flux(L, R, n, w, gas);
+    }
+};
+
 enum class Wall { reflective, outflow, inflow };
 // Used by: Stencil (ghost cells), set_inflow_spacing().
 struct Walls {
@@ -82,6 +94,7 @@ public:
         bool regularise, supply_left, supply_right;
         double spacing;
         double pv_lo = 0, pv_hi = 0;  // EXPERIMENT
+        double flat_k = 0;            // EXPERIMENT
 
         // Used by: wants_cell(). Whether end slot s has room for a cell from its wall, d grid steps from it.
         KOKKOS_INLINE_FUNCTION bool room_at(double volume, i64 d) const {
@@ -185,10 +198,12 @@ public:
             const Cell& me = *cell;
             const double dL = -gapL + cell[-1].c - me.c, dR = gapR + cell[1].c - me.c;
             const double Wi = me.W[v], left = cell[-1].W[v], right = cell[1].W[v];
-            if (limiter == Limiter::minmod || limiter == Limiter::van_leer) {
+            const double dpr = Kokkos::fabs(cell[1].W[2] - cell[-1].W[2]) / Kokkos::fmin(cell[1].W[2], cell[-1].W[2]);
+            const bool shock = flat_k > 0 && cell[-1].W[1] > cell[1].W[1] && dpr > flat_k;
+            if (limiter == Limiter::minmod || limiter == Limiter::van_leer || shock) {
                 const double sL = (left - Wi) / dL, sR = (right - Wi) / dR;
                 if (!(sL * sR > 0)) return 0.0;
-                if (limiter == Limiter::van_leer) return 2 * sL * sR / (sL + sR);
+                if (limiter == Limiter::van_leer && !shock) return 2 * sL * sR / (sL + sR);
                 return Kokkos::fabs(sL) < Kokkos::fabs(sR) ? sL : sR;
             }
             double g = ((right - Wi) - (left - Wi)) / (dR - dL);
@@ -631,7 +646,8 @@ private:
     // Used by: time_step(), supply_cells(), run(), run_fused().
     Stencil stencil() const {
         static const double lo = std::getenv("PV_LO") ? std::atof(std::getenv("PV_LO")) : 0.0, hi = std::getenv("PV_HI") ? std::atof(std::getenv("PV_HI")) : 0.0;
-        return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_, lo, hi};
+        static const double fk = std::getenv("FLAT") ? std::atof(std::getenv("FLAT")) : 0.0;
+        return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_, lo, hi, fk};
     }
     // Whether to look at the end cells after this step: as the kernels asked while gas enters, else every 64 steps. Used by: step(), run_fused().
     bool due() {

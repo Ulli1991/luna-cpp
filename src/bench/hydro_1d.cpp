@@ -243,7 +243,12 @@ int main(int argc, char* argv[]) {
     bool same = true;
     for (int run = 0; run < repeats; ++run) {
         const std::string file = run == repeats - 1 ? out : std::string();
-        const Result r = riemann == "hll" ? simulate<hydro::HLL>(pb, o, file) : simulate<hydro::HLLC>(pb, o, file);
+        const Result r = riemann == "hll"         ? simulate<hydro::HLL>(pb, o, file)
+                         : riemann == "hllc-s10"  ? simulate<hydro::HLLCShock<10>>(pb, o, file)
+                         : riemann == "hllc-s30"  ? simulate<hydro::HLLCShock<30>>(pb, o, file)
+                         : riemann == "hllc-s100" ? simulate<hydro::HLLCShock<100>>(pb, o, file)
+                         : riemann == "hllc-s300" ? simulate<hydro::HLLCShock<300>>(pb, o, file)
+                                                  : simulate<hydro::HLLC>(pb, o, file);
         std::cout << "run: " << run << " wall_s=" << r.wall_s << " M_cell_updates_per_s=" << double(r.cell_updates) / r.wall_s / 1e6
                   << " hash=" << r.hash << "\n";
         same = same && (run == 0 || r.hash == best.hash);
