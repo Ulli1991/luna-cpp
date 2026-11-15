@@ -6,6 +6,7 @@
 #include "support.hpp"
 
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -611,6 +612,35 @@ void lattice_tests(Check& check, const std::string& solver) {
             }
 }
 
+// The |area| kept per face for the sweep (LUNA_NO_MAGNITUDES turns it off) gives the same bits, static and moving.
+template <class Precision>
+void magnitude_tests(Check& check, const std::string& name_of_precision) {
+    using FV = hydro::FiniteVolume<3, Exec, hydro::HLLC, Precision>;
+    const hydro::Gas gas{5.0 / 3.0};
+    const int n = 4096;
+    const Points points = make_points("jittered", n);
+    for (const auto motion : {hydro::Motion::static_mesh, hydro::Motion::moving}) {
+        HostCells result[2];
+        for (int cached = 0; cached < 2; ++cached) {
+            if (cached)
+                unsetenv("LUNA_NO_MAGNITUDES");
+            else
+                setenv("LUNA_NO_MAGNITUDES", "1", 1);
+            typename FV::Mesh mesh(Exec{}, 1.0);
+            mesh.update(to_device(points));
+            mesh.update_cells();
+            FV fv(Exec{}, mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, motion);
+            set_state(fv, mesh, rough_state(n, gas));
+            for (int s = 0; s < 10; ++s) fv.step(fv.time_step(0.3));
+            result[cached] = host_state(fv, mesh);
+        }
+        unsetenv("LUNA_NO_MAGNITUDES");
+        check.expect(std::memcmp(result[0].data(), result[1].data(), sizeof(double) * 5 * n) == 0,
+                     name_of_precision + (motion == hydro::Motion::moving ? ", moving" : ", static") +
+                         ": the kept face magnitudes give the same bits over 10 steps");
+    }
+}
+
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     Check check;
@@ -632,6 +662,8 @@ int main(int argc, char** argv) {
     moving_step_tests<hydro::Precision<>>(check, "double", 1e-13);
     moving_step_tests<hydro::Precision<float, float, float>>(check, "mixed", 1e-6);
     moving_step_tests<hydro::Precision<float, hydro::Half, float, float>>(check, "low", 1e-6);
+    magnitude_tests<Default>(check, "grad32");
+    magnitude_tests<hydro::Precision<>>(check, "double");
     lattice_tests<hydro::HLLC>(check, "HLLC");
     lattice_tests<hydro::HLL>(check, "HLL");
     lattice_tests<hydro::HLLC, hydro::Precision<>>(check, "HLLC double");

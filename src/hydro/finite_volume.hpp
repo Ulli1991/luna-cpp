@@ -886,7 +886,6 @@ public:
         // The magnitudes the next sweep reads: from a moving step's second pass, or once on a static mesh.
         const bool keep = cache_magnitudes_ && (pass == 1 || (motion_ == Motion::static_mesh && !magnitudes_valid_));
         const auto mag = magnitudes_;
-
         Kokkos::parallel_reduce(
             "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
             KOKKOS_LAMBDA(int f, long long& count) {

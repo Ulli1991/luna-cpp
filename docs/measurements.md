@@ -164,6 +164,21 @@ A float Riemann solve with double fluxes (`--precision=riemann32`, kept as an op
 
 **Where this leaves the target.** The whole moving step is 27.0 ms at 128³ (12.9 ns per cell, 0.078 G cell updates/s): mesh and cells 9.8 ms (4.7 ns), hydro 17.2 ms (8.2 ns, 6632 B/cell at 50 % of peak). 3.3 to 5 ns per cell is 2.6 to 3.9 times away; the mesh alone already takes 4.7 ns. None of the three levers changes the data flow enough: the owner pass trades 290 B/cell of update reads for slower face evaluations, R14 trades 394 B/cell of memory for ring walks that read more than the rows, and the flux arithmetic is not what the passes wait on. The bytes floor of "Hydro step profile" (3900 B/cell with today's data flow) is unchanged.
 
+### Face reads once per step (2026-11-15)
+
+Can the step read each face's geometry fewer times, one thread per face kept? Branch `face-once-read`, against main (the cheaper flux, f86f704) in one A100 job each (gpu1, 1410 MHz), Sedov jittered, HLLC, 40 steps; script `scripts/hydro_once_a100.sh`. Where the reads are (ncu, one moving step at 128³, `grad32`): the sweep reads each face's area and centroid from both sides (1007 B/cell, latency-bound at 24 % of DRAM peak); each flux pass reads its mesh's rows once, contiguously; each update gathers every face's stored flux twice, 40 B rows that cost two 32 B sectors each, about 16 x 64 + list + Q = 1170 B/cell, which is what it moves (1150 and 1200). The two flux passes read different meshes (t^n and t^n+1); the mesh of t^n+1 is read by pass 2, then by the next step's sweep, face_step and pass 1, with a global barrier (new primitives, gradients, dt) between each. So a face's geometry can be carried only across those barriers, as a stored per-face value.
+
+| lever (commit) | 128³ moving `grad32` | static `grad32` | bits | job |
+|---|---|---|---|---|
+| \|area\| of each face kept by the last flux pass on the mesh (pass 2 on a moving mesh, the first pass on a static one) in the flux scratch, so the sweep reads 8 B instead of the 24 B area row per list entry | sweep 6.36 -> 5.75 ms, pass 2 +0.19 ms; step 0.0780 -> 0.0799 G cell updates/s | sweep 5.70 -> 5.01; 0.199 -> 0.213 | equal to main | 32371742 |
+| the drift folded into pass 1's update (one kernel fewer) | update +0.13 ms, drift -0.16: no change | | equal | 32371268 |
+
+ncu (job 32371744): the sweep 5.60 -> 4.99 ms and 1007 -> 764 B/cell, pass 2 3.11 -> 3.31 ms (+80 B/cell, the magnitudes written); the ten kernels 17.44 -> 17.23 ms and 6430 -> 6358 B/cell. Memory +65 B/cell (8 B a face in the scratch, which sets the peak): 2236 -> 2300 moving, 2301 -> 2366 static. `double` 128³: moving 0.0713 -> 0.0732, static 0.173 -> 0.184. MAGS256
+
+Bits: equal to main for all eight Sedov cases, the 3D vortex and both sound waves (`double`, `grad32`, `grad16`, moving and static, files equal byte for byte) and KH 2D 128 (hashes equal); the 1D code is not touched. So Sedov L1, the vortex, the sound waves, KH and the ladder are main's. TENDV2
+
+Not tried, and why: a compact per-face struct shared by both halves (the halves read different meshes, and float geometry is the `mixed` preset, which loses the 1e-6 sound wave); fusing the update with anything (each neighbour kernel needs all faces' fluxes first; the update is at its gather floor for 40 B rows; storing fluxes by owner was lever 1 above, refuted).
+
 ### 2D
 
 | Figure | Setup | Jobs |
