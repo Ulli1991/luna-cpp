@@ -3,6 +3,7 @@
     python ladder_1d.py plan <series,...> <problems,...|all> <b_lo> <b_hi>     # the tasks of ladder_1d_a100.sh
     python ladder_1d.py table <runs dir> <out dir> [refs dir]                   # L1 of every run, tables, ladder_1d.json
     python ladder_1d.py gates <runs dir> <out dir> [refs dir] > src/test/luna_1d_gates.hpp    # the gates of hydro1d_cases_test, from ladder_1d.json
+    python ladder_1d.py npz <runs dir> <out dir> <meta json> <series>:<problem>:<N>...         # final states as npz with provenance
 
 Run with LUNA's environment. The norm is LUNA's own tests': the sum over cells of V |W_i - exact_i|, W the cell's primitives and
 exact_i the exact solution's conservative average over the same cell (problems_1d.exact, 256 midpoints), for rho, v, P, on any
@@ -356,8 +357,29 @@ struct Band {
 """
 
 
+def npz(runs, out, meta, runs_wanted):
+    """Final states in the keys of luna-reference-solutions' luna/shu_osher/shu_osher_mc.npz, plus provenance (meta: code, commit,
+    build, settings) and the run's own JSON; ours add the cells' edges."""
+    info = json.load(open(meta))
+    os.makedirs(out, exist_ok=True)
+    for want in runs_wanted:
+        s, p, n = want.split(":")
+        f = path(runs, s, p, int(n), "+")
+        run = json.load(open(f + ".json"))
+        a, b, W = cells(f, p)
+        pb = pr.problem(p)
+        keys = dict(problem=p, series=s, box=np.asarray(pb["box"], float), t=float(pb["t"]), gamma=float(pb["gamma"]), riemann_solver="hllc",
+                    precision="fp64", n_run=int(n), steps=int(run["steps"]), wall_s=float(run["wall_s"]), reached=int(run.get("reached", 1)),
+                    rho=W[0], u=W[1], p=W[2], x_left=a, x_right=b, run_json=json.dumps(run), **info)
+        name = f"{out}/{s}_{p}_{n}.npz"
+        np.savez(name, **keys)
+        print(name, keys["steps"], keys["reached"])
+
+
 if __name__ == "__main__":
-    if sys.argv[1] == "plan":
+    if sys.argv[1] == "npz":
+        npz(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:])
+    elif sys.argv[1] == "plan":
         probs = ALL if sys.argv[3] == "all" else sys.argv[3].split(",")
         print("\n".join(plan(sys.argv[2].split(","), probs, int(sys.argv[4]), int(sys.argv[5]))))
     elif sys.argv[1] == "gates":
