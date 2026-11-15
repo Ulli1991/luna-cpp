@@ -222,7 +222,7 @@ struct HLLC {
         constexpr int P = D + 1;
         // Wave speeds and the contact speed from the normal velocities and sound speeds alone; the flux is then built for one side only.
         const T vnL = dot(velocity(L) - w, n), vnR = dot(velocity(R) - w, n);
-        // 1 / rho once per side, for c^2 and E* (products, not divisions; other rounding than main before 2026-11-15).
+        // 1 / rho once per side, for c^2 and E* (products, not divisions: rounding differs from a division).
         const T inv_rhoL = T(1) / L[0], inv_rhoR = T(1) / R[0];
         const T c2L = T(gas.gamma) * L[P] * inv_rhoL, c2R = T(gas.gamma) * R[P] * inv_rhoR;
         const bool ok = c2L >= 0 && c2R >= 0;
