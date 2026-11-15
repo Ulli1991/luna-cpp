@@ -221,9 +221,18 @@ public:
             const double fraction = d > r ? cell_shaping_speed : cell_shaping_speed * (d - 0.75 * r) / (0.25 * r);
             return offset * (fraction * sound_speed(W, gas) / d);
         }
+        // The point velocity: the fluid's at the generator, linear between the centroids of the cell at *cell and its neighbour on the generator's side, plus drift().
+        // At the cell's mean alone, a point at the edge of a long cell runs with gas a cell length away (luna-cpp #25). Used by: time_step(), Kernel::body().
+        KOKKOS_INLINE_FUNCTION double point_velocity(const Cell* cell, double gapL, double gapR, double g_rho, double volume) const {
+            const Cell& me = *cell;
+            const int side = me.c < 0 ? 1 : -1;
+            const double between = side > 0 ? gapR + cell[1].c - me.c : gapL + me.c - cell[-1].c;
+            const double v = me.W[1] + (cell[side].W[1] - me.W[1]) * (Kokkos::fabs(me.c) / between);
+            return v + drift(me.W, g_rho, me.c, volume);
+        }
     };
 
-    // The global time step (see TimeStep). |v - w| is the regularisation's.
+    // The global time step (see TimeStep). |v - w|: point_velocity()'s difference from the fluid's.
     // Used by: the driver before step(); run_fused() when cells were added or the order changed.
     double time_step(double courant, TimeStep rule = TimeStep::arepo, Timings* timings = nullptr) {
         timer_.reset();
@@ -246,7 +255,7 @@ public:
                 double vi = Kokkos::fabs(Wi[1]);
                 if (moving) {
                     const double g = second_order ? st.gradient(cell + 1, gap[0], gap[1], 0) : 0.0;
-                    vi = Kokkos::fabs(st.drift(Wi, g, cell[1].c, volume));
+                    vi = Kokkos::fabs(st.point_velocity(cell + 1, gap[0], gap[1], g, volume) - Wi[1]);
                 }
                 if (luna) {
                     smallest = Kokkos::fmin(smallest, courant * volume / (vi + ci));
@@ -466,7 +475,7 @@ public:
                 if constexpr (Order == 1)
                     for (int v = 0; v < V; ++v) grad[k][v] = st.gradient(cell + k, gap[k - 1], gap[k], v);
                 if constexpr (Moving)
-                    point[k] = cell[k].W[1] + st.drift(cell[k].W, grad[k][0], cell[k].c, 0.5 * (gap[k - 1] + gap[k]));
+                    point[k] = st.point_velocity(cell + k, gap[k - 1], gap[k], grad[k][0], 0.5 * (gap[k - 1] + gap[k]));
             }
             // Moving: each point's new key and its move in grid steps; a face moves by the mean of its generators' moves.
             sorted_mesh::Key key[5] = {0, 0, 0, 0, 0};

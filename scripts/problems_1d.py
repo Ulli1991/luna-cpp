@@ -42,6 +42,18 @@ PROBLEMS.update({
     "sound-advected": dict(kind="advected", box=(0.0, 1.0), t=1.0, gamma=G53, boundary=PERIODIC),
     "simple-wave": dict(kind="simple", amp=0.1, box=(0.0, 1.0), t=0.2, gamma=G14, boundary=PERIODIC),
 })
+# The super-hard tube (research_notes/super_tube_2026-11-10.md), the table of problems_1d.hpp: from x on, (rho, v, P), up to the next x.
+SUPER_SEGMENTS = ((0.0, (1, 0, 1)), (6.0, (10, 0, 1)), (6.05, (1, 0, 1)), (8.05, (1, 1, 1)), (8.80, (10, 1, 1)), (8.85, (1, 1, 1)),
+                  (9.60, (1, 0, 1)), (11.60, (1, 0.75, 1)), (12.10, (0.125, 0, 0.1)), (12.60, (1, 0, 1)), (14.60, (1, 0, 0.1)),
+                  (15.10, (1e-3, 0, 1e-10)), (15.60, (1, 0, 1)), (17.60, (3.857143, -0.810631, 10.33333)), (18.10, (1, -3.44, 1)),
+                  (18.60, (1, 0, 1)), (22.60, (5.99924, 19.5975, 460.894)), (22.90, (5.99242, -6.19633, 46.0950)), (23.20, (1, 0, 1)),
+                  (27.20, (1, -2, 0.4)), (27.70, (1, 2, 0.4)), (28.20, (1, 0, 1)), (32.20, (1, 0, 1000)), (32.30, (1, 0, 0.01)),
+                  (33.10, (1, 0, 100)))
+SUPER_LENGTH, SUPER_WAVE, SUPER_WAVELENGTH = 33.2, 1e-4, 0.25
+# The stages, (name, start, end): A to G single Riemann problems to t = 0.129 (scripts/super_tube_layout.py).
+SUPER_STAGES = (("A", 0.0, 1.0), ("B", 3.0, 4.0), ("C", 6.0, 6.05), ("C2", 8.05, 9.60), ("D", 11.60, 12.60), ("E", 14.60, 15.60),
+                ("F", 17.60, 18.60), ("S", 22.60, 23.20), ("G", 27.20, 28.20), ("H", 32.20, 33.20))
+PROBLEMS["super-tube"] = dict(kind="super", box=(0.0, SUPER_LENGTH), t=2.0, gamma=G14, boundary=OUTFLOW, right=REFLECTIVE)
 MACHS = ("1.2", "1.6556", "2", "3", "5", "10")
 
 
@@ -86,6 +98,8 @@ def initial(name, n, eps=EPS):
     lo, hi = pb["box"]
     edges = np.linspace(lo, hi, n + 1)
     a, b, g = edges[:-1], edges[1:], pb["gamma"]
+    if pb["kind"] == "super":
+        return super_initial(a, b)
     if pb["kind"] in ("tube", "shock"):
         f = np.clip((pb["x0"] - a) / (b - a), 0.0, 1.0)
         return f[None, :] * conserved(*[np.float64(v) for v in pb["WL"]], g)[:, None] \
@@ -103,6 +117,73 @@ def initial(name, n, eps=EPS):
         X, W = np.polynomial.legendre.leggauss(4)
         return sum(0.5 * w * conserved(*simple_exact(pb, x + 0.5 * (b - a) * q, 0.0), g) for q, w in zip(X, W))
     return None
+
+
+def super_wave(a, b, t):
+    """Stage B at t, per unit A: the integral over [a, b] of the entropy wave at rest and of the sound wave carried at c, over b - a."""
+    k, c = 2.0 * np.pi / SUPER_WAVELENGTH, np.sqrt(G14)
+
+    def part(shift):
+        lo, hi = np.maximum(a, 3.0 + shift), np.minimum(b, 4.0 + shift)
+        return np.where(hi > lo, (np.cos(k * (lo - 3.0 - shift)) - np.cos(k * (hi - 3.0 - shift))) / k, 0.0) / (b - a)
+    return part(0.0), part(c * t)
+
+
+def super_initial(a, b):
+    """The conserved cell averages of problems_1d.hpp, super_tube(): volume fractions; stage B linear in U."""
+    ends = [x for x, _ in SUPER_SEGMENTS[1:]] + [SUPER_LENGTH]
+    U = sum(np.clip(np.minimum(b, e) - np.maximum(a, x), 0.0, None) / (b - a) * conserved(*map(np.float64, W), G14)[:, None]
+            for (x, W), e in zip(SUPER_SEGMENTS, ends))
+    s, _ = super_wave(a, b, 0.0)
+    c = np.sqrt(G14)
+    return U + SUPER_WAVE * s * np.array([2.0, c, G14 / (G14 - 1.0)])[:, None]
+
+
+def super_fans(t):
+    """(x0, WL, WR, lo, hi) of every interface of the segments, [lo, hi] its waves at t (a contact alone: lo = hi)."""
+    out = []
+    for (_, WL), (x0, WR) in zip(SUPER_SEGMENTS, SUPER_SEGMENTS[1:]):
+        w = er.waves(tuple(map(float, WL)), tuple(map(float, WR)), G14)
+        left = min(w["left"]) if abs(w["p"] / WL[2] - 1) > 1e-12 else w["u"]   # no wave on a side whose pressure stays
+        right = max(w["right"]) if abs(w["p"] / WR[2] - 1) > 1e-12 else w["u"]
+        out.append((x0, WL, WR, x0 + left * t, x0 + right * t))
+    return out
+
+
+def super_meets(t):
+    """Pairs of neighbouring interfaces whose waves overlap at t, by x0: [] while each stays a single Riemann problem."""
+    fans = super_fans(t)
+    return [(A[0], B[0]) for A, B in zip(fans, fans[1:]) if A[4] > B[3]]
+
+
+SUPER_EXACT = 22.6   # A to F; G's interfaces too. S and H interact within themselves at once: not exact
+SUPER_G = (27.2, 27.7, 28.2)
+
+
+def super_exact(a, b, t, sub=256):
+    """(rho, u, p) averages of the cells at t < 0.129 on A to G: each interface's Riemann solution inside its waves, between them
+    the segment's state, stage B linear. Cells of S and H: not exact (each interface's Riemann solution alone)."""
+    f = (np.arange(sub) + 0.5) / sub
+    out = np.empty((3, a.size))
+    fans = super_fans(t)
+    his = np.array([hi for *_, hi in fans])
+    states = [np.array([w[i] for _, w in SUPER_SEGMENTS], float) for i in range(3)]
+    for s in range(0, a.size, 4096):
+        A, B = a[s:s + 4096], b[s:s + 4096]
+        x = A[:, None] + (B - A)[:, None] * f[None, :]
+        k = np.searchsorted(np.sort(his), x, side="right")     # the segment between two interfaces' waves
+        W = [st[k] for st in states]
+        for x0, WL, WR, lo, hi in fans:
+            m = (x >= lo) & (x < hi)
+            if m.any() and (x0 < SUPER_EXACT or x0 in SUPER_G):
+                fan = er.sample(tuple(map(float, WL)), tuple(map(float, WR)), G14, (x[m] - x0) / t)
+                for i in range(3):
+                    W[i][m] = fan[i]
+        out[:, s:s + 4096] = conserved(*W, G14).mean(axis=2)
+    e, sound = super_wave(a, b, t)
+    c = np.sqrt(G14)
+    out += SUPER_WAVE * (e * np.array([1.0, 0.0, 0.0])[:, None] + sound * np.array([1.0, c, G14 / (G14 - 1.0)])[:, None])
+    return primitive(out, G14)
 
 
 def vacuum_sample(WL, WR, g, xi):
@@ -181,6 +262,8 @@ def exact(name, a, b, eps=EPS):
     """(rho, u, p) of the cells [a, b] at t_end."""
     pb = problem(name)
     kind, g = pb["kind"], pb["gamma"]
+    if kind == "super":
+        return super_exact(a, b, 0.1)
     if kind in ("tube", "shock"):
         return averages(pb, a, b)
     if kind == "noh":
