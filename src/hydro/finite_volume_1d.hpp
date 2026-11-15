@@ -81,6 +81,7 @@ public:
         Limiter limiter;
         bool regularise, supply_left, supply_right;
         double spacing;
+        double pv_lo = 0, pv_hi = 0;  // EXPERIMENT
 
         // Used by: wants_cell(). Whether end slot s has room for a cell from its wall, d grid steps from it.
         KOKKOS_INLINE_FUNCTION bool room_at(double volume, i64 d) const {
@@ -227,7 +228,9 @@ public:
             const Cell& me = *cell;
             const int side = me.c < 0 ? 1 : -1;
             const double between = side > 0 ? gapR + cell[1].c - me.c : gapL + me.c - cell[-1].c;
-            const double v = me.W[1] + (cell[side].W[1] - me.W[1]) * (Kokkos::fabs(me.c) / between);
+            const double q = Kokkos::fabs(me.c) / (0.5 * volume);
+            const double weight = pv_hi <= pv_lo ? (q >= pv_lo ? 1.0 : 0.0) : Kokkos::fmin(1.0, Kokkos::fmax(0.0, (q - pv_lo) / (pv_hi - pv_lo)));
+            const double v = me.W[1] + weight * (cell[side].W[1] - me.W[1]) * (Kokkos::fabs(me.c) / between);
             return v + drift(me.W, g_rho, me.c, volume);
         }
     };
@@ -264,9 +267,9 @@ public:
                 const double r = 0.5 * volume;
                 double step = r / (ci + vi);
                 for (int side = -1; side <= 1; side += 2) {
+                    // Behind a wall the ghost, at the end generator's mirror (cold gas into a wall, Noh, luna-cpp #15, #27).
                     const int t = st.line.slot(s, side);
-                    if (t < 0) continue;
-                    const State Wj = st.primitive_of(t);
+                    const State Wj = t >= 0 ? st.primitive_of(t) : st.ghost(Wi, side < 0);
                     const double dist = st.length(side < 0 ? s - 1 : s);
                     const double vsig = ci + sound_speed(Wj, st.gas) - (Wj[1] - Wi[1]) * side;
                     if (vsig > 0) step = Kokkos::fmin(step, (dist + r) / vsig);
@@ -627,7 +630,8 @@ private:
     }
     // Used by: time_step(), supply_cells(), run(), run_fused().
     Stencil stencil() const {
-        return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_};
+        static const double lo = std::getenv("PV_LO") ? std::atof(std::getenv("PV_LO")) : 0.0, hi = std::getenv("PV_HI") ? std::atof(std::getenv("PV_HI")) : 0.0;
+        return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_, lo, hi};
     }
     // Whether to look at the end cells after this step: as the kernels asked while gas enters, else every 64 steps. Used by: step(), run_fused().
     bool due() {
