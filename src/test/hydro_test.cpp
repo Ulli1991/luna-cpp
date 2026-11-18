@@ -177,7 +177,7 @@ HostCells rough_state(int n, const hydro::Gas& gas) {
 }
 
 // Display name of an update loop. Used by: mesh_tests, moving_step_tests, lattice_tests.
-const char* name(hydro::Update u) { return u == hydro::Update::per_cell ? "per cell" : "per face"; }
+const char* name(hydro::Update u) { return u == hydro::Update::per_cell ? "per cell" : u == hydro::Update::per_face ? "per face" : "atomic"; }
 
 // Precision: a hydro policy; with float face rows a cell's areas close only to ~1e-7, so a uniform state stays uniform only to that.
 template <class Riemann, class Precision = hydro::DefaultPrecision<3>>
@@ -253,6 +253,28 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
     const double loop_tolerance = std::is_same_v<typename Precision::flux, float> ? 1e-5 : 1e-12;
     check.expect(loops < loop_tolerance, solver + ", " + kind + ": the per-cell and the per-face loop agree to rounding (" + sci(loops) +
                                     (same(result[0][0], result[1][0]) ? ", same bits)" : ")"));
+    {  // Update::atomic: each face adds its flux to both cells as it is made; the order of the additions varies run to run.
+        FV fv(Exec{}, mesh, gas, 1, hydro::Update::atomic);
+        set_state(fv, mesh, rough_state(n, gas));
+        const HostCells start = host_extensive(fv);
+        for (int s = 0; s < 10; ++s) fv.step(fv.time_step(0.3));
+        const HostCells end = host_extensive(fv), atomic = host_state(fv, mesh);
+        double drift = 0, apart = 0;
+        for (int v = 0; v < 5; ++v) {
+            long double before = 0, after = 0, scale = 0;
+            for (int i = 0; i < n; ++i) {
+                before += start(i, v);
+                after += end(i, v);
+                scale += std::abs(start(i, v));
+            }
+            drift = std::max(drift, static_cast<double>(std::abs(after - before) / scale));
+        }
+        for (int i = 0; i < n; ++i)
+            apart = std::max(apart, relative({atomic(i, 0), atomic(i, 1), atomic(i, 2), atomic(i, 3), atomic(i, 4)},
+                                             {result[1][0](i, 0), result[1][0](i, 1), result[1][0](i, 2), result[1][0](i, 3), result[1][0](i, 4)}));
+        check.expect(drift < 1e-14 && apart < loop_tolerance, solver + ", " + kind + ": the atomic update conserves (" + sci(drift) +
+                                                                ") and agrees with the per-face loop to rounding (" + sci(apart) + ", 10 steps)");
+    }
 }
 
 

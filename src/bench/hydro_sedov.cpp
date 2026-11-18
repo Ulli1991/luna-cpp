@@ -359,7 +359,7 @@ void run(const Options& o, Points points) {
     const double hydro_ms = median(prim_ms) + median(sweep_ms) + median(flux_ms) + median(update_ms);
     const double step_ms = hydro_ms + median(drift_ms) + median(mesh_ms) + median(cells_ms);
     std::cout << "run: precision=" << o.precision
-              << " order=" << o.order << " update=" << (o.update == hydro::Update::per_cell ? "cell" : "face")
+              << " order=" << o.order << " update=" << o.loop
               << " steps=" << steps << " limiter=" << o.limit << " riemann=" << o.riemann << " mesh=" << (o.moving ? "moving" : "static")
               << " bulk=" << o.bulk << " blast=" << o.blast << " t=" << t << " wall_s=" << wall_s << " s_per_step=" << wall_s / steps
               << " gpu_s=" << gpu_ms * 1e-3 << "\n";
@@ -419,7 +419,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]).rfind("--", 0) != 0) args.push_back(argv[i]);
     if (args.size() < 2) {
-        std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face] [--limiter=face|none]"
+        std::cerr << "usage: hydro_sedov <side> <jittered|uniform> [--order=0|1] [--update=cell|face|atomic] [--limiter=face|none]"
                      " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|riemann32|single|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]"
@@ -433,7 +433,7 @@ int main(int argc, char** argv) {
     o.order = std::stoi(flag(argc, argv, "--order", "1"));
     // Default loop: the faster one measured on the A100.
     o.loop = flag(argc, argv, "--update", o.order == 1 ? "face" : "cell");
-    o.update = o.loop == "face" ? hydro::Update::per_face : hydro::Update::per_cell;
+    o.update = o.loop == "face" ? hydro::Update::per_face : o.loop == "atomic" ? hydro::Update::atomic : hydro::Update::per_cell;
     o.limit = flag(argc, argv, "--limiter", "face");
     o.limiter = o.limit == "none" ? hydro::Limiter::none : hydro::Limiter::face_centroid;
     o.riemann = flag(argc, argv, "--riemann", "hllc");
