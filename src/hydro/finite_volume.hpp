@@ -313,7 +313,7 @@ public:
         KOKKOS_INLINE_FUNCTION Vec face_centroid_of(int f) const {
             if constexpr (float_rows)
                 return make_vec<D>([&](int a) { return static_cast<double>(rows(f, 3 + a)); });
-            else if (centroid32.data())
+            else if (centroid32.extent(0) != 0)  // not data(): an empty view of zero rows may have a pointer
                 return make_vec<D>([&](int a) { return static_cast<double>(centroid32(f, a)); });
             else
                 return row(face_centroid, f);
