@@ -1,9 +1,20 @@
 # The super-hard 1D tube, v2 (2026-11-18)
 
-Branch super-tube-v2 (from main 2d08e1e). [M] measured, [I] inference. v1: research_notes/super_tube_2026-11-10.md. v2 keeps v1's stages A to H
-unchanged and adds five of the hardest known 1D problems. Code: `scripts/super_tube_layout.py v2` (layout, fronts, timing),
-`problems_1d.hpp` `super_tube_v2` and `scripts/problems_1d.py` `super2_*` (the same initial state, exact cell averages; the exact solution),
-`scripts/super_tube_v2.py` (scores, initial cells for other codes, figures, npz), `scripts/super_tube_v2_{run,gpu,build}.sh` (runs).
+**Preliminary**: the moving mesh's runs to t = 4 (m0 tube, N = 4096 and 32768, SLURM 32522444 and 32522445 on gpu1) were still running when
+this went in; their rows follow in a later commit. Everything else here is measured and final.
+
+Branch super-tube-v2 (from main 2d08e1e, merged with main 73f763a and 68d1e65). [M] measured, [I] inference.
+v1: research_notes/super_tube_2026-11-10.md. v2 keeps v1's stages A to H unchanged and adds five of the hardest known 1D problems.
+Code:
+- `scripts/super_tube_layout.py v2`: layout, fronts, timing;
+- `problems_1d.hpp` `super_tube_v2` and `scripts/problems_1d.py` `super2_*`: the same initial state as exact cell averages, and the exact
+  solution;
+- `scripts/super_tube_v2.py`: scores, initial cells for other codes, figures, npz;
+- `scripts/super_tube_v2_{run,gpu,build}.sh`: the runs.
+
+LUNA runs with its positivity floors on, `floor=1` in `scripts/luna_1d_run.py`. That is `preserve_face_states=True`, the RAMSES floors
+with `hydro_smallr` = `hydro_smallc` = 1e-10, off by default in LUNA; `allow_first_order_faces=True` as before. Section "LUNA and its
+floors" has what changes without them.
 
 ## Layout
 
@@ -61,8 +72,8 @@ segments and the smooth parts as metadata. Totals at N = 4096 and 32768: mass 46
 
 On its window, from the middle of the buffer on its left (0 for M) to the middle of the one on its right, on the cells of the tube at the
 spacing of N = 4096 (M 255, L 256, SO 592, N 306, V 408 cells) and 8 times as many (the spacing of 32768), open walls, to t = 0.1.
-Runs: LUNA (60cf841, HLLC, MC, CFL 0.8, one core), luna-cpp static (LUNA's rule, 0.8) and moving (AREPO's rule, 0.4), OpenMP, one core.
-LUNA at 64 times the cells is the check reference. L1 of ρ against the exact solution (SO: against LUNA 64×):
+Runs: LUNA (60cf841, HLLC, MC, CFL 0.8, floors on, one core), luna-cpp static (LUNA's rule, 0.8) and moving (AREPO's rule, 0.4), OpenMP,
+one core. LUNA at 64 times the cells is the check reference. L1 of ρ against the exact solution (SO: against LUNA 64×):
 
 | stage | LUNA 4096 | LUNA 32768 | LUNA 262144 | static 4096 | static 32768 | moving 4096 | moving 32768 |
 |---|---|---|---|---|---|---|---|
@@ -81,7 +92,8 @@ LUNA at 64 times the cells is the check reference. L1 of ρ against the exact so
 - L, N, V: moving is 2.3 to 3.5 times better than static at 4096 and 2.0 to 3.5 times at 32768; its smallest cells stay at 0.04 h (L),
   0.05 h (N) and 0.13 h (V).
 - SO: moving is 1.2 to 1.3 times worse than static at both N.
-- N at 4096: static and LUNA overshoot to ρ = 9.2 where the streams meet (exact 6.0); moving holds 6 with an oscillation in the centre cells.
+- N at 4096: static and LUNA overshoot where the streams meet, to ρ = 7.4 alone and 9.2 in the tube (exact 6.0; Courant number below);
+  moving holds 6 with an oscillation in the centre cells.
 
 Figures: docs/figures/super_tube_v2_alone_{M,L,SO,N,V}.png.
 
@@ -102,12 +114,11 @@ Tables: reports/super_tube_v2_tube.md and reports/super_tube_v2_single.md (`scri
 |---|---|---|
 | luna-cpp moving | 4096 (A100) | stops at t = 0.00126 after 32 steps: stage M's end cell collapses at the open wall (#14) |
 | luna-cpp moving | 4096 (one core), 32768 | the same collapse, but the run carries on: NaN spreads from the wall cell by 2 cells a step; every cell is NaN at step 16428 (t = 0.0437, 32768); the next step jumps to t_end, and the run reports reached = 1 at t = 0.1 and at t = 4 (#29, filed) |
-| LUNA | 4096, 32768, 2^19 | NaN at step 1270, 10538 and 128760 (2^19: first layout). The first negative pressure is in stage N, at the shock the ambient gas drives into the cold stream from behind: x = 25.40 at t = 0.323 (4096), x = 25.37 at t = 0.326 (32768). LUNA has no pressure floor; luna-cpp static, the same scheme with floors, runs on |
-| LUNA | 2^20 | reaches t = 4 (5.83 million steps, 3750 s on one A100) |
-| luna-cpp static | 4096 to 2^20 | reaches t = 4 at every N with ρ and P positive (min ρ 0.032, min P 0.15 at t = 4) |
+| LUNA, floors on | 4096, 32768, 2^20 | reaches t = 4: 12953 and 106188 steps (luna-cpp static's counts), 5828783 steps in 3695 s on one A100 for 2^20; ρ and P positive |
+| luna-cpp static | 4096 to 2^20 | reaches t = 4 at every N, ρ and P positive (min ρ 0.032, min P 0.15 at t = 4) |
 
-So stage M stops the moving mesh, and stage N stops LUNA after t₁. Both failures are stage-local: the moving mesh runs every other stage
-(m0), and static luna-cpp equals LUNA until the floors act.
+So stage M stops the moving mesh, and no stage stops LUNA or luna-cpp static when floors are on. Stage N needs them; see "LUNA and its
+floors".
 
 ### t₁ = 0.1: L1(ρ) per stage
 
@@ -145,29 +156,27 @@ serves for both. Moving is the m0 tube; at t₁ its stages A and on are those of
 
 ### t = 4: L1(ρ) per stage against LUNA 2^20
 
-| stage | static 4096 | static 32768 | static 2^19 (check) | static 2^20 (check) |
-|---|---|---|---|---|
-| M | 8.47e-5 | 7.39e-5 | 3.13e-6 | 4.0e-12 |
-| A | 6.77e-4 | 1.34e-4 | 2.69e-6 | 4.6e-12 |
-| B | 7.71e-4 | 8.52e-5 | 3.80e-6 | 9.2e-12 |
-| C | 5.89e-3 | 1.20e-3 | 5.14e-5 | 1.2e-7 |
-| C2 | 1.23 | 2.92e-1 | 1.94e-2 | 1.7e-4 |
-| D | 1.04 | 2.57e-1 | 2.41e-2 | 9.4e-4 |
-| E | 2.49e-1 | 7.22e-2 | 5.81e-3 | 2.0e-4 |
-| L | 1.47e-1 | 5.53e-2 | 4.95e-3 | 2.0e-4 |
-| F | 9.54e-1 | 4.29e-1 | 3.45e-2 | 3.5e-4 |
-| SO | 3.07e-1 | 7.92e-2 | 5.12e-3 | 6.7e-5 |
-| N | 3.27e-2 | 1.26e-2 | 1.03e-3 | 1.2e-5 |
-| S | 4.37e-1 | 1.31e-1 | 1.30e-2 | 1.8e-4 |
-| G | 5.76e-1 | 1.53e-1 | 1.28e-2 | 2.9e-4 |
-| V | 7.98e-2 | 2.21e-2 | 1.61e-3 | 1.4e-5 |
-| H | 2.20e-1 | 5.42e-2 | 3.21e-3 | 7.4e-6 |
+| stage | LUNA 4096 | LUNA 32768 | static 4096 | static 32768 | moving 4096 (m0) | moving 32768 (m0) | static 2^19 (check) | static 2^20 (check) |
+|---|---|---|---|---|---|---|---|---|
+| M | 8.47e-5 | 7.39e-5 | 8.47e-5 | 7.39e-5 | - | - | 3.13e-6 | 4.0e-12 |
+| A | 6.77e-4 | 1.34e-4 | 6.77e-4 | 1.34e-4 | - | - | 2.69e-6 | 4.6e-12 |
+| B | 7.71e-4 | 8.52e-5 | 7.71e-4 | 8.52e-5 | - | - | 3.80e-6 | 9.2e-12 |
+| C | 5.89e-3 | 1.20e-3 | 5.89e-3 | 1.20e-3 | - | - | 5.14e-5 | 1.2e-7 |
+| C2 | 1.23 | 2.92e-1 | 1.23 | 2.92e-1 | pending | pending | 1.94e-2 | 1.7e-4 |
+| D | 1.04 | 2.57e-1 | 1.04 | 2.57e-1 | pending | pending | 2.41e-2 | 9.4e-4 |
+| E | 2.49e-1 | 7.22e-2 | 2.49e-1 | 7.22e-2 | pending | pending | 5.81e-3 | 2.0e-4 |
+| L | 1.47e-1 | 5.52e-2 | 1.47e-1 | 5.53e-2 | pending | pending | 4.95e-3 | 2.0e-4 |
+| F | 9.54e-1 | 4.29e-1 | 9.54e-1 | 4.29e-1 | pending | pending | 3.45e-2 | 3.5e-4 |
+| SO | 3.07e-1 | 7.92e-2 | 3.07e-1 | 7.92e-2 | pending | pending | 5.12e-3 | 6.7e-5 |
+| N | 3.27e-2 | 1.26e-2 | 3.27e-2 | 1.26e-2 | pending | pending | 1.03e-3 | 1.2e-5 |
+| S | 4.37e-1 | 1.31e-1 | 4.37e-1 | 1.31e-1 | pending | pending | 1.30e-2 | 1.8e-4 |
+| G | 5.76e-1 | 1.53e-1 | 5.76e-1 | 1.53e-1 | pending | pending | 1.28e-2 | 2.9e-4 |
+| V | 7.98e-2 | 2.21e-2 | 7.98e-2 | 2.21e-2 | pending | pending | 1.61e-3 | 1.4e-5 |
+| H | 2.20e-1 | 5.42e-2 | 2.20e-1 | 5.42e-2 | pending | pending | 3.21e-3 | 7.4e-6 |
 
-LUNA at 4096 and 32768 has no t = 4 state (NaN, above).
-
-Moving at t = 4 (m0, A100): jobs 32522444 (4096) and 32522445 (32768) were still running when this was written. They are to be scored on
-C2 to H only: by t = 4 stage M changes the regions of M, A, B and C (static 32768, max |Δρ| between v2 and m0: 0.74, 0.55, 0.32,
-0.08) and nothing after them (≤ 1e-12).
+The moving columns are **pending**: jobs 32522444 (4096) and 32522445 (32768). They are scored on C2 to H only: by t = 4 stage M changes
+the regions of M, A, B and C (static 32768, max |Δρ| between v2 and m0: 0.74, 0.55, 0.32, 0.08) and nothing after them (≤ 1e-12). LUNA
+with its floors equals luna-cpp static to 7e-12 at 4096 and to L1(ρ) 1.5e-3 at 32768 over the tube (max |Δρ| 9e-3).
 
 ### Is t = 4 resolved?
 
@@ -177,29 +186,41 @@ Yes, by the brief's criterion.
 - Static 2^20 equals LUNA 2^20 to ≤ 1e-3 per stage (floors and rounding).
 - LUNA's mirrored halves differ by at most 2 % of ρ in a cell and 1e-3 in any stage's L1.
 
-So t = 4 stays.
+So t = 4 stays. LUNA at 2^19 was not rerun with its floors (its run without them went NaN, below); static 2^19 stands in for it.
 
-One caveat: the reference is one N away from failing. LUNA itself goes NaN at 2^19 in stage N, and its 2^20 run passes the same
-cold-stream shock without its pressure crossing zero. An independent code at 2^20 (AthenaK) would remove that dependence.
+### LUNA and its floors
+
+LUNA's floors (`preserve_face_states`) are off by default. Our driver did not turn them on for any run before 2026-11-18: not v1's tube,
+not the 30-test ladder, not v2's first runs. What they change, measured:
+- **v2, N = 4096 and 32768, to t = 4**: without the floors the pressure turns negative at step 1270 (4096) and 10538 (32768), t = 0.32 to
+  0.33, in stage N at x = 25.40 and 25.37. That is the shock the ambient gas drives into the cold stream from behind. The run goes NaN, and
+  so did LUNA at 2^19 (first layout, step 128760). **With the floors on, LUNA survives stage N** and reaches t = 4 at both N, with the same
+  step counts as luna-cpp static.
+- **Everything else is bit-identical** with and without the floors: v2 at t = 0.1 at 4096 and 32768, the 2^20 reference at t = 0.1 and
+  t = 4, and all 15 single-stage runs.
+- **v1**: LUNA's v1 runs (super-tube, 4096 and 32768, to t = 2) are bit-identical with the floors on, so no v1 number changes. v1's 2^20
+  run was not repeated.
+
+An earlier draft of this note said stage N breaks LUNA because LUNA has no pressure floor. That was wrong: the floor exists and was off.
 
 ### Which stage breaks which code
 
-| stage | LUNA (static, no floors) | luna-cpp static | luna-cpp moving |
+| stage | LUNA (floors on) | luna-cpp static | luna-cpp moving |
 |---|---|---|---|
 | M Mach 1e4 out through the open wall | runs; rear edge heats to 1e4-1e5 P₀ | the same | **fails at once** (#14); in the tube the NaN state is reported as reached (#29) |
 | L 1e6 / 1e12 jump | runs, positive | runs | runs; 2.6× better than static at t₁ (32768) |
 | SO Shu-Osher | runs | runs | runs; level with static (alone 1.3× worse) |
-| N Noh streams | **NaN after t ≈ 0.32** (negative P at the cold-stream shock); at t₁, 4096, overshoots to ρ = 9.2 where the streams meet (exact 6) | runs (floors) | runs; 4.3× better at t₁ (32768) |
+| N Noh streams | runs; without its floors NaN at t ≈ 0.32 (negative P at the cold-stream shock). At t₁, 4096, it overshoots to ρ = 9.2 where the streams meet (exact 6) | runs (floors) | runs; 4.3× better at t₁ (32768) |
 | V true vacuum | runs; ρ down to 1.8e-3 at 32768, alone (exact 0) | runs | runs; 3.1× better at t₁ (32768) |
 
 ## Open
 
-- Moving to t = 4 (m0) at 4096 and 32768: jobs still running at the time of writing; their row goes into the t = 4 table.
+- Moving to t = 4 (m0) at 4096 and 32768: jobs 32522444 and 32522445 still running; their columns go into the t = 4 table.
 - #14: a wall that gas leaves through must remove cells. Until then, the moving mesh cannot run v2 as defined.
 - #29: a non-finite state must stop the run.
 - An independent reference at 2^20 (AthenaK) for t = 4. AREPO and GIZMO runs of v2 (the next step) from the initial cells in
   luna-reference-solutions `luna-cpp/super_tube_v2/ic/`.
 
 Figures: docs/figures/super_tube_v2_<stage>.png (ρ in the stage's region; t = 0.1 above, t = 4 below; N = 4096 left, 32768 right) and
-docs/figures/super_tube_v2_alone_<stage>.png. Data: luna-reference-solutions branch super-tube-v2 (d32caa3), `luna/super_tube_v2/`,
+docs/figures/super_tube_v2_alone_<stage>.png. Data: luna-reference-solutions branch super-tube-v2, `luna/super_tube_v2/`,
 `luna-cpp/super_tube_v2/`.

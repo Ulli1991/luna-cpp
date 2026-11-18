@@ -233,50 +233,52 @@ def figures(runs, singles, out):
         a, b, W = lad.cells(f, p)
         return 0.5 * (a + b), W, st
 
-    def panel(ax, lo, hi, curves, refs, text):
-        ys = []
+    def panel(ax, lo, hi, curves, refs, text, reserve=0):
+        """One panel: references (black), runs, the region [lo, hi]; the data stay below a band of headroom as tall as the corner
+        text's lines, or `reserve` lines in the panel that holds the legend (upper right), so neither crosses a curve."""
+        ys, top_exact = [], -np.inf
         for x, y, kw in refs:
             m = (x >= lo) & (x <= hi)
             ax.plot(x[m], y[m], **{"color": "k", "lw": lw, "zorder": 2.7, **kw})
-            if kw.get("label") != "exact":   # the exact vacuum (rho = 0) does not set the axis
+            if kw.get("label") != "exact":   # the exact vacuum (rho = 0) does not set the axis's lower end
                 ys.append(y[m])
+            elif m.any():
+                top_exact = y[m].max()
         for x, y, s, extra in curves:
             m = (x >= lo) & (x <= hi) & np.isfinite(y)
             ax.plot(x[m], y[m], **{"lw": lw, "zorder": 3 if s == "moving" else 2, **{k: v for k, v in style[s].items() if k != "label"}, **extra})
             ys.append(y[m])
         y = np.concatenate([v for v in ys if v.size]) if ys else np.array([1.0])
         y = y[np.isfinite(y) & (y > 0)]
-        if y.size and y.max() / max(y.min(), 1e-300) > 100:
-            ax.set_yscale("log")
-            ax.set_ylim(0.3 * y.min(), 3.0 * y.max())
+        frac = 1.0 - (0.06 + 0.075 * max(text.count("\n") + 1, reserve))   # headroom: per line of the corner text or of the legend
+        if y.size:
+            a, b = y.min(), max(y.max(), top_exact)
+            if b / max(a, 1e-300) > 100:
+                ax.set_yscale("log")
+                la, lb = np.log10(a) - 0.1, np.log10(b)
+                ax.set_ylim(10 ** la, 10 ** (la + (lb - la) / frac))
+            else:
+                span = b - a
+                if span < 1e-9 * max(abs(b), 1.0):   # flat (stage A): a window of +-2 % around it
+                    span = 0.04 * max(abs(b), 1.0)
+                    a = b - 0.5 * span
+                ax.set_ylim(a - 0.03 * span, a - 0.03 * span + 1.03 * span / frac)
         ax.set_xlim(lo, hi)
         ax.text(0.03, 0.95, text, transform=ax.transAxes, ha="left", va="top", fontsize=10, zorder=5,
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.5))
         decorate(ax)
 
-    def place_legend(fig, axes, handles, labels):
-        """One compact legend inside a panel: of every panel and corner or edge position, the one whose box holds the fewest curve
-        points (a curve point counts 1, a label's box 10^6, the axes' edge padding aside), so it crosses no curve and no text."""
-        fig.canvas.draw()
-        best = None
-        for ax in axes:
-            pts = [ln.get_transform().transform(np.column_stack([ln.get_xdata(), ln.get_ydata()])) for ln in ax.get_lines() if len(ln.get_xdata())]
-            pts = np.concatenate(pts) if pts else np.zeros((0, 2))
-            pts = pts[np.isfinite(pts).all(axis=1)]
-            texts = [t.get_window_extent() for t in ax.texts]
-            for loc in ("upper right", "lower right", "lower left", "center right", "lower center", "upper center", "center left", "upper left"):
-                leg = ax.legend(handles, labels, loc=loc, **LEG)
-                fig.canvas.draw()
-                bb = leg.get_window_extent().expanded(1.04, 1.08)
-                inside = ((pts[:, 0] >= bb.x0) & (pts[:, 0] <= bb.x1) & (pts[:, 1] >= bb.y0) & (pts[:, 1] <= bb.y1)).sum()
-                cost = inside + 1e6 * sum(bb.overlaps(t) for t in texts)
-                leg.remove()
-                if best is None or cost < best[0]:
-                    best = (cost, ax, loc)
-        best[1].legend(handles, labels, loc=best[2], **LEG)
-        return best[0]
+    def legend(ax, axes):
+        """One compact legend, every curve's label once, in the upper right of `ax` (its headroom band holds 5 rows)."""
+        handles, labels = [], []
+        for a in axes:
+            for h, lab in zip(*a.get_legend_handles_labels()):
+                if lab not in labels:
+                    handles.append(h); labels.append(lab)
+        ax.legend(handles, labels, loc="upper right", frameon=False, fontsize=9, handlelength=1.6, labelspacing=0.25, handletextpad=0.5,
+                  borderaxespad=0.4)
 
-    LEG = dict(frameon=False, fontsize=9, handlelength=1.6, labelspacing=0.25, handletextpad=0.5, borderaxespad=0.4)
+    ROWS = 5   # legend rows at most: exact, LUNA 2^20 (or 64x), LUNA MC, static, moving
 
     e = np.linspace(0.0, pr.SUPER2_LENGTH, 2 ** 17 + 1)
     xe, We = 0.5 * (e[:-1] + e[1:]), np.stack(pr.super2_exact(e[:-1], e[1:], 0.1))
@@ -310,20 +312,14 @@ def figures(runs, singles, out):
                         notes.append(f"{style[s]['label']}{tag}: state NaN (luna-cpp #29)")
                         continue
                     curves.append((r[0], r[1][0], s, dict(label=style[s]["label"] + tag)))
-                panel(ax, lo, hi, curves, rr, f"$t = {t}$, $N = {n}$" + "".join("\n" + s for s in notes))
+                panel(ax, lo, hi, curves, rr, f"$t = {t}$, $N = {n}$" + "".join("\n" + s for s in notes), ROWS if (i, j) == (0, 1) else 0)
                 if i == 1:
                     ax.set_xlabel(r"$x$")
                 if j == 0:
                     ax.set_ylabel(r"$\rho$")
-        handles, labels = [], []
-        for ax in axes.flat:
-            for h, lab in zip(*ax.get_legend_handles_labels()):
-                if lab not in labels:
-                    handles.append(h); labels.append(lab)
         fig.subplots_adjust(hspace=0.08, wspace=0.18)
-        cost = place_legend(fig, list(axes.flat), handles, labels)
+        legend(axes[0, 1], axes.flat)
         name = f"{out}/super_tube_v2_{k}.png"
-        print(name, "legend overlap", cost)
         fig.savefig(name)
         plt.close(fig)
         print(name, NAMES[k])
@@ -346,17 +342,11 @@ def figures(runs, singles, out):
                     notes.append(f"{s} stopped at t = {r[2]['t']:.2g}")
                     continue
                 curves.append((r[0], r[1][0], s, dict(label=style[s]["label"])))
-            panel(ax, lo, hi, curves, rr, f"{k} alone, $t = 0.1$\n{n} cells (spacing of $N = {label}$)" + "".join("\n" + s for s in notes))
+            panel(ax, lo, hi, curves, rr, f"{k} alone, $t = 0.1$\n{n} cells ($N = {label}$)" + "".join("\n" + s for s in notes), ROWS)
             ax.set_xlabel(r"$x$")
         axes[0].set_ylabel(r"$\rho$")
-        handles, labels = [], []
-        for ax in axes:
-            for h, lab in zip(*ax.get_legend_handles_labels()):
-                if lab not in labels:
-                    handles.append(h); labels.append(lab)
-        cost = place_legend(fig, list(axes), handles, labels)
+        legend(axes[1], axes)
         name = f"{out}/super_tube_v2_alone_{k}.png"
-        print(name, "legend overlap", cost)
         fig.savefig(name)
         plt.close(fig)
         print(name)
