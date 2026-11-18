@@ -16,6 +16,20 @@ README speed table, `grad32`, job 31954615 at 1305 MHz: static HLLC 0.170 at 2.1
 
 voronoi-cpp 2c8c509 to 6ead543 (circumcentres in grid steps #45, edge representatives #48, step kernels, incremental face numbering, ring re-walk), job 32269986, both trees in the same A100 job (SM clock not recorded), two rounds: whole moving step 0.0704 to 0.0729 at 128³ and 0.0737 to 0.0762 at 256³, the mesh update in it 0.279 to 0.323 G; static 0.170 to 0.169. Memory moving 2255 to 2236 B/cell at both sizes (39410 to 39076 MB in use at 256³), static 2185 to 2166. The README's moving row and our memory are these after values.
 
+voronoi-cpp 6ead543 to abd3d39, 2026-11-18. The changes: faster exact start and close-gaps, V1 dropped and R14 opt-in, #60's filtered warp kernels, the cpu/gpu/hybrid modes (`voronoi::Engine`), and S2's local repair with the default `Fallback::cheapest`. Old tree: luna-cpp main 2d08e1e; new tree: branch `pin-abd3d39`. They differ only in the pin and in the `stuck_steps`, `local_repairs` and `local_cells` counters of `hydro_sedov` (the old tree got `stuck_steps` for the comparison). Scripts: `scripts/pin_bits_a100.sh`, `pin_speed_a100.sh` and `pin_ci_host.sh`. The API needed no change.
+- Builds and tests: A100 ctest 5 of 5 (job 32520636). CI's host steps (job 32520637: gcc 15, host Kokkos with OpenMP, 2 threads): ctest 5 of 5 with sanitizers off and on, and lint (check_comments.py, clang-tidy 18) clean. `hydro1d_cases` holds the ladder gates.
+- Bits (job 32520636, 1305 MHz): the hashes of Q, x and volume are equal on static, moving, order 0, per-cell moving and HLL moving Sedov 128³ (50 steps), and on moving Sedov 128³ to 1e4 yr (349 steps). `hydro_1d` hashes are equal for Sod, Shu-Osher and Woodward-Colella at N = 1024, static and moving, and `hydro_kh2d` hashes for 256² over 300 steps, static and moving. The only difference is the device flip count, a few in 10⁶ (17044 against 17066 over 50 steps); it varies the same way between two runs of one binary.
+- Stuck steps (job 32520651), moving Sedov to 1e4 yr, two runs per pin: 128³ (349 steps) had none on either pin. 256³ (919 steps) had none on the old pin. On abd3d39, one run had one step with 6 stuck entries, the count of #8; it was repaired locally (49 cells, no rebuild), and the run ended with Q, x and volume equal to the other three runs. No rebuild and no host finish in any run.
+- Speed (job 32520651, ravg1060, SM clock 1305 MHz in all 934 samples under load, `grad32`, 40 steps, three rounds, old and new alternating). G cell updates/s, medians; mesh update ms per step in brackets:
+
+| | 128³ old | 128³ new | 256³ old | 256³ new |
+|---|---|---|---|---|
+| static | 0.2137 | 0.2134 | 0.2194 | 0.2191 |
+| moving, whole step | 0.0800 (6.50) | 0.0807 (6.49) | 0.0867 (40.30) | 0.0876 (39.79) |
+| peak B/cell, moving / static | 2300.5 / 2365.6 | 2300.6 / 2365.7 | 2300.6 / 2365.7 | 2300.6 / 2365.7 |
+
+The moving step is 0.9 % and 1.0 % faster: the hydro by 0.5 % (16.52 to 16.44 ms at 128³) and the mesh update by 1.3 % at 256³. Static is 0.1 % slower at both sizes: hydro 9.815 to 9.827 ms at 128³, a little more than the spread of the rounds. The static step runs no mesh code, so the cause is not explained; it may be code placement in the new binary. Moving Sedov to 1e4 yr took 9.68 instead of 9.77 GPU seconds at 128³ and 188.5 instead of 190.4 at 256³. These 1305 MHz rates equal the README's earlier ones, which were recorded as 1410 MHz, to three digits.
+
 Hashes in job 31954615 at 128³, 50 steps, CUDA: `--precision=double` equals main 3449600 on static, moving, moving one pass, order 0, per-cell moving and HLL moving; `default` equals `grad32` static and moving.
 
 Rows left out of the README, same job: `--precision=double` static HLL 0.157 at 2.1M cells; first order 0.312 in both precisions. Peak device memory at 16.8M cells, GB in use: `grad32` static 38.2, two passes 39.4, one pass 39.0; double 39.3, 40.5, 40.1. `--precision=mixed`, two passes, 2445 B/cell, does not fit at 256³; one pass 2334 B/cell (40.7 GB, job 31925336). LUNA memory: job 31953468.

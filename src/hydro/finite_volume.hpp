@@ -36,6 +36,7 @@ struct Timings {
 // Used by: move(), mesh_stats(). What the mesh updates of a moving run did, summed over steps.
 struct MeshStats {
     long long updates = 0, rebuilds = 0, stuck = 0, host_flips = 0, device_flips = 0, resorts = 0;
+    long long stuck_steps = 0, local_repairs = 0, local_cells = 0;  // updates with stuck entries; local repairs (tet_local)
 };
 
 template <int D, class ExecSpace = Kokkos::DefaultExecutionSpace, class Riemann = HLLC,
@@ -635,6 +636,9 @@ public:
         mesh_stats_.updates += 1;
         mesh_stats_.rebuilds += report.rebuilt;
         mesh_stats_.stuck += report.stuck;
+        mesh_stats_.stuck_steps += report.stuck > 0;
+        mesh_stats_.local_repairs += report.local_done;
+        mesh_stats_.local_cells += report.local_cells;
         mesh_stats_.host_flips += report.host_flips;
         mesh_stats_.device_flips += report.flips;
         phase_end(timings, &Timings::mesh);
