@@ -53,8 +53,8 @@ PRECISION = f"{RUNS}/build-roofline/logs/ladder-31953468.out"  # scripts/profile
 DIMS = f"{RUNS}/build-roofline/logs"  # scripts/dims_a100.sh
 SCALING = f"{RUNS}/build-roofline/logs/roof-31928911.out"  # scripts/roofline_a100.sh on branch roofline, job 31928911
 
-LAD_RUNS = f"{RUNS}/build-1dtests/runs"      # scripts/ladder_1d_a100.sh
-LADDER = f"{RUNS}/build-1dtests/report/ladder_1d.json"
+LAD_RUNS = os.environ.get("LADDER_RUNS", f"{RUNS}/build-1dtests/runs")      # scripts/ladder_1d_a100.sh
+LADDER = os.environ.get("LADDER_JSON", f"{RUNS}/build-1dtests/report/ladder_1d.json")
 LADDER_NAMES = {"toro-1": "Toro 1", "toro-2": "Toro 2", "toro-3": "Toro 3", "toro-4": "Toro 4", "toro-5": "Toro 5", "einfeldt-strong": "Einfeldt strong", "einfeldt-shear": "Einfeldt shear", "la-vacuum": "LA vacuum (rho = 0)", "la-peak": "LA Peak",
                 "la-rcvcr": "LA RCVCR", "la-stationary": "LA stationary", "la-slow": "LA slow", "la-streams": "LA streams", "la-near-vacuum": "LA near vacuum", "leblanc": "LeBlanc",
                 "noh": "Noh", "shu-osher": "Shu-Osher", "woodward-colella": "Woodward-Colella", "titarev-toro": "Titarev-Toro", "sound-right": "sound right", "sound-left": "sound left",
@@ -1219,7 +1219,7 @@ def fig_hard():
     """Density of the hard cases at one N: LUNA, static, moving, exact; a zoom under each."""
     cases = (("leblanc", "LeBlanc", "moving", True, (0.70, 0.76), [0.71, 0.73, 0.75], "shock", None, (7e-4, 2.5)),
              ("einfeldt-strong", "Einfeldt strong, moving: wide line", "moving-wide", False, (0.42, 0.58), [0.45, 0.50, 0.55], "near vacuum", None, (-0.03, 1.32)),
-             ("noh", "Noh, moving: fixed dt", "moving-fixed", False, (0.0, 0.03), [0.0, 0.01, 0.02], "wall heating", (2.9, 4.5), (0.5, 5.6)),
+             ("noh", "Noh", "moving", False, (0.0, 0.03), [0.0, 0.01, 0.02], "wall heating", (2.9, 4.5), (0.5, 5.6)),
              ("toro-3", "Toro 3", "moving", False, (0.76, 0.82), [0.77, 0.79, 0.81], "shock", (0.3, 8.8), (0, 10.5)))
     n = 1024
     fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.15))
@@ -1342,7 +1342,7 @@ def fig_leblanc():
 def fig_noh():
     views = (((0.0, 0.02), [0.0, 0.01, 0.02], "a", "wall heating", (3.2, 4.6)), ((0.08, 0.12), [0.09, 0.10, 0.11], "b", "post-shock gas", (3.96, 4.04)),
              ((0.19, 0.21), [0.19, 0.20, 0.21], "c", "shock", (0.5, 4.8)), ((0.25, 0.35), [0.27, 0.30, 0.33], "d", "inflow", (0.996, 1.004)))
-    fig_case("noh", 1024, "moving-fixed", "moving, fixed dt (#15)", views, (0.5, 6.2), "Noh", xlim=(0.0, 0.4), residual=(-1.0, 1.0))
+    fig_case("noh", 1024, "moving", "moving", views, (0.5, 6.2), "Noh", xlim=(0.0, 0.4), residual=(-1.0, 1.0))
 
 
 def fig_sound():
@@ -1352,6 +1352,64 @@ def fig_sound():
     fig_case("sound-right", 8192, "moving", "moving", views, (-1.35, 2.2), "sound right", scale=lambda r: (r - 1.0) / pr1d.EPS,
              ylabel=r"$(\rho-1)/10^{-6}$", residual=lim, zoom_residual=True, res_scale=1e5,
              res_label=r"error $[10^{-5}]$")
+
+
+SUPER_RUNS = os.environ.get("SUPER_TUBE_RUNS", "/raven/u/uli/luna-cpp-fix25/build-omp/super/runs25")  # build-omp/super/run_one.sh, luna_ref_gpu.sh
+SUPER_N, SUPER_REF = 4096, 1048576
+
+
+def super_run(series, n, t):
+    a, b, W = lad.cells(f"{SUPER_RUNS}/{series}_super-tube_{n}_t{t}" + (".npz" if series == "luna" else ".npy"), "super-tube")
+    return 0.5 * (a + b), W[0]
+
+
+def fig_super_tube(t, views, ylim, n=SUPER_N):
+    """The super-hard tube at t: density over the line, LUNA, static, moving at N = n; exact (A to G at 0.1), LUNA 2^20; zooms below."""
+    x_ref, r_ref = super_run("luna", SUPER_REF, t)
+    refs = [(x_ref, r_ref, dict(AK, label=f"LUNA $2^{{{SUPER_REF.bit_length() - 1}}}$"))]
+    if t == "0.1":
+        e = np.linspace(0.0, pr1d.SUPER_LENGTH, 2 ** 16 + 1)
+        xe, re_ = 0.5 * (e[:-1] + e[1:]), pr1d.super_exact(e[:-1], e[1:], 0.1)[0]
+        re_ = np.where((xe < 20.6) | ((xe > 25.9) & (xe < 30.2)), re_, np.nan)   # S and H are not single Riemann problems
+        refs = [(xe, re_, dict(REF, label="exact (A to G)"))] + refs
+    series = [s for s in ("luna", "static", "moving") if os.path.exists(f"{SUPER_RUNS}/{s}_super-tube_{n}_t{t}" + (".npz" if s == "luna" else ".npy"))]
+    runs = [(*super_run(s, n, t), s) for s in series]
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.8))
+    outer = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.16)
+    ax = fig.add_subplot(outer[0])
+    for x, y, kw in refs:
+        ax.plot(x, y, **{k: v for k, v in kw.items() if k != "label"})
+    for x, y, s in runs:
+        line(ax, x, y, s)
+    ax.set_xlim(0.0, pr1d.SUPER_LENGTH)
+    ax.set_ylim(*ylim)
+    ax.set_yscale("log")
+    ax.set_ylabel(r"$\rho$")
+    corner(ax, f"$t = {t}$, $N = {n}$", x=0.01, y=0.04, va="bottom")
+    names = {"luna": "LUNA MC", "static": "static", "moving": "moving"}
+    ax.legend(handles=[key(s, names[s]) for s in series] + [rkey(kw["label"], {k: v for k, v in kw.items() if k != "label"}) for *_, kw in refs],
+              **dict(LEGEND, loc="lower left", bbox_to_anchor=(0.0, 0.1), ncol=3))
+    z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
+    for a, (vx, ticks, letter, label, vy) in zip(z, views):
+        zoom(ax, a, vx, ticks, runs, [r[:2] + ({k: v for k, v in r[2].items() if k != "label"},) for r in refs], letter, label, vy)
+        a.set_xlabel(r"$x$")
+        if vy and vy[1] / vy[0] > 100:   # a jump over decades
+            a.set_yscale("log")
+            a.yaxis.set_major_locator(matplotlib.ticker.LogLocator(numticks=4))
+    z[0].set_ylabel(r"$\rho$")
+    save(fig, f"super_tube_t{t.replace('.', '')}" + ("" if n == SUPER_N else f"_{n}"))
+
+
+def fig_super_early(n=SUPER_N):
+    views = (((8.87, 8.98), [8.88, 8.92, 8.96], "a", "C2 moving peak", (0.5, 12)), ((15.1, 15.3), [15.15, 15.2, 15.25], "b", "E extreme jump", (3e-4, 3)),
+             ((21.72, 21.98), [21.75, 21.85, 21.95], "c", "S left shock", (0.5, 20)), ((27.35, 28.05), [27.4, 27.7, 28.0], "d", "G near vacuum", (0.01, 4)))
+    fig_super_tube("0.1", views, (4e-4, 3e3), n)
+
+
+def fig_super_end(n=SUPER_N):
+    views = (((5.9, 6.25), [5.95, 6.05, 6.15], "a", "C stationary peak", (0.5, 13)), ((9.4, 9.9), [9.5, 9.65, 9.8], "b", "C2 peak", (0.5, 13)),
+             ((11.2, 12.2), [11.3, 11.7, 12.1], "c", "D to F", (1.5, 26)), ((30.6, 31.4), [30.7, 31.0, 31.3], "d", "H front", (0.05, 1.3)))
+    fig_super_tube("2", views, (0.03, 60), n)
 
 
 GRID_N = 4096
@@ -1421,7 +1479,9 @@ FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_w
            "time_to_target_1d": fig_time, "vortex_3d": fig_vortex, "kh_2d": fig_kh, "kh_2d_density": fig_kh_density, "sedov_3d": fig_sedov, "throughput_scaling": fig_throughput,
            "sedov3d_shock": fig_sedov_shock, "sedov3d_radial": fig_sedov_radial, "kh_2d_mesh": fig_kh_mesh, "kh_2d_evolution": fig_kh_evolution, "sedov3d_mesh": fig_sedov_mesh, "throughput_precision": fig_throughput_precision, "throughput_dimensions": fig_throughput_dims,
            "ladder_1d": fig_ladder, "hard_1d": fig_hard, "grid_1d": fig_grid, "titarev_toro": fig_titarev_toro,
-           "toro_5": fig_toro5, "toro_2": fig_toro2, "leblanc": fig_leblanc, "noh": fig_noh, "sound_right": fig_sound}
+           "toro_5": fig_toro5, "toro_2": fig_toro2, "leblanc": fig_leblanc, "noh": fig_noh, "sound_right": fig_sound,
+           "super_tube_t01": fig_super_early, "super_tube_t2": fig_super_end,
+           "super_tube_t01_32768": lambda: fig_super_early(32768), "super_tube_t2_32768": lambda: fig_super_end(32768)}
 
 
 def main():

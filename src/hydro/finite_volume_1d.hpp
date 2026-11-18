@@ -221,9 +221,21 @@ public:
             const double fraction = d > r ? cell_shaping_speed : cell_shaping_speed * (d - 0.75 * r) / (0.25 * r);
             return offset * (fraction * sound_speed(W, gas) / d);
         }
+        // The point velocity relative to the cell's mean velocity: drift(), plus, for a generator beyond 0.75 r of its centroid (where the drift starts),
+        // up to the fluid's velocity at the generator, linear between the centroids of this cell and its neighbour there (luna-cpp #25).
+        // Used by: time_step(), Kernel::body().
+        KOKKOS_INLINE_FUNCTION double point_velocity(const Cell* cell, double gapL, double gapR, double g_rho, double volume) const {
+            const Cell& me = *cell;
+            const double r = 0.5 * volume, d = Kokkos::fabs(me.c), weight = Kokkos::fmin(1.0, (d - 0.75 * r) / (0.25 * r));
+            const double drifting = drift(me.W, g_rho, me.c, volume);
+            if (!(weight > 0)) return drifting;
+            const int side = me.c < 0 ? 1 : -1;
+            const double between = side > 0 ? gapR + cell[1].c - me.c : gapL + me.c - cell[-1].c;
+            return drifting + weight * (cell[side].W[1] - me.W[1]) * (d / between);
+        }
     };
 
-    // The global time step (see TimeStep). |v - w| is the regularisation's.
+    // The global time step (see TimeStep). |v - w|: point_velocity().
     // Used by: the driver before step(); run_fused() when cells were added or the order changed.
     double time_step(double courant, TimeStep rule = TimeStep::arepo, Timings* timings = nullptr) {
         timer_.reset();
@@ -246,7 +258,7 @@ public:
                 double vi = Kokkos::fabs(Wi[1]);
                 if (moving) {
                     const double g = second_order ? st.gradient(cell + 1, gap[0], gap[1], 0) : 0.0;
-                    vi = Kokkos::fabs(st.drift(Wi, g, cell[1].c, volume));
+                    vi = Kokkos::fabs(st.point_velocity(cell + 1, gap[0], gap[1], g, volume));
                 }
                 if (luna) {
                     smallest = Kokkos::fmin(smallest, courant * volume / (vi + ci));
@@ -255,9 +267,9 @@ public:
                 const double r = 0.5 * volume;
                 double step = r / (ci + vi);
                 for (int side = -1; side <= 1; side += 2) {
+                    // Behind a wall the ghost, at the end generator's mirror (cold gas into a wall, Noh, luna-cpp #15, #27).
                     const int t = st.line.slot(s, side);
-                    if (t < 0) continue;
-                    const State Wj = st.primitive_of(t);
+                    const State Wj = t >= 0 ? st.primitive_of(t) : st.ghost(Wi, side < 0);
                     const double dist = st.length(side < 0 ? s - 1 : s);
                     const double vsig = ci + sound_speed(Wj, st.gas) - (Wj[1] - Wi[1]) * side;
                     if (vsig > 0) step = Kokkos::fmin(step, (dist + r) / vsig);
@@ -466,7 +478,7 @@ public:
                 if constexpr (Order == 1)
                     for (int v = 0; v < V; ++v) grad[k][v] = st.gradient(cell + k, gap[k - 1], gap[k], v);
                 if constexpr (Moving)
-                    point[k] = cell[k].W[1] + st.drift(cell[k].W, grad[k][0], cell[k].c, 0.5 * (gap[k - 1] + gap[k]));
+                    point[k] = cell[k].W[1] + st.point_velocity(cell + k, gap[k - 1], gap[k], grad[k][0], 0.5 * (gap[k - 1] + gap[k]));
             }
             // Moving: each point's new key and its move in grid steps; a face moves by the mean of its generators' moves.
             sorted_mesh::Key key[5] = {0, 0, 0, 0, 0};

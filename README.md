@@ -146,7 +146,7 @@ An extreme shock tube, with a pressure ratio of 10⁹ across the start. Moving, 
 
 ![Noh density](docs/figures/noh.png)
 
-Gas streaming into a wall builds a shock that moves back out, with a well-known dip in density at the wall. The moving mesh avoids the dip, but behind the shock it shows small cell-to-cell noise; it runs at a fixed step here ([#15](https://github.com/Ulli1991/luna-cpp/issues/15)).
+Gas streaming into a wall builds a shock that moves back out, with a well-known dip in density at the wall, N = 1024. The moving mesh avoids most of the dip. It runs at its default time step since the wall entered AREPO's rule as the end cell's mirror ([#27](https://github.com/Ulli1991/luna-cpp/issues/27)); before, cold gas into the wall allowed one step of the whole run. Behind the shock it keeps a cell-to-cell density pattern of about 3e-4 of the density at every N, which nothing in the cells' frame damps, so its error stops falling near 2.5e-4 (N = 32768 on): level with LUNA at 512, twice LUNA's at 4096, 20 times at 131072.
 
 ### Sound wave
 
@@ -156,11 +156,11 @@ A small sound wave travelling once across a periodic line, the cleanest test of 
 
 ### Super-hard tube
 
-![Super-hard tube at t = 0.1, LUNA](docs/figures/super_tube_t01_luna.png)
+![Super-hard tube at t = 0.1](docs/figures/super_tube_t01.png)
 
-![Super-hard tube at t = 2, LUNA](docs/figures/super_tube_t2_luna.png)
+![Super-hard tube at t = 2](docs/figures/super_tube_t2.png)
 
-Our own test that puts the hard parts of the other 1D tests on one line: a quiet region, smooth waves, a standing and a moving density peak, a sonic-point rarefaction, a jump with a pressure ratio of 10⁹, a slow shock, colliding streams, a near-vacuum gap and a double blast against a reflecting wall, with an open wall on the left. At t = 0.1 the stages have not met yet and most have an exact solution; by t = 2 the blast's reflections have swept through all of them. Shown is LUNA at N = 4096 against the exact solution and its own run at 2²⁰ cells. Our static mesh matches LUNA in every stage; our moving mesh does not reach t = 2 yet ([#25](https://github.com/Ulli1991/luna-cpp/issues/25)). The setup is in research_notes/super_tube_2026-11-10.md; the problem is not in main's code yet (branch super-tube-run).
+Our own test that puts the hard parts of the other 1D tests on one line: a quiet region, smooth waves, a standing and a moving density peak, a sonic-point rarefaction, a jump with a pressure ratio of 10⁹, a slow shock, colliding streams, a near-vacuum gap and a double blast against a reflecting wall, with an open wall on the left. At t = 0.1 the stages have not met yet and most have an exact solution; by t = 2 the blast's reflections have swept through all of them. Shown are LUNA, static and moving at N = 4096 against the exact solution and LUNA's own run at 2²⁰ cells. Our static mesh matches LUNA in every stage; the moving mesh is ahead in every stage at t = 0.1 except the smooth waves (2.7 % behind) and the sonic rarefaction (level), and holds the peaks and the front of the blast in far fewer cells at t = 2. The moving mesh reaches t = 2 since a point whose cell is lopsided, its generator beyond 0.75 r of the centroid, moves with the gas velocity at the generator ([#25](https://github.com/Ulli1991/luna-cpp/issues/25)): at N = 4096 its density error over all stages is 1.15 against static's 2.66. The setup is in research_notes/super_tube_2026-11-10.md, the problem is `super-tube` in `problems_1d.hpp`.
 
 ### All 30 tests against resolution
 

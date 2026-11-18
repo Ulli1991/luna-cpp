@@ -66,13 +66,20 @@ bool has(int argc, char** argv, const char* name) {
     return false;
 }
 
+// x in %.4e, for the .json. Used by: main.
+std::string sci(double x) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.4e", x);
+    return b;
+}
+
 // Parsed flags. Filled by: main; Used by: simulate.
 struct Options {
     int n = 0, order = 1;
     double jitter = 0, courant = 0.8, fixed_dt = 0, inflow_spacing = 1, max_wall = 0;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
     hydro::Motion motion = hydro::Motion::static_mesh;
-    bool fixed = false, phases = false, regularise = true, fused = true;
+    bool fixed = false, phases = false, regularise = true, fused = true, smallest = false;
     hydro::TimeStep rule = hydro::TimeStep::luna;
     long long max_steps = 0;
 };
@@ -82,7 +89,7 @@ struct Result {
     long long steps = 0, sorts = 0, cell_updates = 0;
     int cells = 0;
     bool reached = false;
-    double wall_s = 0, t = 0;
+    double wall_s = 0, t = 0, smallest_h = 0;  // smallest_h: with --smallest, in units of L / N
     std::uint64_t hash = 0;
     hydro::Timings timings;
 };
@@ -152,6 +159,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     double t = 0;
     const bool fused = o.fused && !o.fixed && !o.phases && o.rule == hydro::TimeStep::luna;
     double next = fused ? fv.time_step(o.courant, o.rule) : 0;
+    double smallest = 1e300;
     while (t < pb.t_end * (1 - 1e-12) && (o.max_steps == 0 || r.steps < o.max_steps)) {
         double dt = fused ? next : o.fixed ? o.fixed_dt : fv.time_step(o.courant, o.rule, timings);
         if (!(dt > 1e-15 * pb.t_end) || (o.max_wall > 0 && timer.seconds() > o.max_wall)) break;
@@ -163,7 +171,14 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
             fv.step(dt, timings);
         t += dt;
         ++r.steps;
+        if (o.smallest && o.motion == hydro::Motion::moving) {  // --smallest: the smallest inner cell over all steps, as hydro1d_cases
+            const auto p = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.positions());
+            std::vector<double> at(p.data(), p.data() + fv.cells());
+            std::sort(at.begin(), at.end());
+            for (std::size_t i = 1; i + 1 < at.size(); ++i) smallest = std::min(smallest, 0.5 * (at[i + 1] - at[i - 1]));
+        }
     }
+    r.smallest_h = smallest * n / pb.L;
     exec.fence();
     r.wall_s = timer.seconds();
     r.t = t;
@@ -200,8 +215,8 @@ int main(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|none|minmod|vanleer]"
-                     " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused]"
-                     " [--inflow-spacing=s] [--out=file.npy] [--series=name]\n";
+                     " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--smallest]"
+                     " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name]\n";
         return 1;
     }
     const std::string name = argv[1];
@@ -225,6 +240,7 @@ int main(int argc, char* argv[]) {
     o.phases = has(argc, argv, "--phases");
     o.regularise = !has(argc, argv, "--no-regularise");
     o.fused = !has(argc, argv, "--unfused");
+    o.smallest = has(argc, argv, "--smallest");
     const int repeats = std::stoi(flag(argc, argv, "--repeats", "2"));
     const std::string out = flag(argc, argv, "--out", "");
     o.limiter = limit == "none"    ? hydro::Limiter::none
@@ -233,6 +249,7 @@ int main(int argc, char* argv[]) {
                                      : hydro::Limiter::face_centroid;
     if (has(argc, argv, "--memory")) DeviceMemory::start();
     Problem pb = problem(name, std::stod(flag(argc, argv, "--amp", "0")));
+    if (const std::string t_end = flag(argc, argv, "--t-end", ""); !t_end.empty()) pb.t_end = std::stod(t_end);
     const int box_cells = o.n, pad_cells = static_cast<int>(std::ceil(std::stod(flag(argc, argv, "--pad", "0")) * o.n / pb.L));
     pb.origin -= pad_cells * pb.L / o.n;
     pb.L += 2 * pad_cells * pb.L / o.n;
@@ -253,7 +270,9 @@ int main(int argc, char* argv[]) {
               << " order=" << o.order << " dt=" << rule_name << " courant=" << o.courant << " jitter=" << o.jitter
               << " steps=" << best.steps << " t=" << best.t << " reached=" << (best.reached ? 1 : 0) << " sorts=" << best.sorts << " wall_s=" << best.wall_s
               << " final_cells=" << best.cells << " cell_updates=" << double(best.cell_updates) << " M_cell_updates_per_s=" << rate / 1e6 << " hash=" << best.hash
-              << " same_bits=" << (same ? 1 : 0) << " backend=" << Exec::name() << "\n";
+              << " same_bits=" << (same ? 1 : 0) << " backend=" << Exec::name();
+    if (o.smallest) std::cout << " smallest_h=" << best.smallest_h;
+    std::cout << "\n";
     if (o.phases) {
         const hydro::Timings& t = best.timings;
         auto phase = [&](const char* label, double ms) {
@@ -269,7 +288,7 @@ int main(int argc, char* argv[]) {
         std::ofstream json(out + ".json");
         json << "{\"series\": \"" << series << "\", \"problem\": \"" << name << "\", \"N\": " << box_cells << ", \"steps\": " << best.steps
              << ", \"wall_s\": " << best.wall_s << ", \"peak_MB\": " << DeviceMemory::peak / 1e6 << ", \"sorts\": " << best.sorts
-             << ", \"t\": " << best.t << ", \"reached\": " << (best.reached ? 1 : 0)
+             << ", \"t\": " << best.t << ", \"reached\": " << (best.reached ? 1 : 0) << (o.smallest ? ", \"smallest_h\": " + sci(best.smallest_h) : std::string())
              << ", \"final_cells\": " << best.cells << ", \"cell_updates\": " << best.cell_updates << ", \"file\": \"" << out.substr(out.find_last_of('/') + 1) << "\"}\n";
     }
     if (DeviceMemory::peak > 0)
