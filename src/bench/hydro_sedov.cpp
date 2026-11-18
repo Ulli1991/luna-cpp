@@ -187,7 +187,6 @@ struct Options {
     bool phases = false;       // --phases: fence and time each phase of a step (off: one wall time a step)
     bool plain_faces = false;  // --plain-faces: the mesh layout as the flags set it (the hydro's default: owner bit, and faces by owner when static)
     bool keep_mesh = false;    // --keep-mesh: a static run keeps the whole mesh (by default the hydro lets go of it, FiniteVolume::release_mesh)
-    bool sweep_tables = true;  // --no-sweep-tables: a static run sweeps without the tables (FiniteVolume::use_static_tables)
     voronoi::Layout layout;  // the mesh's memory layout (--curve, --every, --far, --owner-faces, --owner-bit)
 };
 
@@ -265,7 +264,6 @@ void run(const Options& o, Points points) {
         for (int k = 0; k < deposit; ++k) Q(by_distance[k], 4) += p_inject / (gas.gamma - 1.0) * volume(by_distance[k]);
         Kokkos::deep_copy(fv.state(), Q);
     }
-    fv.use_static_tables(o.sweep_tables);
     DeviceMemory::phase("hydro_setup", n);
     // A static run lets go of the mesh: the hydro holds the arrays it reads (--keep-mesh: keep the whole mesh, as before).
     if (!o.moving && !o.keep_mesh) {
@@ -442,7 +440,7 @@ int main(int argc, char** argv) {
                      " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|riemann32|single|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]"
-                     " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces] [--phases] [--keep-mesh] [--no-sweep-tables]\n";
+                     " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces] [--phases] [--keep-mesh]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -477,7 +475,6 @@ int main(int argc, char** argv) {
     o.plain_faces = flag(argc, argv, "--plain-faces", "") == "1";
     o.phases = flag(argc, argv, "--phases", "") == "1";
     o.keep_mesh = flag(argc, argv, "--keep-mesh", "") == "1";
-    o.sweep_tables = flag(argc, argv, "--no-sweep-tables", "") != "1";
     // The periodic box: --box=fx,fy,fz times 50 pc (a cube by default); the lattice keeps about equal spacings per axis.
     const Sedov sedov;
     const std::string shape_arg = flag(argc, argv, "--box", "1,1,1");

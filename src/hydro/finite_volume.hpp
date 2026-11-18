@@ -116,15 +116,6 @@ public:
     }
     bool holds_mesh() const { return mesh_ != nullptr; }
     int faces() const { return faces_; }
-    // Static meshes at order 1 (on by default): the sweep reads tables built at its first call (StaticTables): the same
-    // bits, about 570 B/cell more, the sweep 27 % faster. Off: the plain sweep, and the tables are freed.
-    void use_static_tables(bool on) {
-        static_tables_ = on;
-        if (!on) {
-            tables_ = {};
-            tables_ready_ = false;
-        }
-    }
 
     // The extensive conserved state Q(i, v) = (mass, momentum, energy); set it before stepping.
     // A caller may change Q through it, so the primitive rows of the last update are not trusted after this call.
@@ -525,12 +516,6 @@ public:
         template <int U>
         KOKKOS_INLINE_FUNCTION static void solve(const G (&M)[U][U], const G (&b)[V][U], Gradient<D, G>& grad) {
             G L[U][U] = {};
-            cholesky(M, L);
-            substitute(L, b, grad);
-        }
-        // M = L L^T (the upper triangle of M read). Used by: solve(), StaticTables.
-        template <int U>
-        KOKKOS_INLINE_FUNCTION static void cholesky(const G (&M)[U][U], G (&L)[U][U]) {
             for (int p = 0; p < U; ++p) {
                 for (int s = 0; s <= p; ++s) {
                     G sum = M[s][p];
@@ -538,10 +523,6 @@ public:
                     L[p][s] = p == s ? Kokkos::sqrt(sum) : sum / L[s][s];
                 }
             }
-        }
-        // L L^T x_v = b_v for every variable; grad[v] = x_v without its constant part. Used by: solve(), StaticSweep.
-        template <int U>
-        KOKKOS_INLINE_FUNCTION static void substitute(const G (&L)[U][U], const G (&b)[V][U], Gradient<D, G>& grad) {
             for (int v = 0; v < V; ++v) {
                 G z[U], x[U];
                 for (int p = 0; p < U; ++p) {
@@ -582,120 +563,6 @@ public:
                 for (int v = 0; v < V; ++v)
                     for (int a = 0; a < D; ++a) g(i, D * v + a) = grad[v][a];
             }
-        }
-    };
-
-    // A static mesh's sweep tables, built once by TableBuild: per list entry the other cell, the fit's weight |A| and
-    // offset X (centroid to the neighbour's centroid) and the limiter's offset (cell centroid to face centroid), in G as
-    // Sweep rounds them; per cell the factor L of the fit matrix and the tiny-face threshold. Used by: StaticSweep.
-    struct StaticTables {
-        Kokkos::View<int*, Memory> other;
-        Kokkos::View<G* [D + 1], Kokkos::LayoutRight, Memory> fit;  // |A|, X_1 .. X_D
-        Kokkos::View<G* [D], Kokkos::LayoutRight, Memory> offset;
-        Kokkos::View<G* [(D + 1) * (D + 2) / 2], Kokkos::LayoutRight, Memory> factor;  // L by rows, lower triangle
-        Kokkos::View<double*, Memory> tiny;  // 1e-6 of the cell's surface if a face is smaller, else 0
-    };
-
-    // Fills StaticTables for cell i with Sweep's expressions in Sweep's order, so StaticSweep gives Sweep's bits.
-    struct TableBuild {
-        Sweep<false, true> sweep;
-        StaticTables t;
-
-        KOKKOS_INLINE_FUNCTION void operator()(int i) const {
-            constexpr int U = D + 1;
-            const Geometry& geo = sweep.geo;
-            G M[U][U] = {};
-            double surface = 0, smallest_face = Kokkos::Experimental::infinity_v<double>;
-            const Vec centroid = geo.row(geo.centroid, i);
-            for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                const int f = geo.face_at(k), j = geo.other_at(k, f, i);
-                const Vec d = geo.separation(i, j);
-                const double magnitude = sweep.magnitude_of(f);
-                surface += magnitude;
-                smallest_face = Kokkos::fmin(smallest_face, magnitude);
-                G X[U];
-                const Vec between = d + geo.row(geo.centroid, j) - centroid;
-                X[0] = 1;
-                for (int p = 1; p < U; ++p) X[p] = static_cast<G>(between[p - 1]);
-                const G w = static_cast<G>(magnitude);
-                for (int p = 0; p < U; ++p)
-                    for (int s = p; s < U; ++s) M[p][s] += w * X[p] * X[s];
-                t.other(k) = j;
-                t.fit(k, 0) = w;
-                for (int p = 1; p < U; ++p) t.fit(k, p) = X[p];
-                const hydro::Vec<D, G> rg = cast<G>(geo.face_offset(f, i));
-                for (int a = 0; a < D; ++a) t.offset(k, a) = rg[a];
-            }
-            const double tiny = 1e-6 * surface;
-            t.tiny(i) = smallest_face < tiny ? tiny : 0.0;
-            G L[U][U] = {};
-            Sweep<false, true>::cholesky(M, L);
-            for (int p = 0, e = 0; p < U; ++p)
-                for (int s = 0; s <= p; ++s, ++e) t.factor(i, e) = L[p][s];
-        }
-    };
-
-    // Sweep on a static mesh from StaticTables: per entry the other cell's primitive row is the only gather; the rest
-    // streams. The same arithmetic as Sweep<false, true>, so the same bits. Used by: sweep().
-    struct StaticSweep {
-        Sweep<false, true> sweep;
-        StaticTables t;
-
-        KOKKOS_INLINE_FUNCTION void operator()(int i) const {
-            constexpr bool exact = std::is_same_v<G, double>;
-            constexpr int U = D + 1;
-            const Prims& prim = sweep.prim;
-            const State Wi = primitive_row(prim, i);
-            Gradient<D, G> grad;
-            G lo[V], hi[V];
-            for (int v = 0; v < V; ++v) {
-                grad[v] = hydro::Vec<D, G>{};
-                lo[v] = Kokkos::Experimental::finite_max_v<G>;
-                hi[v] = -Kokkos::Experimental::finite_max_v<G>;
-            }
-            G b[V][U] = {};
-            const int first = sweep.geo.start(i), end = sweep.geo.start(i + 1);
-            for (int k = first; k < end; ++k) {
-                const State Wj = primitive_row(prim, t.other(k));
-                G X[U];
-                X[0] = 1;
-                for (int p = 1; p < U; ++p) X[p] = t.fit(k, p);
-                const G w = t.fit(k, 0);
-                for (int v = 0; v < V; ++v) {
-                    const double dW = Wj[v] - Wi[v];
-                    for (int p = 0; p < U; ++p) b[v][p] += w * X[p] * static_cast<G>(dW);
-                    const G value = exact ? static_cast<G>(Wj[v]) : static_cast<G>(dW);
-                    lo[v] = Kokkos::fmin(lo[v], value);
-                    hi[v] = Kokkos::fmax(hi[v], value);
-                }
-            }
-            const double tiny = t.tiny(i);
-            const bool any_tiny = tiny > 0;
-            if (any_tiny) sweep.neighbour_range(i, Wi, tiny, lo, hi);
-            G L[U][U] = {};
-            for (int p = 0, e = 0; p < U; ++p)
-                for (int s = 0; s <= p; ++s, ++e) L[p][s] = t.factor(i, e);
-            Sweep<false, true>::substitute(L, b, grad);
-            for (int k = first; k < end; ++k) {
-                if (sweep.limiter == Limiter::none) break;
-                if (any_tiny && sweep.magnitude_of(sweep.geo.face_at(k)) < tiny) continue;
-                const hydro::Vec<D, G> rg = make_vec<D, G>([&](int a) { return t.offset(k, a); });
-                for (int v = 0; v < V; ++v) {
-                    const G dp = dot(grad[v], rg);
-                    if constexpr (exact) {
-                        if (dp > 0 && Wi[v] + dp > hi[v])
-                            grad[v] = grad[v] * (hi[v] > Wi[v] ? (hi[v] - Wi[v]) / dp : 0.0);
-                        else if (dp < 0 && Wi[v] + dp < lo[v])
-                            grad[v] = grad[v] * (lo[v] < Wi[v] ? (lo[v] - Wi[v]) / dp : 0.0);
-                    } else {
-                        if (dp > 0 && dp > hi[v])
-                            grad[v] = grad[v] * (hi[v] > 0 ? hi[v] / dp : G(0));
-                        else if (dp < 0 && dp < lo[v])
-                            grad[v] = grad[v] * (lo[v] < 0 ? lo[v] / dp : G(0));
-                    }
-                }
-            }
-            sweep.store(i, grad);
         }
     };
 
@@ -776,30 +643,10 @@ public:
     template <bool Moving, int Order>
     double sweep(double courant) {
         const Kokkos::RangePolicy<ExecSpace> cells(exec_, 0, n_);
-        const bool use_tables = static_tables_;
-        if constexpr (!Moving && Order == 1) {
-            if (use_tables) {  // the static sweep from tables built at the first sweep (StaticTables)
-                const Sweep<false, true> base{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
-                                              magnitudes_valid_ ? magnitudes_ : Magnitudes()};
-                if (!tables_ready_) {
-                    const std::size_t entries = geometry_.face.extent(0);
-                    tables_.other = decltype(tables_.other)(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_table_other")), entries);
-                    tables_.fit = decltype(tables_.fit)(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_table_fit")), entries);
-                    tables_.offset = decltype(tables_.offset)(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_table_offset")), entries);
-                    tables_.factor = decltype(tables_.factor)(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_table_factor")), n_);
-                    tables_.tiny = decltype(tables_.tiny)(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_table_tiny")), n_);
-                    Kokkos::parallel_for("hydro::sweep_tables", cells, TableBuild{base, tables_});
-                    tables_ready_ = true;
-                }
-                Kokkos::parallel_for("hydro::sweep", cells, StaticSweep{base, tables_});
-            }
-        }
-        if constexpr (Moving || Order == 1) {
-            if (Moving || !use_tables)
-                Kokkos::parallel_for("hydro::sweep", cells,
-                                     Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
-                                                               magnitudes_valid_ ? magnitudes_ : Magnitudes()});
-        }
+        if constexpr (Moving || Order == 1)
+            Kokkos::parallel_for("hydro::sweep", cells,
+                                 Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
+                                                           magnitudes_valid_ ? magnitudes_ : Magnitudes()});
         double smallest = 0;
         if constexpr (D == 2) {
             if (rule_ == StepRule::luna) {
@@ -1164,9 +1011,6 @@ private:
     Kokkos::View<char*, Memory> held_;  // moving step: the rows of prims_, gradients_, exponents_
     Kokkos::View<char*, Memory> own_scratch_;  // after release_mesh(): the cell rows and face fluxes
     Gradients gradients_;
-    StaticTables tables_;  // static meshes: the sweep's tables, built at the first sweep
-    bool tables_ready_ = false;
-    bool static_tables_ = true;  // use_static_tables()
     Exponents exponents_;
     FaceFluxes flux_;
     Geometry geometry_;
