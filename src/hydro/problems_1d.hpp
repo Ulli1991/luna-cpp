@@ -143,6 +143,67 @@ inline State<1> super_tube(double a, double b) {
     return u;
 }
 
+// The super-hard tube v2 (research_notes/super_tube_v2_2026-11-18.md): v1's stages and five more, laid out by
+// scripts/super_tube_layout.py v2 (exact Riemann fronts; no two stages meet before t = 0.15). Gamma 1.4; open left wall, reflecting right.
+inline constexpr Segment super_tube_v2_segments[] = {
+    {0.0, 1, -11.83215956619923, 1e-6},  // M: Mach 1e4 at rho = 1, P = 1e-6, running out through the open wall
+    {2.0, 1, 0, 1}, {3.0, 1, 0, 1}, {4.0, 1, 0, 1}, {5.0, 1, 0, 1}, {6.0, 1, 0, 1},  // A quiet [3, 4], B waves [5, 6]
+    {7.0, 10, 0, 1}, {7.05, 1, 0, 1},                                                  // C
+    {8.05, 1, 1, 1}, {8.8, 10, 1, 1}, {8.85, 1, 1, 1}, {9.6, 1, 0, 1},               // C2
+    {10.6, 1, 0.75, 1}, {11.1, 0.125, 0, 0.1}, {11.6, 1, 0, 1},                       // D
+    {12.6, 1, 0, 0.1}, {13.1, 1e-3, 0, 1e-10}, {13.6, 1, 0, 1},                       // E
+    {14.6, 1, 0, 0.1}, {15.1, 1e-6, 0, 1e-13}, {16.1, 1, 0, 1},                       // L: density ratio 1e6, pressure ratio 1e12
+    {17.1, 3.857143, -0.810631, 10.33333}, {17.6, 1, -3.44, 1}, {18.1, 1, 0, 1},      // F
+    {19.1, 3.857143, 2.629369, 10.33333}, {20.1, 1, 0, 1}, {23.9, 1, 0, 1},           // SO: Mach 3 shock at 20.1 into the sine
+    {24.9, 1, 1, 1e-6}, {25.65, 1, -1, 1e-6}, {26.4, 1, 0, 1},                        // N: Noh's cold streams
+    {28.4, 5.99924, 19.5975, 460.894}, {28.7, 5.99242, -6.19633, 46.0950}, {29.0, 1, 0, 1},  // S
+    {31.75, 1, -2, 0.4}, {32.25, 1, 2, 0.4}, {32.75, 1, 0, 1},                        // G
+    {33.75, 1, -4, 0.4}, {34.5, 1, 4, 0.4}, {35.25, 1, 0, 1},                         // V: true vacuum
+    {39.25, 1, 0, 1000}, {39.35, 1, 0, 0.01}, {40.15, 1, 0, 100}};                    // H
+inline constexpr double super_tube_v2_length = 40.25, super_tube_v2_b = 5.0;
+inline constexpr double v2_mach_v = -11.83215956619923, v2_bump_x0 = 1.3, v2_bump_w = 0.5, v2_bump_amp = 0.5;
+inline constexpr double v2_so_x = 20.1, v2_so_end = 20.1 + 6 * pi / 5, v2_so_k = 5, v2_so_amp = 0.2;
+
+// Exact cell average on [a, b] of v2: the segments' volume fractions; v1's waves on [5, 6]; on M, rho += 0.5 sin^2(pi (x - 1.3) / 0.5)
+// on [1.3, 1.8] at the stream's v and P; ahead of the Shu-Osher shock rho += 0.2 sin(5 (x - 20.1)) on [20.1, 20.1 + 6 pi / 5].
+// scripts/problems_1d.py super2_initial() is the same. stream = false: stage M's stream and bump replaced by the ambient gas
+// (super-tube-v2-m0, a diagnostic: the moving mesh stops at M, luna-cpp #14). Used by: table ("super-tube-v2[-m0]", "super-v2-<stage>").
+inline State<1> super_tube_v2(double a, double b, bool stream = true) {
+    constexpr double g = gamma_gas, k = 2 * pi / super_tube_wavelength, B = super_tube_v2_b;
+    constexpr int count = sizeof super_tube_v2_segments / sizeof super_tube_v2_segments[0];
+    constexpr Segment ambient{0.0, 1, 0, 1};
+    State<1> u{0, 0, 0};
+    for (int s = 0; s < count; ++s) {
+        const Segment& w = s == 0 && !stream ? ambient : super_tube_v2_segments[s];
+        const double end = s + 1 < count ? super_tube_v2_segments[s + 1].x : super_tube_v2_length;
+        const double f = std::max(0.0, std::min(b, end) - std::max(a, w.x)) / (b - a);
+        const State<1> U = conserved({w.rho, w.v, w.P}, g);
+        for (int v = 0; v < 3; ++v) u[v] += f * U[v];
+    }
+    if (const double lo = std::max(a, B), hi = std::min(b, B + 1); hi > lo) {  // v1's stage B, moved
+        const double s = super_tube_wave * (std::cos(k * (lo - B)) - std::cos(k * (hi - B))) / k / (b - a);
+        u[0] += 2 * s;
+        u[1] += std::sqrt(g) * s;
+        u[2] += g / (g - 1) * s;
+    }
+    if (const double lo = std::clamp(a, v2_bump_x0, v2_bump_x0 + v2_bump_w), hi = std::clamp(b, v2_bump_x0, v2_bump_x0 + v2_bump_w); stream && hi > lo) {
+        const auto integral = [](double s) { return 0.5 * s - v2_bump_w / (4 * pi) * std::sin(2 * pi * s / v2_bump_w); };
+        const double d = v2_bump_amp * (integral(hi - v2_bump_x0) - integral(lo - v2_bump_x0)) / (b - a);
+        u[0] += d;
+        u[1] += d * v2_mach_v;
+        u[2] += d * 0.5 * v2_mach_v * v2_mach_v;
+    }
+    if (const double lo = std::clamp(a, v2_so_x, v2_so_end), hi = std::clamp(b, v2_so_x, v2_so_end); hi > lo)
+        u[0] += v2_so_amp * (std::cos(v2_so_k * (lo - v2_so_x)) - std::cos(v2_so_k * (hi - v2_so_x))) / v2_so_k / (b - a);
+    return u;
+}
+
+// One stage of v2 alone, open walls: the cells of the tube at N = 4096 from `first` on, `cells` of them (problems_1d.py super2_window).
+inline Problem super_v2_stage(int first, int cells) {
+    constexpr double h = super_tube_v2_length / 4096;
+    return {cells * h, first * h, 0.1, gamma_gas, {Wall::outflow, Wall::outflow}, [](double a, double b) { return super_tube_v2(a, b); }};
+}
+
 // amplitude: of the linear waves (signed: LUNA keeps the part odd in it) and of the simple wave (0: its default, 0.1).
 inline Problem table(const std::string& name, double amplitude) {
     const Walls outflow{Wall::outflow, Wall::outflow}, closed{Wall::reflective, Wall::reflective};
@@ -185,6 +246,17 @@ inline Problem table(const std::string& name, double amplitude) {
         constexpr double h = super_tube_length / 4096;
         return {370 * h, 1678 * h, 0.2, gamma_gas, outflow, super_tube};
     }
+    if (name == "super-tube-v2" || name == "super-tube-v2-m0") {
+        const bool stream = name == "super-tube-v2";
+        return {super_tube_v2_length, 0.0, 4.0, gamma_gas, {Wall::outflow, Wall::reflective},
+                [stream](double a, double b) { return super_tube_v2(a, b, stream); }};
+    }
+    // v2's new stages alone, t = 0.1 (run N = cells at the spacing of 4096, 8 cells for 32768).
+    if (name == "super-v2-m") return super_v2_stage(0, 255);
+    if (name == "super-v2-l") return super_v2_stage(1434, 256);
+    if (name == "super-v2-so") return super_v2_stage(1892, 592);
+    if (name == "super-v2-n") return super_v2_stage(2483, 306);
+    if (name == "super-v2-v") return super_v2_stage(3383, 408);
     // Linear waves, one period, periodic.
     const double eps = amplitude != 0 ? amplitude : linear_amplitude;
     const auto wave = [&](double t, double v0, double drho, double dv, double dp) {
