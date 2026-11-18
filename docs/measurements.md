@@ -210,6 +210,7 @@ The levers of the profile of 2026-11-18 (branch `profile-2026-11-18`, `research_
 | 32523558 | `--update=atomic`: each face adds its flux to both cells as it is made | fluxes 5.59, no update; 2106 B/cell (main 2366) | fluxes 10.77, no update; 2163 B/cell (main 2301) | differ, and differ run to run |
 | 32523558 | time step: face and cell terms in one reduction | sweep phase 4.97 | 5.70 | equal |
 | 32523558 | time step: terms inside the sweep (as a reduction) | sweep phase 7.74 | 8.83 | equal |
+| 32523558 | no per-phase fences (`--phases` off), fallbacks read once a step; wall per step | 9.832 against 9.848 with fences | 26.07 against 26.14 | equal |
 
 ### 2D
 

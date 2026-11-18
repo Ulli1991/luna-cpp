@@ -183,6 +183,7 @@ struct Options {
     double bulk = 0;
     long long max_steps = 0;
     Box box{1.0};
+    bool phases = false;       // --phases: fence and time each phase of a step (off: one wall time a step)
     bool plain_faces = false;  // --plain-faces: the mesh layout as the flags set it (the hydro's default: owner bit, and faces by owner when static)
     voronoi::Layout layout;  // the mesh's memory layout (--curve, --every, --far, --owner-faces, --owner-bit)
 };
@@ -318,21 +319,26 @@ void run(const Options& o, Points points) {
 
     const Totals before = totals(fv);
     if (!o.out.empty()) write(0, 0.0);
-    std::vector<double> prim_ms, sweep_ms, flux_ms, update_ms, drift_ms, mesh_ms, cells_ms;
+    std::vector<double> prim_ms, sweep_ms, flux_ms, update_ms, drift_ms, mesh_ms, cells_ms, wall_ms;
     double t = 0, gpu_ms = 0;
     long long steps = 0, fallbacks = 0, most_fallbacks = 0, steps_with_fallbacks = 0;
     int next = 1;
     Kokkos::Timer wall;
     while (t < sedov.t_end() && (o.max_steps == 0 || steps < o.max_steps)) {
+        // --phases: each phase fenced and timed (Timings); otherwise one wall time a step, ended by the fence of fallbacks().
+        Kokkos::Timer step_timer;
         hydro::Timings timings;
-        double dt = fv.time_step(courant, &timings);
+        hydro::Timings* phases = o.phases ? &timings : nullptr;
+        double dt = fv.time_step(courant, phases);
         const double t_next = sedov.t_end() * next / o.snapshots;
         bool snapshot = false;
         if (t + dt >= t_next) {
             dt = t_next - t;
             snapshot = true;
         }
-        fv.step(dt, &timings);
+        fv.step(dt, phases);
+        const long long step_fallbacks = fv.fallbacks();  // fences: the step is done
+        wall_ms.push_back(step_timer.seconds() * 1e3);
         prim_ms.push_back(timings.primitives);
         sweep_ms.push_back(timings.sweep);
         flux_ms.push_back(timings.fluxes);
@@ -340,10 +346,11 @@ void run(const Options& o, Points points) {
         drift_ms.push_back(timings.drift);
         mesh_ms.push_back(timings.mesh);
         cells_ms.push_back(timings.cells);
-        gpu_ms += timings.primitives + timings.sweep + timings.fluxes + timings.update + timings.drift + timings.mesh + timings.cells;
-        fallbacks = fv.fallbacks() < 0 ? -1 : fallbacks + fv.fallbacks();  // -1: not counted (per-cell loop)
-        most_fallbacks = std::max(most_fallbacks, fv.fallbacks());
-        steps_with_fallbacks += fv.fallbacks() > 0;
+        gpu_ms += o.phases ? timings.primitives + timings.sweep + timings.fluxes + timings.update + timings.drift + timings.mesh + timings.cells
+                           : wall_ms.back();
+        fallbacks += step_fallbacks;
+        most_fallbacks = std::max(most_fallbacks, step_fallbacks);
+        steps_with_fallbacks += step_fallbacks > 0;
         t = snapshot ? t_next : t + dt;
         ++steps;
         if (snapshot) {
@@ -362,7 +369,8 @@ void run(const Options& o, Points points) {
               << " order=" << o.order << " update=" << o.loop
               << " steps=" << steps << " limiter=" << o.limit << " riemann=" << o.riemann << " mesh=" << (o.moving ? "moving" : "static")
               << " bulk=" << o.bulk << " blast=" << o.blast << " t=" << t << " wall_s=" << wall_s << " s_per_step=" << wall_s / steps
-              << " gpu_s=" << gpu_ms * 1e-3 << "\n";
+              << " gpu_s=" << gpu_ms * 1e-3 << " step_wall_ms_median=" << median(wall_ms)
+              << " G_cell_updates_per_s=" << n / (median(wall_ms) * 1e-3) / 1e9 << " phases=" << o.phases << "\n";
     std::cout << "fallbacks: total=" << fallbacks << " steps_with=" << steps_with_fallbacks << " most_in_a_step=" << most_fallbacks
               << " face_sides_per_step=" << 2 * static_cast<long long>(mesh.faces()) << "\n";
     const hydro::MeshStats& ms = fv.mesh_stats();
@@ -370,11 +378,11 @@ void run(const Options& o, Points points) {
               << " stuck_steps=" << ms.stuck_steps << " local_repairs=" << ms.local_repairs << " local_cells=" << ms.local_cells
               << " host_flips=" << ms.host_flips << " device_flips=" << ms.device_flips << "\n";
     auto rate = [&](double ms) { return ms > 0 ? n / (ms * 1e-3) / 1e6 : 0.0; };
-    std::cout << "phases_ms_median: primitives=" << median(prim_ms) << " sweep=" << median(sweep_ms) << " fluxes=" << median(flux_ms)
+    if (o.phases) std::cout << "phases_ms_median: primitives=" << median(prim_ms) << " sweep=" << median(sweep_ms) << " fluxes=" << median(flux_ms)
               << " update=" << median(update_ms) << " drift=" << median(drift_ms) << " mesh=" << median(mesh_ms)
               << " cells=" << median(cells_ms) << " hydro=" << hydro_ms << " step=" << step_ms
               << " cell_updates_per_s=" << n / (step_ms * 1e-3) << "\n";
-    std::cout << "throughput_M_per_s: primitives=" << rate(median(prim_ms)) << " sweep=" << rate(median(sweep_ms))
+    if (o.phases) std::cout << "throughput_M_per_s: primitives=" << rate(median(prim_ms)) << " sweep=" << rate(median(sweep_ms))
               << " fluxes=" << rate(median(flux_ms)) << " update=" << rate(median(update_ms)) << " mesh=" << rate(median(mesh_ms))
               << " cells=" << rate(median(cells_ms)) << " hydro=" << rate(hydro_ms) << " step=" << rate(step_ms)
               << " hydro_G_face_updates_per_s=" << mesh.faces() / (hydro_ms * 1e-3) / 1e9 << "\n";
@@ -423,7 +431,7 @@ int main(int argc, char** argv) {
                      " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|riemann32|single|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]"
-                     " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces]\n";
+                     " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces] [--phases]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -456,6 +464,7 @@ int main(int argc, char** argv) {
     o.layout.owner_faces = flag(argc, argv, "--owner-faces", "") == "1";
     o.layout.owner_bit = flag(argc, argv, "--owner-bit", "") == "1";
     o.plain_faces = flag(argc, argv, "--plain-faces", "") == "1";
+    o.phases = flag(argc, argv, "--phases", "") == "1";
     // The periodic box: --box=fx,fy,fz times 50 pc (a cube by default); the lattice keeps about equal spacings per axis.
     const Sedov sedov;
     const std::string shape_arg = flag(argc, argv, "--box", "1,1,1");

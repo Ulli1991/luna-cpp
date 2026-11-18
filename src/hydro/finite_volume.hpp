@@ -183,13 +183,15 @@ public:
     }
 
     // Face sides of the last step that took the cell's state because the extrapolated one was not physical.
-    // Read back from the device here, so the flux passes need no fence of their own.
+    // Read back from the device here, once a step (both passes in one copy), so the flux passes need no fence of their own.
     long long fallbacks() const {
-        long long first = 0, second = 0;
-        Kokkos::deep_copy(exec_, first, fallbacks_[0]);
-        Kokkos::deep_copy(exec_, second, fallbacks_[1]);
-        exec_.fence();
-        return first + second;
+        if (!fallbacks_read_) {
+            Kokkos::deep_copy(exec_, fallback_host_, fallback_counts_);
+            exec_.fence();
+            fallbacks_last_ = fallback_host_(0) + fallback_host_(1);
+            fallbacks_read_ = true;
+        }
+        return fallbacks_last_;
     }
 
     // The radius of a sphere (D = 3) or circle (D = 2) of volume v. Used by: primitives().
@@ -884,7 +886,8 @@ public:
     // pass: which fallback counter the flux pass writes (0, or 1 for a moving step's second pass).
     template <int Order, class Flux>
     void apply(const Flux& flux, double dt, Timings* timings, int pass = 0) {
-        if (pass == 0) Kokkos::deep_copy(exec_, fallbacks_[1], 0LL);
+        if (pass == 0) Kokkos::deep_copy(exec_, Kokkos::subview(fallback_counts_, 1), 0LL);
+        fallbacks_read_ = false;
         const Geometry geo = geometry_;
         const auto q = q_;
         if (update_ == Update::per_cell) {
@@ -905,7 +908,7 @@ public:
                     }
                     for (int v = 0; v < V; ++v) next(i, v) = q(i, v) - dt * sum[v];
                 },
-                fallbacks_[pass]);
+                Kokkos::subview(fallback_counts_, pass));
             phase_end(timings, &Timings::fluxes);
             if constexpr (Order == 0) std::swap(q_, next_);
             return;
@@ -957,7 +960,7 @@ public:
                     mag(f) = Kokkos::sqrt(dot(a, a));
                 }
             },
-            fallbacks_[pass]);
+            Kokkos::subview(fallback_counts_, pass));
         phase_end(timings, &Timings::fluxes);
         Kokkos::parallel_for(
             "hydro::update", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
@@ -1000,8 +1003,11 @@ private:
     Magnitudes magnitudes_;
     bool magnitudes_valid_ = false;
     bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr;
-    Kokkos::View<long long, Memory> fallbacks_[2] = {Kokkos::View<long long, Memory>("hydro_fallbacks"),
-                                                      Kokkos::View<long long, Memory>("hydro_fallbacks_second")};
+    // Fallbacks of the two flux passes of the last step (one pass: the first), read back by fallbacks() once a step.
+    Kokkos::View<long long[2], Memory> fallback_counts_{"hydro_fallbacks"};
+    Kokkos::View<long long[2], Kokkos::HostSpace> fallback_host_{"hydro_fallbacks_host"};
+    mutable bool fallbacks_read_ = false;
+    mutable long long fallbacks_last_ = 0;
     Kokkos::Timer timer_;
     Cells q_, next_;
     Prims prims_;

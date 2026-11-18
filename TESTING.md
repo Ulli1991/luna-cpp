@@ -41,7 +41,7 @@ the density difference between the two runs' last snapshots, cell by cell.
 
 `scripts/hydro_lean_a100.sh` measures a hydro change against main in one A100 job (docs/tried.md): mode `speed` runs
 Sedov 40 steps static and moving at 128³ and 256³, the binaries alternating, each once with `--phases` (fenced phase
-times) and once without (the wall time of each step); mode `bits` runs the hashes of `hydro_levers_a100.sh`; mode
+times) and once without (`step_wall_ms_median`: the wall time of each step, no fences inside it); mode `bits` runs the hashes of `hydro_levers_a100.sh`; mode
 `ctest` the CTest programs of each build. Each change keeps a row in `docs/tried.md`.
 
 ## Moving the pin
