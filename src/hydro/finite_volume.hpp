@@ -385,8 +385,17 @@ public:
             G M[U][U] = {};
             G b[V][U] = {};
             const Vec centroid = geo.row(geo.centroid, i);
-            for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                const int f = geo.face_at(k), j = geo.other_at(k, f, i);
+            // The list walk one entry ahead: the face and neighbour of entry k + 1 load while entry k's rows are summed,
+            // so each entry waits for one level of loads, not three (list, face sides, rows).
+            const int first = geo.start(i), end = geo.start(i + 1);
+            int f_next = first < end ? geo.face_at(first) : 0;
+            int j_next = first < end ? geo.other_at(first, f_next, i) : 0;
+            for (int k = first; k < end; ++k) {
+                const int f = f_next, j = j_next;
+                if (k + 1 < end) {
+                    f_next = geo.face_at(k + 1);
+                    j_next = geo.other_at(k + 1, f_next, i);
+                }
                 const State Wj = primitive_row(prim, j);
                 const Vec d = geo.separation(i, j);
                 const double magnitude = magnitude_of(f);

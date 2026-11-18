@@ -193,6 +193,20 @@ Bits: equal to main for all eight Sedov cases, the 3D vortex and both sound wave
 
 Not tried, and why: a compact per-face struct shared by both halves (the halves read different meshes, and float geometry is the `mixed` preset, which loses the 1e-6 sound wave); fusing the update with anything (each neighbour kernel needs all faces' fluxes first; the update is at its gather floor for 40 B rows; storing fluxes by owner was lever 1 above, refuted).
 
+### Hydro levers of 2026-11-18
+
+The levers of the profile of 2026-11-18 (branch `profile-2026-11-18`, `research_notes/profile_2026-11-18.md`), on branch `hydro-speed-2` from main `73f763a` (voronoi-cpp `abd3d39`). One A100 40 GB, application clock 1305 MHz (logged by every job), Sedov 3D jittered, HLLC, `grad32`, 40 steps, phase medians with `--phases` (fenced) unless a row says wall. Each row in [tried.md](tried.md). Experiments ran from one binary with the variant chosen by an environment variable (not kept), against main's binary in the same job.
+
+**Experiments, 128³, two rounds each (ms per step, medians; the rounds agree within 0.5 %).**
+
+| job | variant | static: sweep phase, fluxes, update | moving: sweep phase, fluxes, update | bits (Q hash, 40 steps) |
+|---|---|---|---|---|
+| 32522925 | main | 5.02, 2.59, 1.91 | 5.75, 6.46, 4.24 | static 16fd7ed2, moving 20ca7f2a |
+| 32522925 | sweep capped at 80 / 64 / 96 registers | 6.65 / 13.0 / 5.42, same, same | 7.5 / 14.7 / 6.04 | equal |
+| 32522925 | sweep walk one entry ahead | 4.84 | 5.53 | equal |
+| 32522925 | per-cell fluxes and update (`--update=cell`) | 5.97, 14.9 (both) | 6.74, 38.1 (both) | equal |
+| 32523403 | sweep: the neighbours' range in a walk of its own (10 sums fewer in the fit loop) | 5.19 (ahead: 5.02) | 6.08 (ahead: 5.86) | equal |
+
 ### 2D
 
 | Figure | Setup | Jobs |
