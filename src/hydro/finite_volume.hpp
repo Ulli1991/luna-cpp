@@ -57,6 +57,8 @@ public:
     static constexpr int gradient_width = row_width<GStore>(V * D);
     using Cells = Kokkos::View<double* [V], Kokkos::LayoutRight, Memory>;
     using Points = Kokkos::View<double* [D], Kokkos::LayoutRight, Memory>;
+    // Whole steps of the mesh grid each point moves over a moving step (int32: exact, 12 B a cell in 3D).
+    using Steps = Kokkos::View<int* [D], Kokkos::LayoutRight, Memory>;
     using Unmanaged = Kokkos::MemoryTraits<Kokkos::Unmanaged>;
     // Per cell and step, written by primitives(): W = primitive(Q / V), the sound speed, the radius.
     using Prims = Kokkos::View<double* [V + 2], Kokkos::LayoutRight, Memory, Unmanaged>;
@@ -92,6 +94,7 @@ public:
         if (both_meshes_) {
             held_ = Kokkos::View<char*, Memory>(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_cell_rows")), cell_row_bytes());
             old_centroid_ = Points(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_old_centroid")), n_);
+            steps_ = Steps(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_grid_steps")), n_);
         }
         refresh();
     }
@@ -675,6 +678,7 @@ public:
     void move(double dt, Timings* timings) {
         const auto x = x_;
         const auto w = w_;
+        const auto steps = steps_;
         const exact_predicates::BoxN<D> box = mesh_->sides();
         const bool on_grid = both_meshes_;
         magnitudes_valid_ = false;
@@ -682,7 +686,7 @@ public:
             "hydro::drift", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 for (int a = 0; a < D; ++a) {
                     if (on_grid) {  // whole grid steps, as step_moving() set them
-                        const long long k = static_cast<long long>(Kokkos::round(x(i, a) * box.per_step)) + static_cast<long long>(Kokkos::round(w(i, a) * dt * box.per_step));
+                        const long long k = static_cast<long long>(Kokkos::round(x(i, a) * box.per_step)) + steps(i, a);
                         const long long p = box.period[a];
                         x(i, a) = static_cast<double>(((k % p) + p) % p) * box.step;
                         continue;
@@ -718,6 +722,7 @@ public:
             mesh_->permute(w_);
             if (!both_meshes_) return;
             mesh_->permute(old_centroid_);
+            mesh_->permute(steps_);
             // Pass 2 reads pass 1's cell rows (in held_) by cell: each gathered back from a copy.
             auto carry = [&](const auto& rows) {
                 using Rows = std::decay_t<decltype(rows)>;
@@ -788,8 +793,8 @@ public:
             }
         }
         // AREPO-ng's face velocity: the mean point velocity plus a correction along n, |c| limited to 0.9 |d|. Used by: operator().
-        KOKKOS_INLINE_FUNCTION Vec face_velocity(int f, int o, int j) const {
-            const Vec wL = geo.row(w, o), wR = geo.row(w, j);
+        // wL, wR: the point velocities of owner and neighbour (FaceFlux: the rows of w; MovingFlux: from the grid steps).
+        KOKKOS_INLINE_FUNCTION Vec face_velocity(int f, int o, int j, Vec wL, Vec wR) const {
             const Vec d = geo.separation(o, j);
             const double dist = Kokkos::sqrt(dot(d, d));
             const Vec c = geo.face_centroid_of(f) - d * 0.5;
@@ -822,7 +827,7 @@ public:
             const double magnitude = Kokkos::sqrt(dot(a, a));
             if (magnitude == 0) return State{};  // cospherical or cocircular corners (an exact lattice): no normal, no flux
             Vec wf{};
-            if constexpr (Moving) wf = face_velocity(f, o, j);
+            if constexpr (Moving) wf = face_velocity(f, o, j, geo.row(w, o), geo.row(w, j));
             State L, R;
             if constexpr (Order == 0) {
                 L = side(o, Vec{}, fallbacks_o);
@@ -843,11 +848,19 @@ public:
     template <bool Second>
     struct MovingFlux : FaceFlux<1, true> {
         Points old_centroid;
+        Steps steps;          // grid steps of each point over the step (int32, half the bytes of w)
+        double grid_step = 0;  // the mesh grid's spacing
+        double step_dt = 0;    // the step's dt
+
+        // The point velocity of cell i: its grid steps over dt, the value keep_centroids used to store in w (the same bits).
+        KOKKOS_INLINE_FUNCTION Vec velocity(int i) const {
+            return make_vec<D>([&](int a) { return static_cast<double>(steps(i, a)) * grid_step / step_dt; });
+        }
 
         // Replaces FaceFlux::side() on both meshes. Used by: operator().
         KOKKOS_INLINE_FUNCTION State pass_side(int i, Vec r, int& fallbacks) const {
             if constexpr (Second) {
-                const Vec moved = this->geo.row(this->w, i) * (0.5 * this->dt);
+                const Vec moved = velocity(i) * (0.5 * this->dt);
                 return this->side(i, r + this->geo.row(this->geo.centroid, i) - this->geo.row(old_centroid, i) + moved, fallbacks);
             } else {
                 const State W = primitive_row(this->prim, i);
@@ -865,7 +878,7 @@ public:
             const Vec a = this->geo.area_of(f);
             const double magnitude = Kokkos::sqrt(dot(a, a));
             if (magnitude == 0) return State{};
-            const Vec wf = this->face_velocity(f, o, j);
+            const Vec wf = this->face_velocity(f, o, j, velocity(o), velocity(j));
             const State L = pass_side(o, this->geo.face_offset(f, o), fallbacks_o);
             const State R = pass_side(j, this->geo.face_offset(f, j), fallbacks_j);
             State F = this->solve(L, R, a * (1.0 / magnitude), wf, this->gas);
@@ -883,21 +896,23 @@ public:
         const Geometry geo = geometry_;
         const auto x = x_;
         const auto w = w_;
+        const auto steps = steps_;
         const exact_predicates::BoxN<D> box = mesh_->sides();
-        // The points go to the grid the mesh snaps them to, and w becomes their move between grid points over dt (#23).
+        // The points go to the grid the mesh snaps them to, and their move becomes whole grid steps over dt (#23); the fluxes
+        // take w = steps · grid step / dt (MovingFlux::velocity), w_ keeps the sweep's velocities.
         Kokkos::parallel_for(
             "hydro::keep_centroids", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 for (int a = 0; a < D; ++a) {
                     old(i, a) = geo.centroid(i, a);
                     const int k0 = exact_predicates::snap(x(i, a), box, a), k1 = exact_predicates::snap(x(i, a) + dt * w(i, a), box, a);
                     x(i, a) = static_cast<double>(k0) * box.step;
-                    w(i, a) = static_cast<double>(exact_predicates::delta(k0, k1, box.period[a])) * box.step / dt;
+                    steps(i, a) = exact_predicates::delta(k0, k1, box.period[a]);
                 }
             });
-        apply<1>(MovingFlux<false>{{q_, prims_, gradients_, exponents_, w_, geometry_, gas_, 0.0}, old_centroid_}, 0.5 * dt, timings);
+        apply<1>(MovingFlux<false>{{q_, prims_, gradients_, exponents_, w_, geometry_, gas_, 0.0}, old_centroid_, steps_, box.step, dt}, 0.5 * dt, timings);
         move(dt, timings);
         borrow_scratch();
-        apply<1>(MovingFlux<true>{{q_, prims_, gradients_, exponents_, w_, geometry_, gas_, 2 * dt}, old_centroid_}, 0.5 * dt, timings, 1);
+        apply<1>(MovingFlux<true>{{q_, prims_, gradients_, exponents_, w_, geometry_, gas_, 2 * dt}, old_centroid_, steps_, box.step, dt}, 0.5 * dt, timings, 1);
     }
 
     // Picks the Moving instantiation. Used by: step().
@@ -1019,6 +1034,7 @@ private:
     Prims prims_;
     Points x_, w_;
     Points old_centroid_;              // moving step: the centroids of t^n
+    Steps steps_;                      // moving step: each point's whole grid steps over dt (keep_centroids)
     Kokkos::View<char*, Memory> held_;  // moving step: the rows of prims_, gradients_, exponents_
     Kokkos::View<char*, Memory> own_scratch_;  // after release_mesh(): the cell rows and face fluxes
     Gradients gradients_;
