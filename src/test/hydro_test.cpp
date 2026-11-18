@@ -261,6 +261,14 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
         check.expect(same(released, result[1][0]) && !fv.holds_mesh(),
                      solver + ", " + kind + ": a static run after release_mesh() with its mesh destroyed gives the same bits (10 steps)");
     }
+    {  // The static sweep from its tables (the default) against the plain sweep: the same bits.
+        FV fv(Exec{}, mesh, gas, 1, hydro::Update::per_face);
+        fv.use_static_tables(false);
+        set_state(fv, mesh, rough_state(n, gas));
+        for (int s = 0; s < 10; ++s) fv.step(fv.time_step(0.3));
+        check.expect(same(host_state(fv, mesh), result[1][0]),
+                     solver + ", " + kind + ": the static sweep from its tables gives the plain sweep's bits (10 steps)");
+    }
     // The loops compile the same face flux into different kernels (multiply-add contraction): equal to rounding, not bit for bit.
     double loops = 0;
     for (int i = 0; i < n; ++i)
