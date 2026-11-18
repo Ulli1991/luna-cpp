@@ -208,6 +208,8 @@ The levers of the profile of 2026-11-18 (branch `profile-2026-11-18`, `research_
 | 32523403 | sweep: the neighbours' range in a walk of its own (10 sums fewer in the fit loop) | 5.19 (ahead: 5.02) | 6.08 (ahead: 5.86) | equal |
 | 32523558 | HLLC: the upwind side's state copied entry by entry, not by a reference to one of two arrays | fluxes 2.50 | fluxes 6.12 | differ: static e4bd3aa6, moving 3c16d52b |
 | 32523558 | `--update=atomic`: each face adds its flux to both cells as it is made | fluxes 5.59, no update; 2106 B/cell (main 2366) | fluxes 10.77, no update; 2163 B/cell (main 2301) | differ, and differ run to run |
+| 32523558 | time step: face and cell terms in one reduction | sweep phase 4.97 | 5.70 | equal |
+| 32523558 | time step: terms inside the sweep (as a reduction) | sweep phase 7.74 | 8.83 | equal |
 
 ### 2D
 

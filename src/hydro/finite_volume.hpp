@@ -6,6 +6,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
@@ -541,7 +542,7 @@ public:
         }
     };
 
-    // The cell terms of the time step (AREPO rule). Used by: sweep().
+    // The cell terms of the time step (AREPO rule). Used by: TimeStep.
     template <bool Moving>
     struct CellStep {
         Prims prim;
@@ -575,7 +576,7 @@ public:
         }
     };
     // The face terms of the time step (AREPO rule). vsig_ij and d_ij are the same from both sides, so each face gives both cells' terms.
-    // Used by: sweep().
+    // Used by: TimeStep.
     struct FaceStep {
         Prims prim;
         Geometry geo;
@@ -594,7 +595,21 @@ public:
         }
     };
 
-    // Stage 2 of a step: runs Sweep, then the time-step reductions; returns dt. Used by: time_step(), step().
+    // Both terms of the time step in one reduction (one launch, one read-back): thread k takes face k's terms (k < faces)
+    // and cell k's (k < cells). The smallest of the same terms as before, so the same dt. Used by: sweep().
+    template <bool Moving>
+    struct TimeStep {
+        FaceStep face;
+        CellStep<Moving> cell;
+        int faces, cells;
+
+        KOKKOS_INLINE_FUNCTION void operator()(int k, double& smallest) const {
+            if (k < faces) face(k, smallest);
+            if (k < cells) cell(k, smallest);
+        }
+    };
+
+    // Stage 2 of a step: runs Sweep, then the time-step reduction; returns dt. Used by: time_step(), step().
     double sweep(double courant) {
         const bool moving = motion_ == Motion::moving;
         if (order_ == 1)
@@ -608,17 +623,17 @@ public:
             Kokkos::parallel_for("hydro::sweep", cells,
                                  Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
                                                            magnitudes_valid_ ? magnitudes_ : Magnitudes()});
-        double by_cell = 0, by_face = 0;
+        double smallest = 0;
         if constexpr (D == 2) {
             if (rule_ == StepRule::luna) {
-                Kokkos::parallel_reduce("hydro::luna_step", cells, LunaStep<Moving>{prims_, w_, courant}, Kokkos::Min<double>(by_cell));
-                return by_cell;
+                Kokkos::parallel_reduce("hydro::luna_step", cells, LunaStep<Moving>{prims_, w_, courant}, Kokkos::Min<double>(smallest));
+                return smallest;
             }
         }
-        Kokkos::parallel_reduce("hydro::cell_step", cells, CellStep<Moving>{prims_, w_, courant}, Kokkos::Min<double>(by_cell));
-        Kokkos::parallel_reduce("hydro::face_step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
-                                FaceStep{prims_, geometry_, courant}, Kokkos::Min<double>(by_face));
-        return Kokkos::min(by_cell, by_face);
+        Kokkos::parallel_reduce("hydro::time_step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, std::max(faces_, n_)),
+                                TimeStep<Moving>{{prims_, geometry_, courant}, {prims_, w_, courant}, faces_, n_},
+                                Kokkos::Min<double>(smallest));
+        return smallest;
     }
 
     // The points drift by dt * w and stay in the box; the mesh is updated. Used by: step(), step_moving().
