@@ -236,18 +236,21 @@ def figures(runs, singles, out):
         ys = []
         for x, y, kw in refs:
             m = (x >= lo) & (x <= hi)
-            ax.plot(x[m], y[m], color="k", lw=lw, zorder=2.7, **kw)
-            ys.append(y[m])
+            ax.plot(x[m], y[m], **{"color": "k", "lw": lw, "zorder": 2.7, **kw})
+            if kw.get("label") != "exact":   # the exact vacuum (rho = 0) does not set the axis
+                ys.append(y[m])
         for x, y, s, extra in curves:
             m = (x >= lo) & (x <= hi) & np.isfinite(y)
-            ax.plot(x[m], y[m], lw=lw, zorder=3 if s == "moving" else 2, **{k: v for k, v in style[s].items() if k != "label"}, **extra)
+            ax.plot(x[m], y[m], **{"lw": lw, "zorder": 3 if s == "moving" else 2, **{k: v for k, v in style[s].items() if k != "label"}, **extra})
             ys.append(y[m])
         y = np.concatenate([v for v in ys if v.size]) if ys else np.array([1.0])
         y = y[np.isfinite(y) & (y > 0)]
         if y.size and y.max() / max(y.min(), 1e-300) > 100:
             ax.set_yscale("log")
+            ax.set_ylim(0.3 * y.min(), 3.0 * y.max())
         ax.set_xlim(lo, hi)
-        ax.text(0.03, 0.95, text, transform=ax.transAxes, ha="left", va="top", fontsize=10)
+        ax.text(0.03, 0.95, text, transform=ax.transAxes, ha="left", va="top", fontsize=10, zorder=5,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.5))
         decorate(ax)
 
     e = np.linspace(0.0, pr.SUPER2_LENGTH, 2 ** 17 + 1)
@@ -268,12 +271,16 @@ def figures(runs, singles, out):
                 for s in SERIES:
                     r = run(path(runs, s, "super-tube-v2", n, t), "super-tube-v2")
                     tag = ""
-                    if s == "moving" and k != "M" and (r is None or not r[2]["reached"]):
+                    if s == "moving" and k != "M" and (r is None or not r[2]["reached"] or not np.isfinite(r[1]).all()):
                         r, tag = run(path(runs, s, "super-tube-v2-m0", n, t), "super-tube-v2"), " (m0)"
                     if r is None:
                         continue
-                    if not r[2]["reached"]:
-                        notes.append(f"{s}{tag} stopped at t = {r[2]['t']:.3g}")
+                    if not r[2]["reached"] or not np.isfinite(r[2]["t"]):
+                        notes.append(f"{style[s]['label']}{tag}: stopped at t = {r[2]['t']:.3g}" if np.isfinite(r[2]["t"]) else
+                                     f"{style[s]['label']}{tag}: NaN after {r[2]['steps']} steps")
+                        continue
+                    if not np.isfinite(r[1]).all():
+                        notes.append(f"{style[s]['label']}{tag}: state NaN (luna-cpp #29)")
                         continue
                     curves.append((r[0], r[1][0], s, dict(label=style[s]["label"] + tag)))
                 panel(ax, lo, hi, curves, rr, f"$t = {t}$, $N = {n}$" + "".join("\n" + s for s in notes))
@@ -329,7 +336,9 @@ def npz(runs, out, s, p, n, t, meta):
     st = status(f)
     coarse = int(info.pop("coarse", 0))
     lo, hi = pr.problem(p)["box"]
-    keys = dict(problem=p, lx=hi - lo, x0=lo, t=float(st["t"]), t_target=float(t), gamma=pr.G14, limiter=1, riemann_solver="hllc", precision="fp64",
+    coarse = int(os.environ.get("COARSE", coarse))   # a fine run stored as conservative averages on that many cells
+    keys = dict(problem=p, series=s, mesh="moving" if s == "moving" else "static", lx=hi - lo, x0=lo, t=float(st["t"]), t_target=float(t),
+                gamma=pr.G14, limiter=1, riemann_solver="hllc", precision="fp64",
                 n_run=int(n), boundary="left outflow (zero gradient), right reflecting" if pr.problem(p).get("right") == pr.REFLECTIVE else "outflow both",
                 ic="problems_1d.super2_initial: exact cell averages", steps=int(st["steps"]), wall_s=float(st["wall_s"]), reached=int(st["reached"]), **info)
     if coarse:
