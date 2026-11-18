@@ -42,7 +42,10 @@ the density difference between the two runs' last snapshots, cell by cell.
 `scripts/hydro_lean_a100.sh` measures a hydro change against main in one A100 job (docs/tried.md): mode `speed` runs
 Sedov 40 steps static and moving at 128³ and 256³, the binaries alternating, each once with `--phases` (fenced phase
 times) and once without (`step_wall_ms_median`: the wall time of each step, no fences inside it); mode `bits` runs the hashes of `hydro_levers_a100.sh`; mode
-`ctest` the CTest programs of each build. Each change keeps a row in `docs/tried.md`.
+`ctest` the CTest programs of each build. Each change keeps a row in `docs/tried.md`. `scripts/hydro_quant_a100.sh`
+measures how far a change moves the bits and the accuracy (`snapshot_diff.py` after 50 steps, the field L1 to 1e4 yr),
+`scripts/hydro_ncu_local_a100.sh` the local memory, registers and warps of each hydro kernel (Nsight Compute, summary by
+`hydro_ncu_summary.py`), and `scripts/hydro_sass_count.sh` the instructions of the flux kernels.
 
 ## Moving the pin
 

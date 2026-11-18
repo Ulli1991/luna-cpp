@@ -213,6 +213,26 @@ The levers of the profile of 2026-11-18 (branch `profile-2026-11-18`, `research_
 | 32523558 | no per-phase fences (`--phases` off), fallbacks read once a step; wall per step | 9.832 against 9.848 with fences | 26.07 against 26.14 | equal |
 | 32523458 | static: the hydro lets go of the mesh after its set-up (`release_mesh`) | same times; 1135 B/cell in the steps (main 2366); 256³ 1135 (19.0 GB, main 39.7) | (moving keeps the mesh) | equal |
 
+**Per commit** (job 32525301 at 128³, one round; job 32526178 at 256³; all in one A100 job each at 1305 MHz; the trees built together in job 32525268). ms per step from the fenced phases (`--phases`); "wall" is the median wall time of a step without fences, for the trees that have it (from 3306c67 on). G cell updates/s from the fenced step, wall where given. Peak B/cell during the steps. Bits: Q after 40 steps.
+
+| commit | static 128³ ms (G) | moving 128³ ms (G) | static 256³ ms (G) | moving 256³ ms (G) | B/cell static / moving | bits |
+|---|---|---|---|---|---|---|
+| main 73f763a | 9.840 (0.2131) | 26.02 (0.0806) | 76.53 (0.2193) | 191.65 (0.0876) | 2366 / 2301 | — |
+| 75bda77 sweep walk one entry ahead | 9.661 (0.2171) | 25.75 (0.0814) | 75.05 (0.2236) | 190.15 (0.0882) | same | as main |
+| 86e90a6 HLLC without local memory | 9.357 (0.2241) | 25.47 (0.0823) | 72.38 (0.2318) | 186.55 (0.0899) | same | rounding (below) |
+| fe23a56 atomic option (off; removed in df3d4d5) | 9.371 | 25.50 | | | same | as 86e90a6 |
+| eab50e0 one time-step reduction | 9.307 (0.2253) | 25.51 (0.0822) | | | same | as 86e90a6 |
+| 3306c67 no phase fences (wall) | 9.292 (0.2257) | 25.38 (0.0826) | | | same | as 86e90a6 |
+| 450c16f static mesh released (wall) | 9.301 (0.2255) | 25.38 (0.0826) | 72.12 wall, 72.19 fenced (0.2326) | 186.52 fenced (0.0900) | 1135 / 2301 | as 86e90a6 |
+
+From main to 450c16f: static -5.5 % (128³) and -5.7 % (256³), moving -2.5 % and -2.7 % a step; a static run's steps need 52 % less memory (256³: 20.6 instead of 41.3 GB in use on the GPU).
+
+**86e90a6's bits** (job 32525893, `scripts/snapshot_diff.py`, Sedov 128³): after 50 steps the largest relative difference from main is 1.6e-15 (static) and 3.4e-15 (moving) in rho, 6e-14 and 9e-14 in E, and up to 1e-6 (static) and 2e-4 (moving) in momentum components of cells whose momentum is near zero; L1 of the density difference 1e-19 and 5e-19 of the total. To 1e4 yr: field L1 of rho 0.07757 (static) and 0.06479 (moving), v_r 0.02996 and 0.02099, P 0.02159 and 0.01702, all as main to the printed digits; 1636 and 349 steps as main; moving GPU time 9.72 -> 9.46 s. The two owner's items alone (stored 1 / (gamma - 1) and the lean side, with the reference to one of two states kept) move the bits as well (after 50 steps rho 2.2e-15 static, 3.1e-15 moving; E 6e-14 and 7e-14; field L1 to 1e4 yr as main to the printed digits).
+
+**Local memory** (Nsight Compute, job 32525745, Sedov 128³ step 11-12, local loads plus stores per cell): static fluxes 1250 -> 0 B/cell, 2.585 -> 2.251 ms, 86 -> 80 registers, warps active 24.8 -> 34.1 %; moving pass 1 1265 -> 0, 2.846 -> 2.658 ms; pass 2 1265 -> 0, 3.312 -> 3.159 ms (96 registers). The sweep, the update and the time-step kernels use none, before and after (sweep 114 registers static, 118 moving, 22.8 % warps). SASS (job 32525977): the static flux kernel's LDL/STL 5/10 -> 0/0; with the stored 1 / (gamma - 1) and the lean side one double reciprocal (MUFU.RCP64H 10 -> 9), 7 DFMA and 16 instructions fewer; the square roots are 5 before and after (nvcc had dropped the unused sound speed's square root already, not its division).
+
+**A100 ctest** of df3d4d5 (job 32526177): 5 of 5 pass, the 1D ladder gates included.
+
 ### 2D
 
 | Figure | Setup | Jobs |
