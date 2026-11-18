@@ -108,6 +108,19 @@ public:
         return layout;
     }
 
+    // Static mesh: from here on the hydro reads only the mesh arrays it holds (faces, face geometry, lists, cell volumes
+    // and centroids, positions) and keeps its rows in scratch of its own, so the caller may destroy the voronoi::Mesh and
+    // with it what only a moving mesh needs: tetrahedra, circumcentres, repair state, rings, face numbering. Same bits.
+    // The arrays stay readable through geometry(). Throws on a moving mesh.
+    void release_mesh() {
+        if (motion_ != Motion::static_mesh) throw std::logic_error("hydro::FiniteVolume::release_mesh: static meshes only");
+        refresh();
+        mesh_ = nullptr;
+        magnitudes_valid_ = false;  // they lived in the mesh's scratch
+    }
+    bool holds_mesh() const { return mesh_ != nullptr; }
+    int faces() const { return faces_; }
+
     // The extensive conserved state Q(i, v) = (mass, momentum, energy); set it before stepping.
     // A caller may change Q through it, so the primitive rows of the last update are not trusted after this call.
     Cells state() const {
@@ -278,6 +291,8 @@ public:
             return relative - row(centroid, i);
         }
     };
+    // The mesh arrays the hydro reads (after release_mesh() the only copies). Used by: drivers after release_mesh().
+    const Geometry& geometry() const { return geometry_; }
 
     // Public only because CUDA device lambdas may not be defined in private member functions.
 
@@ -300,7 +315,9 @@ public:
     }
 
     // The mesh's current arrays (an update may reallocate them). Used by: constructor, time_step(), step(), move().
+    // After release_mesh() the arrays in geometry_ are the only ones, and nothing changes them.
     void refresh() {
+        if (!mesh_) return;
         const Mesh& mesh = *mesh_;
         faces_ = mesh.faces();
         geometry_ = {mesh.owner(),     mesh.neighbour(), mesh.cell_face_start(), mesh.cell_face(),
@@ -316,6 +333,15 @@ public:
     std::size_t exponent_bytes() const { return order_ == 1 && P::half ? sectors(sizeof(std::uint32_t) * static_cast<std::size_t>(n_)) : 0; }
     std::size_t cell_row_bytes() const { return prim_bytes() + gradient_bytes() + exponent_bytes(); }
 
+    // Scratch bytes: the mesh's spare ring pool, or after release_mesh() an array of the hydro's own, grown to fit.
+    // Used by: borrow_scratch().
+    char* scratch(std::size_t bytes) {
+        if (mesh_) return mesh_->scratch(bytes).data();
+        if (own_scratch_.extent(0) < bytes)
+            own_scratch_ = Kokkos::View<char*, Memory>(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_scratch")), bytes);
+        return own_scratch_.data();
+    }
+
     // Primitive, gradient (and FP16 exponent), then face flux rows in the mesh's scratch, 32-byte aligned; a moving step keeps the cell rows in held_.
     // Used by: time_step(), step(), step_moving(); must precede primitives().
     void borrow_scratch() {
@@ -324,7 +350,7 @@ public:
         const std::size_t row_bytes = per_face ? sectors(sizeof(FluxStore) * V * static_cast<std::size_t>(faces_)) : 0;
         const std::size_t flux_bytes = row_bytes + (keeps && cache_magnitudes_ ? sizeof(double) * static_cast<std::size_t>(faces_) : 0);
         const bool held = both_meshes_;
-        char* base = held ? held_.data() : mesh_->scratch(cell_row_bytes() + flux_bytes).data();
+        char* base = held ? held_.data() : scratch(cell_row_bytes() + flux_bytes);
         char* fluxes = held ? mesh_->scratch(flux_bytes).data() : base + cell_row_bytes();
         double* magnitudes = reinterpret_cast<double*>(fluxes + row_bytes);
         if (magnitudes != magnitudes_.data() || faces_ != static_cast<int>(magnitudes_.extent(0))) magnitudes_valid_ = false;
@@ -1014,6 +1040,7 @@ private:
     Points x_, w_;
     Points old_centroid_;              // moving step: the centroids of t^n
     Kokkos::View<char*, Memory> held_;  // moving step: the rows of prims_, gradients_, exponents_
+    Kokkos::View<char*, Memory> own_scratch_;  // after release_mesh(): the cell rows and face fluxes
     Gradients gradients_;
     Exponents exponents_;
     FaceFluxes flux_;

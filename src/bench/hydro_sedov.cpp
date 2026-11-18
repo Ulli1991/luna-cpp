@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <type_traits>
@@ -185,6 +186,7 @@ struct Options {
     Box box{1.0};
     bool phases = false;       // --phases: fence and time each phase of a step (off: one wall time a step)
     bool plain_faces = false;  // --plain-faces: the mesh layout as the flags set it (the hydro's default: owner bit, and faces by owner when static)
+    bool keep_mesh = false;    // --keep-mesh: a static run keeps the whole mesh (by default the hydro lets go of it, FiniteVolume::release_mesh)
     voronoi::Layout layout;  // the mesh's memory layout (--curve, --every, --far, --owner-faces, --owner-bit)
 };
 
@@ -203,7 +205,8 @@ void run(const Options& o, Points points) {
     const Exec exec;
 
     Kokkos::Timer timer;
-    Mesh mesh(exec, box);
+    auto owned_mesh = std::make_unique<Mesh>(exec, box);  // let go of after the hydro's set-up on a static mesh (release_mesh)
+    Mesh& mesh = *owned_mesh;
     mesh.set_layout(o.plain_faces ? o.layout : FV::fast_layout(o.moving ? hydro::Motion::moving : hydro::Motion::static_mesh, o.layout));
     {
         if (!o.input_order) points = morton_order(points, box);
@@ -262,6 +265,12 @@ void run(const Options& o, Points points) {
         Kokkos::deep_copy(fv.state(), Q);
     }
     DeviceMemory::phase("hydro_setup", n);
+    // A static run lets go of the mesh: the hydro holds the arrays it reads (--keep-mesh: keep the whole mesh, as before).
+    if (!o.moving && !o.keep_mesh) {
+        fv.release_mesh();
+        owned_mesh.reset();
+        DeviceMemory::phase("released", n);
+    }
 
     hydro::SnapshotData snap;
     for (int a = 0; a < 3; ++a) snap.sides[a] = box.side[a];
@@ -272,8 +281,8 @@ void run(const Options& o, Points points) {
     // differs from the background by > 1e-6; --no-blast: the largest deviation) and calls write_snapshot if --out is set.
     auto write = [&](int index, double t) {
         const auto Q = to_host(fv.state());
-        const auto x = to_host(mesh.positions());
-        const auto V = to_host(mesh.volume());
+        const auto x = to_host(fv.geometry().positions);
+        const auto V = to_host(fv.geometry().volume);
         snap.index = index;
         snap.time = t;
         for (auto* c : {&snap.x, &snap.y, &snap.z, &snap.volume}) c->resize(n);
@@ -307,7 +316,7 @@ void run(const Options& o, Points points) {
         if (o.gradients && index == o.snapshots) {  // the run is over: the gradients of the end state
             fv.time_step(courant);
             const auto gradient = fv.density_gradients();
-            const auto c = to_host(mesh.centroid());
+            const auto c = to_host(fv.geometry().centroid);
             std::ofstream rows(o.out + "/gradients.bin", std::ios::binary);
             for (long long i = 0; i < n; ++i) {
                 const double row[6] = {double(c(i, 0)), double(c(i, 1)), double(c(i, 2)), gradient(i, 0), gradient(i, 1), gradient(i, 2)};
@@ -372,7 +381,7 @@ void run(const Options& o, Points points) {
               << " gpu_s=" << gpu_ms * 1e-3 << " step_wall_ms_median=" << median(wall_ms)
               << " G_cell_updates_per_s=" << n / (median(wall_ms) * 1e-3) / 1e9 << " phases=" << o.phases << "\n";
     std::cout << "fallbacks: total=" << fallbacks << " steps_with=" << steps_with_fallbacks << " most_in_a_step=" << most_fallbacks
-              << " face_sides_per_step=" << 2 * static_cast<long long>(mesh.faces()) << "\n";
+              << " face_sides_per_step=" << 2 * static_cast<long long>(fv.faces()) << "\n";
     const hydro::MeshStats& ms = fv.mesh_stats();
     std::cout << "mesh_updates: updates=" << ms.updates << " rebuilds=" << ms.rebuilds << " resorts=" << ms.resorts << " stuck=" << ms.stuck
               << " stuck_steps=" << ms.stuck_steps << " local_repairs=" << ms.local_repairs << " local_cells=" << ms.local_cells
@@ -385,14 +394,14 @@ void run(const Options& o, Points points) {
     if (o.phases) std::cout << "throughput_M_per_s: primitives=" << rate(median(prim_ms)) << " sweep=" << rate(median(sweep_ms))
               << " fluxes=" << rate(median(flux_ms)) << " update=" << rate(median(update_ms)) << " mesh=" << rate(median(mesh_ms))
               << " cells=" << rate(median(cells_ms)) << " hydro=" << rate(hydro_ms) << " step=" << rate(step_ms)
-              << " hydro_G_face_updates_per_s=" << mesh.faces() / (hydro_ms * 1e-3) / 1e9 << "\n";
+              << " hydro_G_face_updates_per_s=" << fv.faces() / (hydro_ms * 1e-3) / 1e9 << "\n";
     std::cout << "conservation: mass=" << (after.mass - before.mass) / before.mass
               << " energy=" << (after.energy - before.energy) / before.energy << " momentum=(" << after.px - before.px << ","
               << after.py - before.py << "," << after.pz - before.pz << ") momentum_scale=" << before.mass * std::sqrt(2 * before.energy / before.mass)
               << "\n";
     const auto Qh = to_host(fv.state());
-    const auto xh = to_host(mesh.positions());
-    const auto Vh = to_host(Kokkos::View<const double* [1], Kokkos::LayoutLeft, Memory>(mesh.volume().data(), n));
+    const auto xh = to_host(fv.geometry().positions);
+    const auto Vh = to_host(Kokkos::View<const double* [1], Kokkos::LayoutLeft, Memory>(fv.geometry().volume.data(), n));
     std::cout << "checksum: steps=" << steps << " Q=" << std::hex << bits_hash(Qh) << " x=" << bits_hash(xh) << " volume=" << bits_hash(Vh)
               << std::dec << "\n";
 }
@@ -431,7 +440,7 @@ int main(int argc, char** argv) {
                      " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|riemann32|single|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]"
-                     " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces] [--phases]\n";
+                     " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces] [--phases] [--keep-mesh]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -465,6 +474,7 @@ int main(int argc, char** argv) {
     o.layout.owner_bit = flag(argc, argv, "--owner-bit", "") == "1";
     o.plain_faces = flag(argc, argv, "--plain-faces", "") == "1";
     o.phases = flag(argc, argv, "--phases", "") == "1";
+    o.keep_mesh = flag(argc, argv, "--keep-mesh", "") == "1";
     // The periodic box: --box=fx,fy,fz times 50 pc (a cube by default); the lattice keeps about equal spacings per axis.
     const Sedov sedov;
     const std::string shape_arg = flag(argc, argv, "--box", "1,1,1");

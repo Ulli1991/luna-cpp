@@ -211,6 +211,7 @@ The levers of the profile of 2026-11-18 (branch `profile-2026-11-18`, `research_
 | 32523558 | time step: face and cell terms in one reduction | sweep phase 4.97 | 5.70 | equal |
 | 32523558 | time step: terms inside the sweep (as a reduction) | sweep phase 7.74 | 8.83 | equal |
 | 32523558 | no per-phase fences (`--phases` off), fallbacks read once a step; wall per step | 9.832 against 9.848 with fences | 26.07 against 26.14 | equal |
+| 32523458 | static: the hydro lets go of the mesh after its set-up (`release_mesh`) | same times; 1135 B/cell in the steps (main 2366); 256³ 1135 (19.0 GB, main 39.7) | (moving keeps the mesh) | equal |
 
 ### 2D
 
