@@ -53,8 +53,20 @@ measures how far a change moves the bits and the accuracy (`snapshot_diff.py` af
 A new voronoi-cpp pin is checked against the old one with both trees built in the same A100 job: the CTest
 programs on the A100 and CI's host steps, the bit hashes above, and `hydro_sedov` to t_end for stuck steps and speed.
 `scripts/pin_bits_a100.sh` (builds, A100 ctest, bits), `scripts/pin_speed_a100.sh` (stuck steps, speed) and
-`scripts/pin_ci_host.sh` (CI's host steps) take the two worktrees as OLD and NEW. The last move, 6ead543 to abd3d39
-(2026-11-18), is in docs/measurements.md ("voronoi-cpp 6ead543 to abd3d39").
+`scripts/pin_ci_host.sh` (CI's host steps) take the two worktrees as OLD and NEW. The last move, abd3d39 to 1741a1a
+(2026-11-18), is in docs/measurements.md ("voronoi-cpp abd3d39 to 1741a1a"):
+- Builds and tests (jobs 32540741, 32540744): A100 ctest 5 of 5; CI's host steps ctest 5 of 5 with sanitizers off
+  and on, lint clean.
+- Bits (job 32540741): equal hashes of Q, x and volume on static, order 0, moving, and per-cell moving Sedov 128³
+  (50 steps); 1D Sod, Shu-Osher and Woodward-Colella at N = 1024, static and moving; 2D KH 256², 300 steps, static
+  and moving. HLL moving (50 steps) differs in Q only. Moving Sedov to 1e4 yr differs in Q at 128³ (x and volume
+  equal) and in Q, x and volume at 256³. The field L1 of rho, v_r and P is equal to all printed digits (128³ static
+  and moving, 192³ and 256³ moving), and so are the 3D vortex and the sound waves at 1e-3 and 1e-6 (job 32540743).
+- Stuck steps (job 32540742): none in two runs per pin at 128³ and 256³ to 1e4 yr; no rebuild, no local repair.
+- Re-sorting stays off in luna-cpp (`FiniteVolume::no_resort`), although 1741a1a's `voronoi::Layout` re-sorts every
+  25 updates by default.
+
+The move before, 6ead543 to abd3d39 (2026-11-18), is in docs/measurements.md ("voronoi-cpp 6ead543 to abd3d39"):
 - Bits (job 32520636): equal hashes of Q, x and volume on all five Sedov 128³ paths (50 steps) and on moving Sedov
   128³ to 1e4 yr (349 steps); 1D Sod, Shu-Osher and Woodward-Colella at N = 1024, static and moving; 2D KH 256²,
   300 steps, static and moving. Only the device flip counts differ, by a few in 10⁶, as between two runs of one binary
