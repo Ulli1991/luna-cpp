@@ -60,8 +60,30 @@ public:
     // Whole steps of the mesh grid each point moves over a moving step (int32: exact, 12 B a cell in 3D).
     using Steps = Kokkos::View<int* [D], Kokkos::LayoutRight, Memory>;
     using Unmanaged = Kokkos::MemoryTraits<Kokkos::Unmanaged>;
-    // Per cell and step, written by primitives(): W = primitive(Q / V), the sound speed, the radius.
-    using Prims = Kokkos::View<double* [V + 2], Kokkos::LayoutRight, Memory, Unmanaged>;
+    // Per cell and step, written by primitives(): W = primitive(Q / V), the sound speed, the radius. 3D: the sound speed and the
+    // radius as two floats in one double slot (48 B a row, not 56; they feed only the time step and w); 2D: two doubles.
+    static constexpr int prim_width = D == 3 ? V + 1 : V + 2;
+    using Prims = Kokkos::View<double* [prim_width], Kokkos::LayoutRight, Memory, Unmanaged>;
+    struct Speeds {
+        float sound, radius;
+    };
+    KOKKOS_INLINE_FUNCTION static double sound_of(const Prims& prim, int i) {
+        if constexpr (D == 3) return Kokkos::bit_cast<Speeds>(prim(i, V)).sound;
+        else return prim(i, V);
+    }
+    KOKKOS_INLINE_FUNCTION static double radius_of(const Prims& prim, int i) {
+        if constexpr (D == 3) return Kokkos::bit_cast<Speeds>(prim(i, V)).radius;
+        else return prim(i, V + 1);
+    }
+    // Writes the sound speed c and the radius r of cell i. Used by: primitives(), apply() (a moving step's second update).
+    KOKKOS_INLINE_FUNCTION static void set_speeds(const Prims& prim, int i, double c, double r) {
+        if constexpr (D == 3) {
+            prim(i, V) = Kokkos::bit_cast<double>(Speeds{static_cast<float>(c), static_cast<float>(r)});
+        } else {
+            prim(i, V) = c;
+            prim(i, V + 1) = r;
+        }
+    }
     using Gradients = Kokkos::View<GStore* [gradient_width], Kokkos::LayoutRight, Memory, Unmanaged>;
     using Exponents = Kokkos::View<std::uint32_t*, Memory, Unmanaged>;  // FP16 gradients: one byte per group
     using FaceFluxes = Kokkos::View<FluxStore* [V], Kokkos::LayoutRight, Memory, Unmanaged>;
@@ -355,7 +377,7 @@ public:
 
     // Sizes of the per-cell rows, each part on a 32-byte boundary. Used by: borrow_scratch(), the constructor.
     static constexpr std::size_t sectors(std::size_t bytes) { return (bytes + 31) / 32 * 32; }
-    std::size_t prim_bytes() const { return sectors(sizeof(double) * (V + 2) * static_cast<std::size_t>(n_)); }
+    std::size_t prim_bytes() const { return sectors(sizeof(double) * prim_width * static_cast<std::size_t>(n_)); }
     std::size_t gradient_bytes() const { return order_ == 1 ? sizeof(GStore) * gradient_width * static_cast<std::size_t>(n_) : 0; }
     std::size_t exponent_bytes() const { return order_ == 1 && P::half ? sectors(sizeof(std::uint32_t) * static_cast<std::size_t>(n_)) : 0; }
     std::size_t cell_row_bytes() const { return prim_bytes() + gradient_bytes() + exponent_bytes(); }
@@ -399,8 +421,7 @@ public:
             "hydro::primitives", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 const State W = primitive(geo.per_volume(q, i), gas);
                 for (int v = 0; v < V; ++v) prim(i, v) = W[v];
-                prim(i, V) = sound_speed(W, gas);
-                prim(i, V + 1) = radius(geo.volume(i));
+                set_speeds(prim, i, sound_speed(W, gas), radius(geo.volume(i)));
             });
     }
     // W of cell i from prims_. Used by: Sweep, FaceFlux::side(), MovingFlux.
@@ -495,7 +516,7 @@ public:
                 Vec wi = velocity(Wi);
                 const Vec c = centroid;  // centroid - generator = -dx of AREPO
                 const double cd = Kokkos::sqrt(dot(c, c));
-                if (cd > 0 && fraction > 0) wi = wi + c * (fraction * prim(i, V) / cd);
+                if (cd > 0 && fraction > 0) wi = wi + c * (fraction * sound_of(prim, i) / cd);
                 for (int a = 0; a < D; ++a) w(i, a) = wi[a];
             }
             if constexpr (Grad) {
@@ -607,7 +628,7 @@ public:
         KOKKOS_INLINE_FUNCTION void operator()(int i, double& smallest) const {
             Vec relative = make_vec<D>([&](int a) { return prim(i, 1 + a); });
             if constexpr (Moving) relative = relative - make_vec<D>([&](int a) { return w(i, a); });
-            const double step = prim(i, V + 1) / (prim(i, V) + Kokkos::sqrt(dot(relative, relative)));
+            const double step = radius_of(prim, i) / (sound_of(prim, i) + Kokkos::sqrt(dot(relative, relative)));
             smallest = Kokkos::fmin(smallest, courant * step);
         }
     };
@@ -620,7 +641,7 @@ public:
         double courant;
 
         KOKKOS_INLINE_FUNCTION void operator()(int i, double& smallest) const {
-            const double c = prim(i, V), dx = prim(i, V + 1) * Kokkos::sqrt(M_PI);
+            const double c = sound_of(prim, i), dx = radius_of(prim, i) * Kokkos::sqrt(M_PI);
             double rate = 0;
             for (int a = 0; a < D; ++a) {
                 double relative = prim(i, 1 + a);
@@ -642,10 +663,10 @@ public:
             const Vec d = geo.separation(o, j);
             const double dist = Kokkos::sqrt(dot(d, d));
             const Vec dv = make_vec<D>([&](int a) { return prim(j, 1 + a) - prim(o, 1 + a); });
-            const double vsig = prim(o, V) + prim(j, V) - dot(dv, d) / dist;
+            const double vsig = sound_of(prim, o) + sound_of(prim, j) - dot(dv, d) / dist;
             if (vsig > 0) {
-                smallest = Kokkos::fmin(smallest, courant * ((dist + prim(o, V + 1)) / vsig));
-                smallest = Kokkos::fmin(smallest, courant * ((dist + prim(j, V + 1)) / vsig));
+                smallest = Kokkos::fmin(smallest, courant * ((dist + radius_of(prim, o)) / vsig));
+                smallest = Kokkos::fmin(smallest, courant * ((dist + radius_of(prim, j)) / vsig));
             }
         }
     };
@@ -1014,8 +1035,7 @@ public:
                     const double inv = 1.0 / geo.volume(i);
                     const State W = primitive(make_state<D>([&](int v) { return next[v] * inv; }), gas);
                     for (int v = 0; v < V; ++v) prim(i, v) = W[v];
-                    prim(i, V) = sound_speed(W, gas);
-                    prim(i, V + 1) = radius(geo.volume(i));
+                    set_speeds(prim, i, sound_speed(W, gas), radius(geo.volume(i)));
                 }
             });
         if (keep) magnitudes_valid_ = true;
