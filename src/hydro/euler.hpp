@@ -3,6 +3,7 @@
 #include <Kokkos_Core.hpp>
 
 #include <cstddef>
+#include <type_traits>
 #include <utility>
 
 // Physics kernels of the solver (D = 1, 2, 3), called per cell/face by FiniteVolume<D> (finite_volume.hpp, finite_volume_1d.hpp).
@@ -81,6 +82,22 @@ KOKKOS_INLINE_FUNCTION Vec<D, T> velocity(const Kokkos::Array<T, N>& W) {
 struct Gas {
     double gamma = 5.0 / 3.0;
     double smallr = 1e-10, smallc = 1e-10;
+    // 1 / (gamma - 1), once per gas instead of once per face side; in double and in float, each rounded as computed in
+    // that type (the float Riemann solve). Used by: detail::side() through inverse_gamma_minus_one().
+    double inverse_gm1 = 1.0 / (5.0 / 3.0 - 1.0);
+    float inverse_gm1_float = 1.0f / (static_cast<float>(5.0 / 3.0) - 1.0f);
+
+    Gas() = default;
+    KOKKOS_INLINE_FUNCTION Gas(double gamma_, double smallr_ = 1e-10, double smallc_ = 1e-10)
+        : gamma(gamma_), smallr(smallr_), smallc(smallc_), inverse_gm1(1.0 / (gamma_ - 1.0)),
+          inverse_gm1_float(1.0f / (static_cast<float>(gamma_) - 1.0f)) {}
+    template <class T>
+    KOKKOS_INLINE_FUNCTION T inverse_gamma_minus_one() const {
+        if constexpr (std::is_same_v<T, float>)
+            return inverse_gm1_float;
+        else
+            return static_cast<T>(inverse_gm1);
+    }
 };
 
 // U -> W with the floors (LUNA's cons_to_prim_floored). Used by: FiniteVolume<D>::primitives(), side(), 1D primitive_of(), snapshot.
@@ -159,19 +176,29 @@ struct Side {
     StateT<D, T> F, U;  // flux along n and conserved state
 };
 
-// Used by: HLL::flux(), HLLC::flux(). n, w: face normal and velocity.
+// One side with its normal velocity vn = (v - w) . n given, without the sound speed (s.c = 0). n, w: face normal and
+// velocity. Used by: side(), HLLC::flux() (which has vn already and never reads c).
 template <int D, class T>
-KOKKOS_INLINE_FUNCTION Side<D, T> side(const StateT<D, T>& W, Vec<D, T> n, Vec<D, T> w, const Gas& gas) {
+KOKKOS_INLINE_FUNCTION Side<D, T> side_with(const StateT<D, T>& W, Vec<D, T> n, Vec<D, T> w, const Gas& gas, T vn) {
     constexpr int P = D + 1;
     Side<D, T> s;
     s.v = velocity(W) - w;
-    s.vn = dot(s.v, n);
-    const T c2 = T(gas.gamma) * W[P] / W[0];
-    s.c = c2 > 0 ? Kokkos::sqrt(c2) : T(0);
-    s.E = W[P] * (T(1) / (T(gas.gamma) - T(1))) + W[0] * (T(0.5) * dot(s.v, s.v));
+    s.vn = vn;
+    s.c = T(0);
+    s.E = W[P] * gas.inverse_gamma_minus_one<T>() + W[0] * (T(0.5) * dot(s.v, s.v));
     const T m = W[0] * s.vn;
     s.F = make_state<D, T>([&](int k) { return k == 0 ? m : k == P ? (s.E + W[P]) * s.vn : m * s.v[k - 1] + W[P] * n[k - 1]; });
     s.U = make_state<D, T>([&](int k) { return k == 0 ? W[0] : k == P ? s.E : W[0] * s.v[k - 1]; });
+    return s;
+}
+
+// The whole side, sound speed included. Used by: HLL::flux().
+template <int D, class T>
+KOKKOS_INLINE_FUNCTION Side<D, T> side(const StateT<D, T>& W, Vec<D, T> n, Vec<D, T> w, const Gas& gas) {
+    constexpr int P = D + 1;
+    Side<D, T> s = side_with(W, n, w, gas, dot(velocity(W) - w, n));
+    const T c2 = T(gas.gamma) * W[P] / W[0];
+    s.c = c2 > 0 ? Kokkos::sqrt(c2) : T(0);
     return s;
 }
 
@@ -234,8 +261,9 @@ struct HLLC {
         // LUNA's branch order: F_L, F*_L, F*_R, F_R.
         const bool left = ok && (SL >= 0 || SM >= 0);
         const bool star = ok && SL < 0 && (SM >= 0 || SR > 0);
-        const StateT<D, T>& W = left ? L : R;
-        const detail::Side<D, T> s = detail::side(W, n, w, gas);
+        // The upwind state copied entry by entry: a reference to one of the two arrays put both in local memory.
+        const StateT<D, T> W = make_state<D, T>([&](int v) { return left ? L[v] : R[v]; });
+        const detail::Side<D, T> s = detail::side_with(W, n, w, gas, left ? vnL : vnR);
         if (!star) return detail::to_lab(s.F, w);
         // The star state: rho*, rho* (v_t + S_M n), rho* E*.
         const T S = left ? SL : SR, denom = left ? denomL : denomR;

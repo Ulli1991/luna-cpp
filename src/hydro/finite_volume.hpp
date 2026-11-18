@@ -6,6 +6,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
@@ -103,6 +104,19 @@ public:
         return layout;
     }
 
+    // Static mesh: from here on the hydro reads only the mesh arrays it holds (faces, face geometry, lists, cell volumes
+    // and centroids, positions) and keeps its rows in scratch of its own, so the caller may destroy the voronoi::Mesh and
+    // with it what only a moving mesh needs: tetrahedra, circumcentres, repair state, rings, face numbering. Same bits.
+    // The arrays stay readable through geometry(). Throws on a moving mesh.
+    void release_mesh() {
+        if (motion_ != Motion::static_mesh) throw std::logic_error("hydro::FiniteVolume::release_mesh: static meshes only");
+        refresh();
+        mesh_ = nullptr;
+        magnitudes_valid_ = false;  // they lived in the mesh's scratch
+    }
+    bool holds_mesh() const { return mesh_ != nullptr; }
+    int faces() const { return faces_; }
+
     // The extensive conserved state Q(i, v) = (mass, momentum, energy); set it before stepping.
     // A caller may change Q through it, so the primitive rows of the last update are not trusted after this call.
     Cells state() const {
@@ -178,13 +192,15 @@ public:
     }
 
     // Face sides of the last step that took the cell's state because the extrapolated one was not physical.
-    // Read back from the device here, so the flux passes need no fence of their own.
+    // Read back from the device here, once a step (both passes in one copy), so the flux passes need no fence of their own.
     long long fallbacks() const {
-        long long first = 0, second = 0;
-        Kokkos::deep_copy(exec_, first, fallbacks_[0]);
-        Kokkos::deep_copy(exec_, second, fallbacks_[1]);
-        exec_.fence();
-        return first + second;
+        if (!fallbacks_read_) {
+            Kokkos::deep_copy(exec_, fallback_host_, fallback_counts_);
+            exec_.fence();
+            fallbacks_last_ = fallback_host_(0) + fallback_host_(1);
+            fallbacks_read_ = true;
+        }
+        return fallbacks_last_;
     }
 
     // The radius of a sphere (D = 3) or circle (D = 2) of volume v. Used by: primitives().
@@ -271,6 +287,8 @@ public:
             return relative - row(centroid, i);
         }
     };
+    // The mesh arrays the hydro reads (after release_mesh() the only copies). Used by: drivers after release_mesh().
+    const Geometry& geometry() const { return geometry_; }
 
     // Public only because CUDA device lambdas may not be defined in private member functions.
 
@@ -293,7 +311,9 @@ public:
     }
 
     // The mesh's current arrays (an update may reallocate them). Used by: constructor, time_step(), step(), move().
+    // After release_mesh() the arrays in geometry_ are the only ones, and nothing changes them.
     void refresh() {
+        if (!mesh_) return;
         const Mesh& mesh = *mesh_;
         faces_ = mesh.faces();
         geometry_ = {mesh.owner(),     mesh.neighbour(), mesh.cell_face_start(), mesh.cell_face(),
@@ -309,6 +329,15 @@ public:
     std::size_t exponent_bytes() const { return order_ == 1 && P::half ? sectors(sizeof(std::uint32_t) * static_cast<std::size_t>(n_)) : 0; }
     std::size_t cell_row_bytes() const { return prim_bytes() + gradient_bytes() + exponent_bytes(); }
 
+    // Scratch bytes: the mesh's spare ring pool, or after release_mesh() an array of the hydro's own, grown to fit.
+    // Used by: borrow_scratch().
+    char* scratch(std::size_t bytes) {
+        if (mesh_) return mesh_->scratch(bytes).data();
+        if (own_scratch_.extent(0) < bytes)
+            own_scratch_ = Kokkos::View<char*, Memory>(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_scratch")), bytes);
+        return own_scratch_.data();
+    }
+
     // Primitive, gradient (and FP16 exponent), then face flux rows in the mesh's scratch, 32-byte aligned; a moving step keeps the cell rows in held_.
     // Used by: time_step(), step(), step_moving(); must precede primitives().
     void borrow_scratch() {
@@ -317,7 +346,7 @@ public:
         const std::size_t row_bytes = per_face ? sectors(sizeof(FluxStore) * V * static_cast<std::size_t>(faces_)) : 0;
         const std::size_t flux_bytes = row_bytes + (per_face && cache_magnitudes_ ? sizeof(double) * static_cast<std::size_t>(faces_) : 0);
         const bool held = both_meshes_;
-        char* base = held ? held_.data() : mesh_->scratch(cell_row_bytes() + flux_bytes).data();
+        char* base = held ? held_.data() : scratch(cell_row_bytes() + flux_bytes);
         char* fluxes = held ? mesh_->scratch(flux_bytes).data() : base + cell_row_bytes();
         double* magnitudes = reinterpret_cast<double*>(fluxes + row_bytes);
         if (magnitudes != magnitudes_.data() || faces_ != static_cast<int>(magnitudes_.extent(0))) magnitudes_valid_ = false;
@@ -385,8 +414,17 @@ public:
             G M[U][U] = {};
             G b[V][U] = {};
             const Vec centroid = geo.row(geo.centroid, i);
-            for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                const int f = geo.face_at(k), j = geo.other_at(k, f, i);
+            // The list walk one entry ahead: the face and neighbour of entry k + 1 load while entry k's rows are summed,
+            // so each entry waits for one level of loads, not three (list, face sides, rows).
+            const int first = geo.start(i), end = geo.start(i + 1);
+            int f_next = first < end ? geo.face_at(first) : 0;
+            int j_next = first < end ? geo.other_at(first, f_next, i) : 0;
+            for (int k = first; k < end; ++k) {
+                const int f = f_next, j = j_next;
+                if (k + 1 < end) {
+                    f_next = geo.face_at(k + 1);
+                    j_next = geo.other_at(k + 1, f_next, i);
+                }
                 const State Wj = primitive_row(prim, j);
                 const Vec d = geo.separation(i, j);
                 const double magnitude = magnitude_of(f);
@@ -528,7 +566,7 @@ public:
         }
     };
 
-    // The cell terms of the time step (AREPO rule). Used by: sweep().
+    // The cell terms of the time step (AREPO rule). Used by: TimeStep.
     template <bool Moving>
     struct CellStep {
         Prims prim;
@@ -562,7 +600,7 @@ public:
         }
     };
     // The face terms of the time step (AREPO rule). vsig_ij and d_ij are the same from both sides, so each face gives both cells' terms.
-    // Used by: sweep().
+    // Used by: TimeStep.
     struct FaceStep {
         Prims prim;
         Geometry geo;
@@ -581,7 +619,21 @@ public:
         }
     };
 
-    // Stage 2 of a step: runs Sweep, then the time-step reductions; returns dt. Used by: time_step(), step().
+    // Both terms of the time step in one reduction (one launch, one read-back): thread k takes face k's terms (k < faces)
+    // and cell k's (k < cells). The smallest of the same terms as before, so the same dt. Used by: sweep().
+    template <bool Moving>
+    struct TimeStep {
+        FaceStep face;
+        CellStep<Moving> cell;
+        int faces, cells;
+
+        KOKKOS_INLINE_FUNCTION void operator()(int k, double& smallest) const {
+            if (k < faces) face(k, smallest);
+            if (k < cells) cell(k, smallest);
+        }
+    };
+
+    // Stage 2 of a step: runs Sweep, then the time-step reduction; returns dt. Used by: time_step(), step().
     double sweep(double courant) {
         const bool moving = motion_ == Motion::moving;
         if (order_ == 1)
@@ -595,17 +647,17 @@ public:
             Kokkos::parallel_for("hydro::sweep", cells,
                                  Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
                                                            magnitudes_valid_ ? magnitudes_ : Magnitudes()});
-        double by_cell = 0, by_face = 0;
+        double smallest = 0;
         if constexpr (D == 2) {
             if (rule_ == StepRule::luna) {
-                Kokkos::parallel_reduce("hydro::luna_step", cells, LunaStep<Moving>{prims_, w_, courant}, Kokkos::Min<double>(by_cell));
-                return by_cell;
+                Kokkos::parallel_reduce("hydro::luna_step", cells, LunaStep<Moving>{prims_, w_, courant}, Kokkos::Min<double>(smallest));
+                return smallest;
             }
         }
-        Kokkos::parallel_reduce("hydro::cell_step", cells, CellStep<Moving>{prims_, w_, courant}, Kokkos::Min<double>(by_cell));
-        Kokkos::parallel_reduce("hydro::face_step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
-                                FaceStep{prims_, geometry_, courant}, Kokkos::Min<double>(by_face));
-        return Kokkos::min(by_cell, by_face);
+        Kokkos::parallel_reduce("hydro::time_step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, std::max(faces_, n_)),
+                                TimeStep<Moving>{{prims_, geometry_, courant}, {prims_, w_, courant}, faces_, n_},
+                                Kokkos::Min<double>(smallest));
+        return smallest;
     }
 
     // The points drift by dt * w and stay in the box; the mesh is updated. Used by: step(), step_moving().
@@ -856,7 +908,8 @@ public:
     // pass: which fallback counter the flux pass writes (0, or 1 for a moving step's second pass).
     template <int Order, class Flux>
     void apply(const Flux& flux, double dt, Timings* timings, int pass = 0) {
-        if (pass == 0) Kokkos::deep_copy(exec_, fallbacks_[1], 0LL);
+        if (pass == 0) Kokkos::deep_copy(exec_, Kokkos::subview(fallback_counts_, 1), 0LL);
+        fallbacks_read_ = false;
         const Geometry geo = geometry_;
         const auto q = q_;
         if (update_ == Update::per_cell) {
@@ -877,7 +930,7 @@ public:
                     }
                     for (int v = 0; v < V; ++v) next(i, v) = q(i, v) - dt * sum[v];
                 },
-                fallbacks_[pass]);
+                Kokkos::subview(fallback_counts_, pass));
             phase_end(timings, &Timings::fluxes);
             if constexpr (Order == 0) std::swap(q_, next_);
             return;
@@ -902,7 +955,7 @@ public:
                     mag(f) = Kokkos::sqrt(dot(a, a));
                 }
             },
-            fallbacks_[pass]);
+            Kokkos::subview(fallback_counts_, pass));
         phase_end(timings, &Timings::fluxes);
         Kokkos::parallel_for(
             "hydro::update", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
@@ -945,14 +998,18 @@ private:
     Magnitudes magnitudes_;
     bool magnitudes_valid_ = false;
     bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr;
-    Kokkos::View<long long, Memory> fallbacks_[2] = {Kokkos::View<long long, Memory>("hydro_fallbacks"),
-                                                      Kokkos::View<long long, Memory>("hydro_fallbacks_second")};
+    // Fallbacks of the two flux passes of the last step (one pass: the first), read back by fallbacks() once a step.
+    Kokkos::View<long long[2], Memory> fallback_counts_{"hydro_fallbacks"};
+    Kokkos::View<long long[2], Kokkos::HostSpace> fallback_host_{"hydro_fallbacks_host"};
+    mutable bool fallbacks_read_ = false;
+    mutable long long fallbacks_last_ = 0;
     Kokkos::Timer timer_;
     Cells q_, next_;
     Prims prims_;
     Points x_, w_;
     Points old_centroid_;              // moving step: the centroids of t^n
     Kokkos::View<char*, Memory> held_;  // moving step: the rows of prims_, gradients_, exponents_
+    Kokkos::View<char*, Memory> own_scratch_;  // after release_mesh(): the cell rows and face fluxes
     Gradients gradients_;
     Exponents exponents_;
     FaceFluxes flux_;

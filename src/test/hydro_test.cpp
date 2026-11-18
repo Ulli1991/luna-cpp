@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <type_traits>
@@ -244,6 +245,22 @@ void mesh_tests(Check& check, const std::string& kind, const std::string& solver
     auto same = [&](const HostCells& a, const HostCells& b) { return std::memcmp(a.data(), b.data(), sizeof(double) * 5 * n) == 0; };
     check.expect(same(result[0][0], result[0][1]) && same(result[1][0], result[1][1]),
                  solver + ", " + kind + ": two runs give the same bits (both loops, order 1, 10 steps)");
+    {  // A static run that lets go of its mesh (release_mesh) and destroys it: the same bits as the run that keeps it.
+        auto own = std::make_unique<typename FV::Mesh>(Exec{}, 1.0);
+        own->update(to_device(make_points_off_grid(kind, n)));
+        own->update_cells();
+        FV fv(Exec{}, *own, gas, 1, hydro::Update::per_face);
+        set_state(fv, *own, rough_state(n, gas));
+        fv.release_mesh();
+        own.reset();
+        for (int s = 0; s < 10; ++s) fv.step(fv.time_step(0.3));
+        HostCells released = host_extensive(fv);
+        const auto volume = to_host(fv.geometry().volume);
+        for (int i = 0; i < n; ++i)
+            for (int v = 0; v < 5; ++v) released(i, v) /= volume(i);
+        check.expect(same(released, result[1][0]) && !fv.holds_mesh(),
+                     solver + ", " + kind + ": a static run after release_mesh() with its mesh destroyed gives the same bits (10 steps)");
+    }
     // The loops compile the same face flux into different kernels (multiply-add contraction): equal to rounding, not bit for bit.
     double loops = 0;
     for (int i = 0; i < n; ++i)
