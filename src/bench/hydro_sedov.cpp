@@ -468,6 +468,7 @@ int main(int argc, char** argv) {
                                                           {"moore", voronoi::Curve::moore},   {"gray", voronoi::Curve::gray},
                                                           {"row", voronoi::Curve::row_major}, {"rcm", voronoi::Curve::rcm}};
     if (const std::string curve = flag(argc, argv, "--curve", ""); !curve.empty()) o.layout.curve = curves.at(curve);
+    // Re-sort every k updates; 0 (off) unless asked, explicitly: voronoi-cpp's own default is 25 (FiniteVolume::no_resort).
     o.layout.every = std::stoi(flag(argc, argv, "--every", "0"));
     o.layout.far = std::stod(flag(argc, argv, "--far", "0"));
     o.layout.owner_faces = flag(argc, argv, "--owner-faces", "") == "1";
