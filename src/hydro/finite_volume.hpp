@@ -79,7 +79,10 @@ public:
         if (order != 0 && order != 1) throw std::invalid_argument("hydro::FiniteVolume: order 0 or 1");
         if constexpr (D == 3) {
             if (owner_layout && !mesh.layout().owner_bit) {
-                mesh.set_layout(fast_layout(motion, no_resort(mesh.layout())));  // the caller chose no layout: no re-sort either
+                // The caller chose no layout: no re-sort either. The face storage stays as built (float centroids only from a build).
+                voronoi::Layout layout = fast_layout(motion, no_resort(mesh.layout()));
+                layout.float_centroids = mesh.layout().float_centroids;
+                mesh.set_layout(layout);
                 mesh.update_cells();
             }
         }
@@ -115,6 +118,8 @@ public:
     static voronoi::Layout fast_layout(Motion motion, voronoi::Layout layout = no_resort()) {
         layout.owner_bit = true;
         layout.owner_faces = layout.owner_faces || motion == Motion::static_mesh;
+        // Moving: face centroids as float relative to the owner (12 B a face, not 24; the mesh writes and the hydro reads less).
+        layout.float_centroids = layout.float_centroids || (motion == Motion::moving && !Mesh::float_rows);
         return layout;
     }
 
@@ -243,6 +248,8 @@ public:
         typename Mesh::Positions positions;
         exact_predicates::BoxN<D> box;
         bool bit = false;  // list entries carry the owner bit (voronoi::Layout::owner_bit)
+        // Face centroids as float relative to the owner (voronoi::Layout::float_centroids, 3D); face_centroid is then empty.
+        Kokkos::View<const float* [3], Kokkos::LayoutRight, Memory> centroid32;
 
         template <class Rows>
         KOKKOS_INLINE_FUNCTION Vec row(const Rows& v, int i) const {
@@ -279,6 +286,8 @@ public:
         KOKKOS_INLINE_FUNCTION Vec face_centroid_of(int f) const {
             if constexpr (float_rows)
                 return make_vec<D>([&](int a) { return static_cast<double>(rows(f, 3 + a)); });
+            else if (centroid32.data())
+                return make_vec<D>([&](int a) { return static_cast<double>(centroid32(f, a)); });
             else
                 return row(face_centroid, f);
         }
@@ -333,7 +342,10 @@ public:
         geometry_ = {mesh.owner(),     mesh.neighbour(), mesh.cell_face_start(), mesh.cell_face(),
                      mesh.area(),      mesh.face_centroid(), mesh.centroid(),    mesh.face_rows(),
                      mesh.volume(),    mesh.positions(),  mesh.sides()};
-        if constexpr (D == 3) geometry_.bit = mesh.layout().owner_bit;
+        if constexpr (D == 3) {
+            geometry_.bit = mesh.layout().owner_bit;
+            geometry_.centroid32 = mesh.face_centroid32();
+        }
     }
 
     // Sizes of the per-cell rows, each part on a 32-byte boundary. Used by: borrow_scratch(), the constructor.
