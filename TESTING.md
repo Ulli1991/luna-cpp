@@ -33,7 +33,9 @@ CPU times: OpenMP build (gcc 15), one thread of a Raven login node (Xeon Platinu
 steps: static, moving, order 0, per-cell moving, HLL moving. `scripts/snapshot_hash.sh` prints hashes of the final U, x
 and volume. Two builds of the same hydro and mesh must give equal hashes. A tree from before `grad32` became the default matches
 `--precision=double`: in `hydro_speed_a100.sh` give FIX_FLAGS=--precision=double. `hydro_1d` prints a hash of its final state
-and positions, the same in every run.
+and positions, the same in every run. When a change moves the last bits (as the HLLC copy of 2026-11-18 did),
+`scripts/snapshot_diff.py <run A> <run B>` gives the largest relative difference per conserved variable and the L1 of
+the density difference between the two runs' last snapshots, cell by cell.
 
 ## Speed levers
 

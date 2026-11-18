@@ -206,6 +206,7 @@ The levers of the profile of 2026-11-18 (branch `profile-2026-11-18`, `research_
 | 32522925 | sweep walk one entry ahead | 4.84 | 5.53 | equal |
 | 32522925 | per-cell fluxes and update (`--update=cell`) | 5.97, 14.9 (both) | 6.74, 38.1 (both) | equal |
 | 32523403 | sweep: the neighbours' range in a walk of its own (10 sums fewer in the fit loop) | 5.19 (ahead: 5.02) | 6.08 (ahead: 5.86) | equal |
+| 32523558 | HLLC: the upwind side's state copied entry by entry, not by a reference to one of two arrays | fluxes 2.50 | fluxes 6.12 | differ: static e4bd3aa6, moving 3c16d52b |
 
 ### 2D
 
