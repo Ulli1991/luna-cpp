@@ -960,7 +960,7 @@ public:
                         mag(f) = Kokkos::sqrt(dot(a, a));
                     }
                 },
-                fallbacks_[pass]);
+                Kokkos::subview(fallback_counts_, pass));
             if (keep) magnitudes_valid_ = true;
             prims_ready_ = false;
             phase_end(timings, &Timings::fluxes);
