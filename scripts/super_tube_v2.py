@@ -28,6 +28,7 @@ SERIES = ("luna", "static", "moving")
 NS = (4096, 32768)
 TIMES = ("0.1", "4")
 REF_N, CHECK_N = 1048576, 524288
+PENDING = {4096: 32522444, 32768: 32522445}   # moving m0 to t = 4 (A100), still running when the preliminary v2 went in
 KEYS = [k for k, *_ in pr.SUPER2_STAGES]
 NAMES = {k: name for k, name, *_ in lay.STAGES_V2}
 
@@ -253,6 +254,30 @@ def figures(runs, singles, out):
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.5))
         decorate(ax)
 
+    def place_legend(fig, axes, handles, labels):
+        """One compact legend inside a panel: of every panel and corner or edge position, the one whose box holds the fewest curve
+        points (a curve point counts 1, a label's box 10^6, the axes' edge padding aside), so it crosses no curve and no text."""
+        fig.canvas.draw()
+        best = None
+        for ax in axes:
+            pts = [ln.get_transform().transform(np.column_stack([ln.get_xdata(), ln.get_ydata()])) for ln in ax.get_lines() if len(ln.get_xdata())]
+            pts = np.concatenate(pts) if pts else np.zeros((0, 2))
+            pts = pts[np.isfinite(pts).all(axis=1)]
+            texts = [t.get_window_extent() for t in ax.texts]
+            for loc in ("upper right", "lower right", "lower left", "center right", "lower center", "upper center", "center left", "upper left"):
+                leg = ax.legend(handles, labels, loc=loc, **LEG)
+                fig.canvas.draw()
+                bb = leg.get_window_extent().expanded(1.04, 1.08)
+                inside = ((pts[:, 0] >= bb.x0) & (pts[:, 0] <= bb.x1) & (pts[:, 1] >= bb.y0) & (pts[:, 1] <= bb.y1)).sum()
+                cost = inside + 1e6 * sum(bb.overlaps(t) for t in texts)
+                leg.remove()
+                if best is None or cost < best[0]:
+                    best = (cost, ax, loc)
+        best[1].legend(handles, labels, loc=best[2], **LEG)
+        return best[0]
+
+    LEG = dict(frameon=False, fontsize=9, handlelength=1.6, labelspacing=0.25, handletextpad=0.5, borderaxespad=0.4)
+
     e = np.linspace(0.0, pr.SUPER2_LENGTH, 2 ** 17 + 1)
     xe, We = 0.5 * (e[:-1] + e[1:]), np.stack(pr.super2_exact(e[:-1], e[1:], 0.1))
     refs = {t: run(path(runs, "luna", "super-tube-v2", REF_N, t), "super-tube-v2") for t in TIMES}
@@ -274,6 +299,8 @@ def figures(runs, singles, out):
                     if s == "moving" and k != "M" and (r is None or not r[2]["reached"] or not np.isfinite(r[1]).all()):
                         r, tag = run(path(runs, s, "super-tube-v2-m0", n, t), "super-tube-v2"), " (m0)"
                     if r is None:
+                        if s == "moving" and t == "4":
+                            notes.append(f"moving (m0): pending (job {PENDING[n]})")
                         continue
                     if not r[2]["reached"] or not np.isfinite(r[2]["t"]):
                         notes.append(f"{style[s]['label']}{tag}: stopped at t = {r[2]['t']:.3g}" if np.isfinite(r[2]["t"]) else
@@ -293,9 +320,10 @@ def figures(runs, singles, out):
             for h, lab in zip(*ax.get_legend_handles_labels()):
                 if lab not in labels:
                     handles.append(h); labels.append(lab)
-        fig.legend(handles, labels, loc="upper center", ncol=len(labels), frameon=False, fontsize=11, bbox_to_anchor=(0.5, 1.0))
-        fig.subplots_adjust(top=0.92, hspace=0.08, wspace=0.18)
+        fig.subplots_adjust(hspace=0.08, wspace=0.18)
+        cost = place_legend(fig, list(axes.flat), handles, labels)
         name = f"{out}/super_tube_v2_{k}.png"
+        print(name, "legend overlap", cost)
         fig.savefig(name)
         plt.close(fig)
         print(name, NAMES[k])
@@ -321,8 +349,14 @@ def figures(runs, singles, out):
             panel(ax, lo, hi, curves, rr, f"{k} alone, $t = 0.1$\n{n} cells (spacing of $N = {label}$)" + "".join("\n" + s for s in notes))
             ax.set_xlabel(r"$x$")
         axes[0].set_ylabel(r"$\rho$")
-        axes[0].legend(frameon=False, fontsize=10, loc="lower right")
+        handles, labels = [], []
+        for ax in axes:
+            for h, lab in zip(*ax.get_legend_handles_labels()):
+                if lab not in labels:
+                    handles.append(h); labels.append(lab)
+        cost = place_legend(fig, list(axes), handles, labels)
         name = f"{out}/super_tube_v2_alone_{k}.png"
+        print(name, "legend overlap", cost)
         fig.savefig(name)
         plt.close(fig)
         print(name)

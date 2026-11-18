@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs of the super-hard tube v2 and its stages alone (research_notes/super_tube_v2_2026-11-18.md), one CPU core each:
 #   super_tube_v2_run.sh <out dir> <max_s> "<series> <problem> <N> <t>" ...      series: luna, static, moving; up to 4 at once
-# luna: scripts/luna_1d_run.py (LUNA /raven/u/uli/LUNA/src, read-only), HLLC, MC, CFL 0.8; static, moving: build-omp/hydro_1d, defaults
+# luna: scripts/luna_1d_run.py (LUNA /raven/u/uli/LUNA/src, read-only), HLLC, MC, CFL 0.8, FLOOR=1: LUNA's floors on; static, moving: build-omp/hydro_1d, defaults
 # (static LUNA's rule at 0.8; moving AREPO's at 0.4). Files <series>_<problem>_<N>_t<t>.np[yz] and .json; a log line per run on stdout.
 #SBATCH -J tube2
 #SBATCH -p general
@@ -19,7 +19,7 @@ echo "host=$(hostname) cpu=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) 
 one() {
   local s=$1 p=$2 n=$3 t=$4 f=$1_$2_$3_t$4
   if [[ $s == luna ]]; then
-    timeout $((max_s + 120)) /u/uli/jax-env/bin/python -u $R/scripts/luna_1d_run.py $p $n hllc $f.npz repeats=1 t=$t series=luna LIMITER=1 CFL=0.8 \
+    timeout $((max_s + 120)) /u/uli/jax-env/bin/python -u $R/scripts/luna_1d_run.py $p $n hllc $f.npz repeats=1 t=$t series=luna LIMITER=1 CFL=0.8 floor=${FLOOR:-0} \
       max_s=$max_s resume=$out/state_$f.npz 2>&1 | grep -E "^luna|rror" | sed "s/^/$f: /"
   else
     local flags=(); [[ $s == moving ]] && flags=(--moving --smallest)

@@ -1,7 +1,7 @@
 #!/bin/bash
 # The super-hard tube v2 on one A100 (research_notes/super_tube_v2_2026-11-18.md), runs given as "<series> <problem> <N> <t>":
 #   sbatch [--time=...] super_tube_v2_gpu.sh <out dir> "<series> <problem> <N> <t>" ...
-# luna: scripts/luna_1d_run.py (LUNA, read-only), HLLC, MC, CFL 0.8, chunked with resume (a later job continues a run);
+# luna: scripts/luna_1d_run.py (LUNA, read-only), HLLC, MC, CFL 0.8, FLOOR=1: LUNA's floors on; chunked with resume (a later job continues a run);
 # moving, static: build-cuda/hydro_1d [--moving] (AREPO's rule, Courant 0.4; static LUNA's at 0.8), --max-wall to the job's end
 # (reached = 0 in the JSON if cut).
 # Runs one after the other; a finished run (JSON with reached = 1) is skipped.
@@ -29,7 +29,7 @@ for job in "$@"; do
   grep -qs '"reached": 1' $f.npz.json $f.npy.json && continue
   left=$((limit - SECONDS - 120)); ((left > 60)) || break
   if [[ $s == luna ]]; then
-    /u/uli/jax-env/bin/python -u $R/scripts/luna_1d_run.py $p $n hllc $f.npz repeats=1 t=$t series=luna LIMITER=1 CFL=0.8 \
+    /u/uli/jax-env/bin/python -u $R/scripts/luna_1d_run.py $p $n hllc $f.npz repeats=1 t=$t series=luna LIMITER=1 CFL=0.8 floor=${FLOOR:-0} \
       max_s=$left resume=$out/state_$f.npz 2>&1 | grep -E "^luna|rror|compile" | sed "s/^/$f: /"
   else
     flags=(); [[ $s == moving ]] && flags=(--moving)
