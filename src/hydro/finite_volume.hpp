@@ -276,7 +276,7 @@ public:
         exact_predicates::BoxN<D> box;
         bool bit = false;  // list entries carry the owner bit (voronoi::Layout::owner_bit)
         // Face centroids as float relative to the owner (voronoi::Layout::float_centroids, 3D); face_centroid is then empty.
-        Kokkos::View<const float* [3], Kokkos::LayoutRight, Memory> centroid32;
+        Kokkos::View<const float* [3], Kokkos::LayoutRight, Memory> centroid32{};
 
         template <class Rows>
         KOKKOS_INLINE_FUNCTION Vec row(const Rows& v, int i) const {
