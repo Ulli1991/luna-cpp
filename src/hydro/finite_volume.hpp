@@ -18,10 +18,7 @@
 // The state is the extensive Q per cell; the mesh (static or moving) is the only thing taken from voronoi-cpp. Design: docs/design.md.
 namespace hydro {
 
-// per_cell: each cell sums its faces' fluxes (each face computed twice); per_face: fluxes stored per face, then summed per
-// cell in list order; atomic: each face adds its flux to both cells as it is computed (no stored fluxes; the order of the
-// additions, and so the last bits, varies from run to run).
-enum class Update { per_cell, per_face, atomic };
+enum class Update { per_cell, per_face };
 
 // Used by: Sweep (limiter). Where the gradient limiter keeps the extrapolated values within the neighbours' range: face centroids, or nowhere.
 // minmod and van_leer: the 1D hydro only, LUNA's limiters 0 and 2.
@@ -78,7 +75,6 @@ public:
         : exec_(exec), mesh_(&mesh), gas_(gas), order_(order), update_(update), limiter_(limiter), motion_(motion),
           both_meshes_(motion == Motion::moving && order == 1), n_(mesh.particles()) {
         if (order != 0 && order != 1) throw std::invalid_argument("hydro::FiniteVolume: order 0 or 1");
-        if (order == 0 && update == Update::atomic) throw std::invalid_argument("hydro::FiniteVolume: Update::atomic needs order 1 (order 0 reads Q in the flux)");
         if constexpr (D == 3) {
             if (owner_layout && !mesh.layout().owner_bit) {
                 mesh.set_layout(fast_layout(motion, mesh.layout()));
@@ -346,15 +342,15 @@ public:
     // Used by: time_step(), step(), step_moving(); must precede primitives().
     void borrow_scratch() {
         // After the flux rows: |area| per face, which the sweep reads; kept while the scratch stays where it is.
-        const bool per_face = update_ == Update::per_face, keeps = per_face || update_ == Update::atomic;
+        const bool per_face = update_ == Update::per_face;
         const std::size_t row_bytes = per_face ? sectors(sizeof(FluxStore) * V * static_cast<std::size_t>(faces_)) : 0;
-        const std::size_t flux_bytes = row_bytes + (keeps && cache_magnitudes_ ? sizeof(double) * static_cast<std::size_t>(faces_) : 0);
+        const std::size_t flux_bytes = row_bytes + (per_face && cache_magnitudes_ ? sizeof(double) * static_cast<std::size_t>(faces_) : 0);
         const bool held = both_meshes_;
         char* base = held ? held_.data() : scratch(cell_row_bytes() + flux_bytes);
         char* fluxes = held ? mesh_->scratch(flux_bytes).data() : base + cell_row_bytes();
         double* magnitudes = reinterpret_cast<double*>(fluxes + row_bytes);
         if (magnitudes != magnitudes_.data() || faces_ != static_cast<int>(magnitudes_.extent(0))) magnitudes_valid_ = false;
-        if (keeps && cache_magnitudes_) magnitudes_ = Magnitudes(magnitudes, faces_);
+        if (per_face && cache_magnitudes_) magnitudes_ = Magnitudes(magnitudes, faces_);
         prims_ = Prims(reinterpret_cast<double*>(base), n_);
         base += prim_bytes();
         if (order_ == 1) gradients_ = Gradients(reinterpret_cast<GStore*>(base), n_);
@@ -937,33 +933,6 @@ public:
                 Kokkos::subview(fallback_counts_, pass));
             phase_end(timings, &Timings::fluxes);
             if constexpr (Order == 0) std::swap(q_, next_);
-            return;
-        }
-        if (update_ == Update::atomic) {
-            // Order 1 only: the fluxes read the primitive and gradient rows, never Q, so Q changes in place.
-            const bool keep = cache_magnitudes_ && (pass == 1 || (motion_ == Motion::static_mesh && !magnitudes_valid_));
-            const auto mag = magnitudes_;
-            Kokkos::parallel_reduce(
-                "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
-                KOKKOS_LAMBDA(int f, long long& count) {
-                    int fallbacks = 0;
-                    const State value = flux(f, fallbacks, fallbacks);
-                    count += fallbacks;
-                    const int o = geo.owner_of(f), j = geo.neighbour_of(f);
-                    for (int v = 0; v < V; ++v) {
-                        const double change = dt * value[v];
-                        Kokkos::atomic_sub(&q(o, v), change);
-                        Kokkos::atomic_add(&q(j, v), change);
-                    }
-                    if (keep) {
-                        const Vec a = geo.area_of(f);
-                        mag(f) = Kokkos::sqrt(dot(a, a));
-                    }
-                },
-                Kokkos::subview(fallback_counts_, pass));
-            if (keep) magnitudes_valid_ = true;
-            prims_ready_ = false;
-            phase_end(timings, &Timings::fluxes);
             return;
         }
         const auto F = flux_;
