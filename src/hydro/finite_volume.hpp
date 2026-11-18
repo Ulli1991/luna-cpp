@@ -154,8 +154,13 @@ public:
     // Host copy of the limited density gradients of the last time_step(), one row per cell; for output.
     Kokkos::View<double**, Kokkos::HostSpace> density_gradients() const {
         Kokkos::View<double**, Kokkos::HostSpace> rows("density_gradients", n_, D);
-        if constexpr (P::half) {
-            throw std::invalid_argument("density_gradients: not with half-precision gradient rows");
+        if constexpr (P::half) {  // FP16 rows: decoded as FaceFlux::gradient does (the density group's exponent)
+            const auto g = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, gradients_);
+            const auto k = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, exponents_);
+            for (std::ptrdiff_t i = 0; i < std::ptrdiff_t(n_); ++i) {
+                const float scale = half::power_of_two(-static_cast<int>(static_cast<std::int8_t>(k(i))));
+                for (int a = 0; a < D; ++a) rows(i, a) = static_cast<double>(half::to_float(g(i, a)) * scale);
+            }
         } else {
             const auto g = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, gradients_);
             for (std::ptrdiff_t i = 0; i < std::ptrdiff_t(n_); ++i)
