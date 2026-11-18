@@ -367,6 +367,7 @@ void run(const Options& o, Points points) {
               << " face_sides_per_step=" << 2 * static_cast<long long>(mesh.faces()) << "\n";
     const hydro::MeshStats& ms = fv.mesh_stats();
     std::cout << "mesh_updates: updates=" << ms.updates << " rebuilds=" << ms.rebuilds << " resorts=" << ms.resorts << " stuck=" << ms.stuck
+              << " stuck_steps=" << ms.stuck_steps << " local_repairs=" << ms.local_repairs << " local_cells=" << ms.local_cells
               << " host_flips=" << ms.host_flips << " device_flips=" << ms.device_flips << "\n";
     auto rate = [&](double ms) { return ms > 0 ? n / (ms * 1e-3) / 1e6 : 0.0; };
     std::cout << "phases_ms_median: primitives=" << median(prim_ms) << " sweep=" << median(sweep_ms) << " fluxes=" << median(flux_ms)
