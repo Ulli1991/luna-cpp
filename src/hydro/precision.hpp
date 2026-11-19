@@ -39,18 +39,19 @@ struct Precision {
 };
 
 // The gradients, limiter and face-state change in float, the rest double (`--precision=grad32`; the 3D default until 2026-11-19).
-// Used by: run_precision (hydro_sedov), main (hydro_wave3d).
+// Used by: DefaultPrecision<2>, run_precision (hydro_sedov, hydro_kh2d), main (hydro_wave3d).
 using Grad32 = Precision<double, float>;
 
 // Grad32 with the gradient rows stored as FP16 (one power-of-two exponent per group rho, v, P), float arithmetic (`--precision=grad16`).
-// Used by: DefaultPrecision<3>, run_precision (hydro_sedov), main (hydro_wave3d).
+// Used by: DefaultPrecision<3>, run_precision (hydro_sedov, hydro_kh2d), main (hydro_wave3d).
 using Grad16 = Precision<double, Half>;
 
-// The default P of FiniteVolume: Grad16 in 3D (rows of 32 B instead of Grad32's 64) and in 2D (the owner, 2026-11-19; there the
-// 8 FP16 values pad to the same 32-B sector as 8 floats, so it saves no bytes). 1D has no policies (FiniteVolume<1> keeps its
-// gradients in registers). Used by: FiniteVolume<D> default argument, run_precision / main (`--precision=default`).
+// The default P of FiniteVolume (the owner, 2026-11-19): Grad16 in 3D (rows of 32 B instead of Grad32's 64); Grad32 in 2D, where a
+// row of 8 values pads to one 32-B sector in float and in FP16 alike, so FP16 saves no bytes and measured 0.4-0.6 % slower. 1D has no
+// policies: FiniteVolume<1> computes its gradients in registers inside one fused kernel and stores none, so it stays double.
+// Used by: FiniteVolume<D> default argument, run_precision / main (`--precision=default`).
 template <int D>
-using DefaultPrecision = std::conditional_t<D == 3 || D == 2, Grad16, Precision<>>;
+using DefaultPrecision = std::conditional_t<D == 3, Grad16, std::conditional_t<D == 2, Grad32, Precision<>>>;
 
 namespace half {
 

@@ -79,7 +79,7 @@ The move before, 6ead543 to abd3d39 (2026-11-18), is in docs/measurements.md ("v
 
 ## The 2D tests (`hydro2d` in CTest; KH on the A100)
 
-`hydro2d`, static and on moving meshes: (in the default `grad16` since 2026-11-19) uniform states, conservation, two runs with the same bits,
+`hydro2d`, static and on moving meshes: (in the default `grad32` since 2026-11-19; double before) uniform states, conservation, two runs with the same bits,
 sound-wave order in cell averages over the actual polygons, a Galilean blast; Sod and Noh.
 
 KH: `scripts/dim2d_a100.sh kh <N...>` and `khbulk <u> <N...>`, one job per ladder, then

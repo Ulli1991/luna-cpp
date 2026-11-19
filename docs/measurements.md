@@ -146,7 +146,7 @@ The README's 0.47 to 0.76 FP64 at 128³ were the XLA kernel (`hydro_a100.sh` pas
 | mixed (float face rows too, Riemann double) | 10.8, 19.2 | 0.0648, 0.0776 | 2426 | equal | 4.32e-3, 4.32e-3 | 7.2e-3, 2.4e-2 |
 | low (mixed with FP16 gradients and float Riemann) | 10.4, 17.8 | 0.0648, 0.0776 | 2398 | equal | 4.30e-3, 4.32e-3 | 1.24, 1.56 |
 
-Every option keeps Sedov, the vortex and the 1e-3 sound wave to the digits printed, so on those GPU time to the same error is GPU time: `single` is 10 % (moving) and 15 % (static) ahead of `grad32`. But a float Riemann solve or float stored fluxes lose a 1e-6 wave: with `single` and `low` the error exceeds the wave itself, `mixed` doubles it moving and is 6.5 times worse static. `grad16` matches double on every test, is 2 to 4 % faster than `grad32` and saves 28 B/cell; it does not make a larger run fit: 384³ (56.6M cells) needs 707 B/cell on 40 GB, three times less than any option, so 256³ stays the largest power-of-two size. 2D has no presets in `hydro_wave3d`; KH 2D takes `--precision` since 2026-11-19 and runs `grad16` by default (section "Precision levers of 2026-11-19").
+Every option keeps Sedov, the vortex and the 1e-3 sound wave to the digits printed, so on those GPU time to the same error is GPU time: `single` is 10 % (moving) and 15 % (static) ahead of `grad32`. But a float Riemann solve or float stored fluxes lose a 1e-6 wave: with `single` and `low` the error exceeds the wave itself, `mixed` doubles it moving and is 6.5 times worse static. `grad16` matches double on every test, is 2 to 4 % faster than `grad32` and saves 28 B/cell; it does not make a larger run fit: 384³ (56.6M cells) needs 707 B/cell on 40 GB, three times less than any option, so 256³ stays the largest power-of-two size. 2D has no presets in `hydro_wave3d`; KH 2D takes `--precision` since 2026-11-19 and runs `grad32` by default (section "Precision levers of 2026-11-19").
 
 ### Faces once by the owner, R14 and cheaper fluxes (2026-11-15)
 
@@ -283,7 +283,7 @@ The step is 5.6 % (128³) and 5.8 % (256³) faster; whole runs take 4.7 % less G
 | 1024 | 1.158e-4 | 1.158e-4 | 1.158e-4 | 4.233e-4 | 4.231e-4 | 4.115e-4 |
 | 2048 | 3.784e-5 | 3.784e-5 | 3.771e-5 | 4.672e-5 | 4.669e-5 | 3.628e-5 |
 
-Speed at 2048, 300 steps, three rounds (M cell updates/s): static 831, 935, 931; moving 348, 370, 368 (double, grad32, grad16). `grad16` is 8 to 12 % faster than double and 0.4 to 0.6 % slower than `grad32` in 2D: a 2D gradient row is 8 values, padded to whole 32-B sectors, so FP16 saves no bytes there. The owner chose `grad16` as the 2D default as well (8dafac6). 1D has no precision policy: `FiniteVolume<1>` computes its gradients in registers inside one fused kernel and stores none, so FP16 would only add rounding; it stays double.
+Speed at 2048, 300 steps, three rounds (M cell updates/s): static 831, 935, 931; moving 348, 370, 368 (double, grad32, grad16). `grad16` is 8 to 12 % faster than double and 0.4 to 0.6 % slower than `grad32` in 2D: a 2D gradient row is 8 values, padded to whole 32-B sectors, so FP16 saves no bytes there. The owner first chose `grad16` as the 2D default as well (8dafac6), then, given these numbers, `grad32` (2026-11-19, branch `precision-2d`): the same errors as double, 6 to 12 % faster. 1D has no precision policy: `FiniteVolume<1>` computes its gradients in registers inside one fused kernel and stores none, so FP16 would only add rounding; it stays double.
 
 ### Hydro levers of 2026-11-18
 
