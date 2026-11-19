@@ -599,8 +599,9 @@ struct HLLC {
         const double dnum = dR[P] - dL[P] + ddenomL * a.vnL + a.denomL * dvnL - ddenomR * a.vnR - a.denomR * dvnR;
         const double dden = a.pattern & 128 ? 0.0 : ddenomL - ddenomR, den = nonzero(a.den);
         const double dSM = (dnum - a.SM * dden) / den;
-        const State<D>& W = left ? L : R;
-        const State<D>& dW = left ? dL : dR;
+        // The upwind state copied entry by entry, as flux() does (a reference to one of two arrays puts both in local memory).
+        const State<D> W = make_state<D>([&](int v) { return left ? L[v] : R[v]; });
+        const State<D> dW = make_state<D>([&](int v) { return left ? dL[v] : dR[v]; });
         const double vn = left ? a.vnL : a.vnR, dvn = left ? dvnL : dvnR;
         const detail::Side<D, double> s = detail::side_with(W, n, w, gas, vn);
         const detail::Side<D, double> ds = detail::side_with_tangent(W, dW, n, gas, s, dvn);
@@ -634,7 +635,7 @@ struct HLLC {
         const Waves<D> a = waves(L, R, n, w, gas);
         const bool left = a.pattern & 4, star = a.pattern & 8;
         const State<D> Fbar = detail::to_lab_adjoint(Fbar_lab, w);
-        const State<D>& W = left ? L : R;
+        const State<D> W = make_state<D>([&](int v) { return left ? L[v] : R[v]; });
         const double vn = left ? a.vnL : a.vnR;
         const detail::Side<D, double> s = detail::side_with(W, n, w, gas, vn);
         State<D> Wbar{};
@@ -714,8 +715,10 @@ struct HLLC {
             Lbar[0] -= a.inv_rhoL * a.inv_rhoL * invLbar;
             Rbar[0] -= a.inv_rhoR * a.inv_rhoR * invRbar;
         }
-        State<D>& side_bar = left ? Lbar : Rbar;
-        for (int v = 0; v < D + 2; ++v) side_bar[v] += Wbar[v];
+        for (int v = 0; v < D + 2; ++v) {  // entry by entry, not a reference to one of the two arrays
+            Lbar[v] += left ? Wbar[v] : 0.0;
+            Rbar[v] += left ? 0.0 : Wbar[v];
+        }
         for (int k = 0; k < D; ++k) {
             Lbar[1 + k] += vnLbar * n[k];
             Rbar[1 + k] += vnRbar * n[k];

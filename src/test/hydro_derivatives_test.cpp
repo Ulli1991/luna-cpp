@@ -24,6 +24,8 @@ using Vec = hydro::Vec<D>;
 using Grad = hydro::Gradient<D>;
 using FV = hydro::FiniteVolume<D, Exec, hydro::HLLC, hydro::Precision<>>;
 using FVHLL = hydro::FiniteVolume<D, Exec, hydro::HLL, hydro::Precision<>>;
+using FV16 = hydro::FiniteVolume<D, Exec, hydro::HLLC, hydro::Grad16>;
+using FV32 = hydro::FiniteVolume<D, Exec, hydro::HLLC, hydro::Grad32>;
 
 // splitmix64: a reproducible stream per sample, on host and device. Used by: every piece's make().
 KOKKOS_INLINE_FUNCTION double uniform(std::uint64_t& s, double lo, double hi) {
@@ -261,6 +263,15 @@ struct GradientPiece {
         KOKKOS_INLINE_FUNCTION Vec between(int k) const { return s->between[k]; }
         KOKKOS_INLINE_FUNCTION double weight(int k) const { return s->weight[k]; }
         KOKKOS_INLINE_FUNCTION Vec offset(int k) const { return s->offset[k]; }
+        template <bool Tangent>
+        KOKKOS_INLINE_FUNCTION FV::Entry load(int k) const {
+            FV::Entry e;
+            e.W = W(k);
+            if constexpr (Tangent) e.dW = dW(k);
+            e.between = between(k);
+            e.weight = weight(k);
+            return e;
+        }
     };
     KOKKOS_INLINE_FUNCTION Sample make(std::uint64_t& seed) const {
         Sample s;
@@ -374,9 +385,12 @@ HostCells smooth_state(const Points& points, const Kokkos::View<const double*, K
     return h;
 }
 
-// A whole static step (and `steps` steps): forward bits, tangent against central differences, adjoint against tangent.
+// A whole static step (and `steps` steps): forward bits, tangent against central differences, adjoint against tangent. A reduced
+// gradient policy (grad32, grad16): central differences of its forward are rounding below h = 1e-6 (reported, not checked); its
+// tangent against `reference`, the double policy's on the same mesh and state. Returns the tangent.
 template <class F>
-void step_test(Check& check, const std::string& name, int n, int steps, double noise = 0.01, double h = 1e-6) {
+HostCells step_test(Check& check, const std::string& name, int n, int steps, double noise = 0.01, double h = 1e-6,
+                    const HostCells* reference = nullptr) {
     const hydro::Gas gas{5.0 / 3.0};
     const Points points = make_points_off_grid("jittered", n);
     typename F::Mesh mesh(Exec{}, 1.0);
@@ -411,7 +425,12 @@ void step_test(Check& check, const std::string& name, int n, int steps, double n
     write(fv, q0);
     typename F::Cells dqd("dq", n);
     Kokkos::deep_copy(dqd, dq0);
-    for (int s = 0; s < steps; ++s) fv.step_tangent(dts[s], dqd);
+    // The tangent run's own trajectory: the states its derivatives linearise at, and the adjoint's checkpoints.
+    std::vector<HostCells> path;
+    for (int s = 0; s < steps; ++s) {
+        path.push_back(read(fv));
+        fv.step_tangent(dts[s], dqd);
+    }
     const HostCells forward = read(fv);
     HostCells tangent("tangent", n);
     Kokkos::deep_copy(tangent, dqd);
@@ -420,9 +439,9 @@ void step_test(Check& check, const std::string& name, int n, int steps, double n
         for (int v = 0; v < V; ++v)
             bits = std::max(bits, std::abs(forward(i, v) - checkpoints.back()(i, v)) / std::max(std::abs(checkpoints.back()(i, v)), 1e-300));
     const bool same = std::memcmp(forward.data(), checkpoints.back().data(), sizeof(double) * V * n) == 0;
-    // The same bits on the host; on the A100 the tangent's sweep contracts multiply-adds differently from Sweep (measured 8e-14
-    // smooth, 5e-13 rough over 3 steps), as the two update loops do in `hydro`.
-    check.expect(bits < 1e-11, name + ": step_tangent's Q equals step()'s over " + std::to_string(steps) + " steps (" + sci(bits) +
+    // Double: equal to rounding (the flux from sides computed once, 1e-14 measured). grad32 and grad16: the float face states of
+    // FaceFlux contract differently inside the fused tangent kernel than in step()'s (A100: 1e-8 to 1.5e-6 over 3 steps).
+    check.expect(bits < (std::is_same_v<typename F::G, double> ? 1e-11 : 1e-5), name + ": step_tangent's Q equals step()'s over " + std::to_string(steps) + " steps (" + sci(bits) +
                                    (same ? ", same bits)" : ")"));
     // Central differences with step h (relative to each entry of dq0).
     const HostCells plus = run(combine(q0, h, dq0)), minus = run(combine(q0, -h, dq0));
@@ -457,15 +476,31 @@ void step_test(Check& check, const std::string& name, int n, int steps, double n
     // Smooth: no switch within +- h, the central difference everywhere. Rough: switches within +- h (a clip, a wave case, a
     // fallback); there one side must match (its own O(h) error: 1e-4 of the cell's largest entry).
     const bool rough = noise > 0.05;
-    check.expect(rough ? worst_one_sided < 1e-4 : worst < 1e-6 * scale,
-                 name + ": J dq equals central differences (h = " + sci(h) + ") over " + std::to_string(steps) + " steps (" + sci(worst / scale) +
-                     " of the largest; " + std::to_string(cells_off) + " of " + std::to_string(n) +
-                     " cells at a switch, where it equals a one-sided difference to " + sci(worst_one_sided) + ")");
+    constexpr bool exact = std::is_same_v<typename F::G, double>;
+    if (exact)
+        check.expect(rough ? worst_one_sided < 1e-4 : worst < 1e-6 * scale,
+                     name + ": J dq equals central differences (h = " + sci(h) + ") over " + std::to_string(steps) + " steps (" +
+                         sci(worst / scale) + " of the largest; " + std::to_string(cells_off) + " of " + std::to_string(n) +
+                         " cells at a switch, where it equals a one-sided difference to " + sci(worst_one_sided) + ")");
+    // A reduced policy: its tangent is the double scheme's derivative at its own rows, so it differs from the double policy's by
+    // the rows' rounding (FP16: 2^-11 of a group).
+    double to_reference = 0;
+    if (reference) {
+        double largest = 0;
+        for (int i = 0; i < n; ++i)
+            for (int v = 0; v < V; ++v) {
+                to_reference = std::max(to_reference, std::abs(tangent(i, v) - (*reference)(i, v)));
+                largest = std::max(largest, std::abs((*reference)(i, v)));
+            }
+        to_reference /= largest;
+        check.expect(to_reference < 1e-2, name + ": J dq against the double policy's over " + std::to_string(steps) + " steps (" +
+                                              sci(to_reference) + " of the largest)");
+    }
     // Adjoint, backwards from the checkpoints.
     typename F::Cells bar("bar", n);
     Kokkos::deep_copy(bar, wbar);
     for (int s = steps - 1; s >= 0; --s) {
-        write(fv, checkpoints[s]);
+        write(fv, path[s]);
         fv.step_adjoint(dts[s], bar);
     }
     HostCells adjoint("adjoint", n);
@@ -475,31 +510,34 @@ void step_test(Check& check, const std::string& name, int n, int steps, double n
     const double dot = std::abs(lhs - rhs) / std::max(size_l, size_r);
     check.expect(dot < 1e-13, name + ": <w, J dq> = <J^T w, dq> over " + std::to_string(steps) + " steps (" + sci(dot) + ")");
     const HostCells after = read(fv);
-    check.expect(std::memcmp(after.data(), checkpoints[0].data(), sizeof(double) * V * n) == 0, name + ": step_adjoint leaves Q as it was");
+    check.expect(std::memcmp(after.data(), path[0].data(), sizeof(double) * V * n) == 0, name + ": step_adjoint leaves Q as it was");
     // No atomics: a second reverse pass gives the same bits.
     Kokkos::deep_copy(bar, wbar);
     for (int s = steps - 1; s >= 0; --s) {
-        write(fv, checkpoints[s]);
+        write(fv, path[s]);
         fv.step_adjoint(dts[s], bar);
     }
     HostCells again("again", n);
     Kokkos::deep_copy(again, bar);
     check.expect(std::memcmp(again.data(), adjoint.data(), sizeof(double) * V * n) == 0, name + ": two reverse passes give the same bits");
-    std::printf("step %-6s n %d steps %d: forward max diff %.2e%s, tangent-FD %.2e (cells at a switch %d, one-sided there %.2e), dot %.2e\n",
-                name.c_str(), n, steps, bits, same ? " (same bits)" : "", worst / scale, cells_off, worst_one_sided, dot);
+    std::printf("step %-6s n %d steps %d: forward max diff %.2e%s, tangent-FD %.2e (cells at a switch %d, one-sided there %.2e), dot %.2e, "
+                "against double %.2e\n",
+                name.c_str(), n, steps, bits, same ? " (same bits)" : "", worst / scale, cells_off, worst_one_sided, dot, to_reference);
+    return tangent;
 }
 
-// Times of the forward step (double and the default policy), step_tangent and step_adjoint on n jittered cells; median of 5.
-void cost(int n) {
+// Times of the forward step, step_tangent and step_adjoint of policy F on n jittered cells; median of 5.
+template <class F>
+void cost(int n, const char* policy) {
     const hydro::Gas gas{5.0 / 3.0};
     const Points points = make_points_off_grid("jittered", n);
-    FV::Mesh mesh(Exec{}, 1.0);
+    typename F::Mesh mesh(Exec{}, 1.0);
     mesh.update(to_device(points));
     mesh.update_cells();
-    FV fv(Exec{}, mesh, gas, 1, hydro::Update::per_face);
+    F fv(Exec{}, mesh, gas, 1, hydro::Update::per_face);
     const auto volume = to_host(mesh.volume());
     const HostCells q0 = smooth_state(points, volume, gas);
-    FV::Cells dq("dq", n), bar("bar", n);
+    typename F::Cells dq("dq", n), bar("bar", n);
     Kokkos::deep_copy(dq, 1.0);
     auto median = [](std::vector<double> v) {
         std::sort(v.begin(), v.end());
@@ -525,40 +563,50 @@ void cost(int n) {
         fv.time_step(0.3);
         Kokkos::fence();
     });
-    const double tangent = time([&] { fv.step_tangent(dt, dq); });
+    // As a run would: time_step() (sweep and dt), then the step with its tangent.
+    const double tangent = time([&] { fv.step_tangent(fv.time_step(0.3), dq); });
     const double adjoint = time([&] {
         Kokkos::deep_copy(bar, 1.0);
         fv.step_adjoint(dt, bar);
     });
     hydro::Timings tt, ta;
     write(fv, q0);
-    fv.step_tangent(dt, dq, &tt);
+    fv.step_tangent(fv.time_step(0.3, &tt), dq, &tt);
     write(fv, q0);
     fv.step_adjoint(dt, bar, &ta);
-    std::printf("cost n %d faces %d (double): time_step+step %.3f ms (time_step alone %.3f), step_tangent %.3f (%.2fx), step_adjoint %.3f (%.2fx)\n",
-                n, fv.faces(), forward, step_only, tangent, tangent / forward, adjoint, adjoint / forward);
+    std::printf("cost n %d faces %d (%s): time_step+step %.3f ms (time_step alone %.3f), step_tangent %.3f (%.2fx), step_adjoint %.3f (%.2fx)\n",
+                n, fv.faces(), policy, forward, step_only, tangent, tangent / forward, adjoint, adjoint / forward);
     std::printf("  tangent phases: primitives %.3f sweep %.3f fluxes %.3f update %.3f ms\n", tt.primitives, tt.sweep, tt.fluxes, tt.update);
     std::printf("  adjoint phases: forward recompute %.3f fluxes %.3f sweep %.3f gather %.3f ms\n", ta.primitives, ta.fluxes, ta.sweep, ta.update);
     hydro::Timings tf;
     write(fv, q0);
     fv.step(fv.time_step(0.3, &tf), &tf);
     std::printf("  forward phases: primitives %.3f sweep+dt %.3f fluxes %.3f update %.3f ms\n", tf.primitives, tf.sweep, tf.fluxes, tf.update);
-    // The default policy (grad16) on the same points, for scale.
-    using Default = hydro::FiniteVolume<D, Exec>;
-    Default::Mesh dmesh(Exec{}, 1.0);
-    dmesh.update(to_device(points));
-    dmesh.update_cells();
-    Default dfv(Exec{}, dmesh, gas, 1, hydro::Update::per_face);
-    std::vector<double> t;
-    for (int r = 0; r < 6; ++r) {
-        Kokkos::deep_copy(dfv.state(), q0);
-        Kokkos::fence();
-        Kokkos::Timer timer;
-        dfv.step(dfv.time_step(0.3));
-        Kokkos::fence();
-        if (r > 0) t.push_back(timer.seconds() * 1e3);
+}
+
+// One warm-up of each, then time_step + step, time_step + step_tangent, step_adjoint once each: the kernels ncu measures.
+template <class F>
+void profile(int n) {
+    const hydro::Gas gas{5.0 / 3.0};
+    const Points points = make_points_off_grid("jittered", n);
+    typename F::Mesh mesh(Exec{}, 1.0);
+    mesh.update(to_device(points));
+    mesh.update_cells();
+    F fv(Exec{}, mesh, gas, 1, hydro::Update::per_face);
+    const HostCells q0 = smooth_state(points, to_host(mesh.volume()), gas);
+    typename F::Cells dq("dq", n), bar("bar", n);
+    Kokkos::deep_copy(dq, 1.0);
+    for (int r = 0; r < 2; ++r) {
+        write(fv, q0);
+        const double dt = fv.time_step(0.3);
+        fv.step(dt);
+        write(fv, q0);
+        fv.step_tangent(fv.time_step(0.3), dq);
+        write(fv, q0);
+        Kokkos::deep_copy(bar, 1.0);
+        fv.step_adjoint(dt, bar);
     }
-    std::printf("  default policy (grad16) time_step+step %.3f ms\n", median(t));
+    Kokkos::fence();
 }
 
 }  // namespace
@@ -567,7 +615,12 @@ int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     for (int a = 1; a + 1 < argc; ++a)
         if (std::string(argv[a]) == "--cost") {
-            cost(std::stoi(argv[a + 1]));
+            cost<FV>(std::stoi(argv[a + 1]), "double");
+            cost<FV16>(std::stoi(argv[a + 1]), "grad16");
+            return 0;
+        } else if (std::string(argv[a]) == "--profile") {  // for ncu: one warm-up, then one forward, tangent and adjoint step each
+            profile<FV>(std::stoi(argv[a + 1]));
+            profile<FV16>(std::stoi(argv[a + 1]));
             return 0;
         }
     Check check;
@@ -588,8 +641,11 @@ int main(int argc, char** argv) {
     piece_test(check, "HLLC", FluxPiece<hydro::HLLC>{gas}, samples, "F_L/F*_L/F*_R/F_R:");
     piece_test(check, "limited gradient", GradientPiece{}, samples, "unclipped/clipped/zero/both:");
     step_test<FV>(check, "HLLC", 1000, 1);
-    step_test<FV>(check, "HLLC", 1000, 3);
+    const HostCells reference = step_test<FV>(check, "HLLC", 1000, 3);
     step_test<FVHLL>(check, "HLL", 1000, 1);
     step_test<FV>(check, "HLLC rough", 1000, 3, 0.3);
+    // The policies in use: grad16 (the 3D default) and grad32, rows as stored, the derivative in double.
+    step_test<FV16>(check, "HLLC grad16", 1000, 3, 0.01, 1e-6, &reference);
+    step_test<FV32>(check, "HLLC grad32", 1000, 3, 0.01, 1e-6, &reference);
     return check.failed() != 0;
 }
