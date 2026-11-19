@@ -49,7 +49,7 @@ struct Options {
     hydro::StepRule rule = hydro::StepRule::luna;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
     hydro::Update update = hydro::Update::per_face;
-    std::string out, riemann = "hllc", dt = "luna";
+    std::string out, riemann = "hllc", dt = "luna", precision = "default";
 };
 
 // McNally eq. 1 for y in [0, 1), mirrored about 1/2; f1, f2: the values in the outer and inner stripes.
@@ -103,11 +103,11 @@ Mode mode_amplitude(const Exec& exec, const Fv& fv, const Mesh& mesh, bool movin
     return {2 * std::hypot(s / d, c / d), K};
 }
 
-// The whole benchmark for one Riemann solver (HLLC or HLL); returns 0, or 2 if --repeats gave different hashes.
-// Used by: main.
-template <class Riemann>
+// The whole benchmark for one Riemann solver (HLLC or HLL) and precision policy P; returns 0, or 2 if --repeats gave different
+// hashes. Used by: run_precision.
+template <class Riemann, class P>
 int run(const Options& o) {
-    using Fv = hydro::FiniteVolume<2, Exec, Riemann>;
+    using Fv = hydro::FiniteVolume<2, Exec, Riemann, P>;
     using Mesh = typename Fv::Mesh;
     using X = Kokkos::View<double* [2], Memory>;
     Exec exec;
@@ -323,6 +323,16 @@ int run(const Options& o) {
 
 }  // namespace
 
+// --precision: default (DefaultPrecision<2>), double, grad32 or grad16. Used by: main; calls run<Riemann, P>.
+template <class Riemann>
+int run_precision(const Options& o) {
+    if (o.precision == "default") return run<Riemann, hydro::DefaultPrecision<2>>(o);
+    if (o.precision == "double") return run<Riemann, hydro::Precision<>>(o);
+    if (o.precision == "grad32") return run<Riemann, hydro::Grad32>(o);
+    if (o.precision == "grad16") return run<Riemann, hydro::Grad16>(o);
+    throw std::invalid_argument("hydro_kh2d: --precision=default|double|grad32|grad16");
+}
+
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard guard(argc, argv);
     luna::pin_notice();
@@ -342,6 +352,7 @@ int main(int argc, char** argv) {
     o.fixed = o.dt == "fixed";
     o.fixed_dt = std::stod(flag(argc, argv, "--fixed-dt", "0"));
     o.riemann = flag(argc, argv, "--riemann", "hllc");
+    o.precision = flag(argc, argv, "--precision", "default");
     const std::string limiter = flag(argc, argv, "--limiter", "face");
     o.limiter = limiter == "none" ? hydro::Limiter::none : hydro::Limiter::face_centroid;
     o.update = flag(argc, argv, "--update", "face") == "cell" ? hydro::Update::per_cell : hydro::Update::per_face;
@@ -358,5 +369,5 @@ int main(int argc, char** argv) {
         for (std::string when; std::getline(times, when, ',');) o.out_times.push_back(std::stod(when));
     }
     if (o.memory) DeviceMemory<Memory>::start();
-    return o.riemann == "hll" ? run<hydro::HLL>(o) : run<hydro::HLLC>(o);
+    return o.riemann == "hll" ? run_precision<hydro::HLL>(o) : run_precision<hydro::HLLC>(o);
 }
