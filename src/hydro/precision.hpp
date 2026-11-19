@@ -46,10 +46,11 @@ using Grad32 = Precision<double, float>;
 // Used by: DefaultPrecision<3>, run_precision (hydro_sedov), main (hydro_wave3d).
 using Grad16 = Precision<double, Half>;
 
-// The default P of FiniteVolume: Grad16 in 3D (rows of 32 B instead of Grad32's 64; research_notes/moving_structure_2026-11-18.md);
-// double in 2D and 1D. Used by: FiniteVolume<D> default argument, run_precision / main (`--precision=default`).
+// The default P of FiniteVolume: Grad16 in 3D (rows of 32 B instead of Grad32's 64) and in 2D (the owner, 2026-11-19; there the
+// 8 FP16 values pad to the same 32-B sector as 8 floats, so it saves no bytes). 1D has no policies (FiniteVolume<1> keeps its
+// gradients in registers). Used by: FiniteVolume<D> default argument, run_precision / main (`--precision=default`).
 template <int D>
-using DefaultPrecision = std::conditional_t<D == 3, Grad16, Precision<>>;
+using DefaultPrecision = std::conditional_t<D == 3 || D == 2, Grad16, Precision<>>;
 
 namespace half {
 
