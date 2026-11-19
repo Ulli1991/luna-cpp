@@ -73,3 +73,11 @@ if(BUILD_TESTING)
         set_tests_properties(${test} PROPERTIES TIMEOUT ${hydro_test_timeout})
     endforeach()
 endif()
+
+# The hand-written tangents and adjoints (hydro_derivatives_test): opt-in while they are new; off, the build is as before.
+option(LUNA_DERIVATIVE_TESTS "Build and run hydro_derivatives_test" OFF)
+if(BUILD_TESTING AND LUNA_DERIVATIVE_TESTS)
+    hydro_program(hydro_derivatives_test hydro_derivatives_test src/test/hydro_derivatives_test.cpp)
+    add_test(NAME hydro_derivatives COMMAND hydro_derivatives_test)
+    set_tests_properties(hydro_derivatives PROPERTIES TIMEOUT ${hydro_test_timeout})
+endif()

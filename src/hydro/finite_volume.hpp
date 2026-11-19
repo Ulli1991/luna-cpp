@@ -597,6 +597,207 @@ public:
         }
     };
 
+    // Sweep's limited gradient of one cell in double, as a function of the cell's and its neighbours' W, with its tangent and adjoint.
+    // Entries: the cell's list entries k < count(): W(k), dW(k) (tangent only), between(k) (the fit's offset to the neighbour),
+    // weight(k) (|area|) and offset(k) (face centroid minus the cell's centroid). Used by: step_tangent, step_adjoint, the derivative tests.
+    static constexpr int fit_size = D + 1;
+    // Per variable: the last list entry whose face clipped the gradient (-1: none), the entry holding the bound it clipped to,
+    // which bound (upper), and whether it clipped to zero. Clips scale the gradient, so the result is g0 (bound - W_i) / (g0 . o_last).
+    struct LimitPattern {
+        int last[V], extreme[V];
+        bool upper[V], zero[V];
+    };
+    // The bars of what limited_gradient_adjoint() hands to the neighbours: the fit's right-hand sides b and each variable's bound.
+    // The neighbour of entry k gets weight(k) X_k . b[v] + bound[v] if k == entry[v]; self: the cell's own W bar.
+    struct GradientAdjoint {
+        double b[V][fit_size];
+        double bound[V];
+        int entry[V];
+        State self;
+    };
+    // The normal equations of the fit, as Sweep sums them. Used by: limited_gradient(), limited_gradient_tangent(), limited_gradient_adjoint().
+    template <class Entries>
+    KOKKOS_INLINE_FUNCTION static void fit(const State& Wi, const Entries& e, double (&M)[fit_size][fit_size], double (&b)[V][fit_size],
+                                           double& surface) {
+        constexpr int U = fit_size;
+        for (int p = 0; p < U; ++p) {
+            for (int s = 0; s < U; ++s) M[p][s] = 0;
+            for (int v = 0; v < V; ++v) b[v][p] = 0;
+        }
+        surface = 0;
+        for (int k = 0; k < e.count(); ++k) {
+            const Vec between = e.between(k);
+            const State Wj = e.W(k);
+            double X[U];
+            X[0] = 1;
+            for (int p = 1; p < U; ++p) X[p] = between[p - 1];
+            const double w = e.weight(k);
+            surface += w;
+            for (int p = 0; p < U; ++p)
+                for (int s = p; s < U; ++s) M[p][s] += w * X[p] * X[s];
+            for (int v = 0; v < V; ++v) {
+                const double dW = Wj[v] - Wi[v];
+                for (int p = 0; p < U; ++p) b[v][p] += w * X[p] * dW;
+            }
+        }
+    }
+    // x = M^-1 r for every variable, all components (M from fit(), upper triangle). Used by: limited_gradient_tangent(), limited_gradient_adjoint().
+    KOKKOS_INLINE_FUNCTION static void solve_all(const double (&M)[fit_size][fit_size], const double (&r)[V][fit_size], double (&x)[V][fit_size]) {
+        constexpr int U = fit_size;
+        double L[U][U] = {};
+        for (int p = 0; p < U; ++p)
+            for (int s = 0; s <= p; ++s) {
+                double sum = M[s][p];
+                for (int m = 0; m < s; ++m) sum -= L[p][m] * L[s][m];
+                L[p][s] = p == s ? Kokkos::sqrt(sum) : sum / L[s][s];
+            }
+        for (int v = 0; v < V; ++v) {
+            double z[U];
+            for (int p = 0; p < U; ++p) {
+                double sum = r[v][p];
+                for (int m = 0; m < p; ++m) sum -= L[p][m] * z[m];
+                z[p] = sum / L[p][p];
+            }
+            for (int p = U - 1; p >= 0; --p) {
+                double sum = z[p];
+                for (int m = p + 1; m < U; ++m) sum -= L[m][p] * x[v][m];
+                x[v][p] = sum / L[p][p];
+            }
+        }
+    }
+    // The limited gradient (Sweep, double: the same operations); pattern and the unlimited gradient g0 for the derivatives.
+    template <class Entries>
+    KOKKOS_INLINE_FUNCTION static Gradient<D> limited_gradient(const State& Wi, const Entries& e, Limiter limiter, LimitPattern& pattern,
+                                                               Gradient<D>& g0, double (*M_out)[fit_size] = nullptr) {
+        static_assert(std::is_same_v<G, double>, "derivatives: double gradients (Precision<>)");
+        constexpr int U = fit_size;
+        double M[U][U], b[V][U], surface;
+        fit(Wi, e, M, b, surface);
+        Gradient<D> grad;
+        Sweep<false, true>::template solve<U>(M, b, grad);
+        g0 = grad;
+        if (M_out)
+            for (int p = 0; p < U; ++p)
+                for (int s = 0; s < U; ++s) M_out[p][s] = M[p][s];
+        const double tiny = 1e-6 * surface;
+        double lo[V], hi[V];
+        int lo_k[V], hi_k[V];
+        for (int v = 0; v < V; ++v) {
+            lo[v] = Kokkos::Experimental::finite_max_v<double>;
+            hi[v] = -Kokkos::Experimental::finite_max_v<double>;
+            lo_k[v] = hi_k[v] = -1;
+            pattern.last[v] = pattern.extreme[v] = -1;
+            pattern.upper[v] = pattern.zero[v] = false;
+        }
+        for (int k = 0; k < e.count(); ++k) {
+            if (e.weight(k) < tiny) continue;
+            const State Wj = e.W(k);
+            for (int v = 0; v < V; ++v) {
+                if (Wj[v] < lo[v]) lo[v] = Wj[v], lo_k[v] = k;
+                if (Wj[v] > hi[v]) hi[v] = Wj[v], hi_k[v] = k;
+            }
+        }
+        if (limiter == Limiter::none) return grad;
+        for (int k = 0; k < e.count(); ++k) {
+            if (e.weight(k) < tiny) continue;
+            const Vec offset = e.offset(k);
+            for (int v = 0; v < V; ++v) {
+                const double dp = dot(grad[v], offset);
+                if (dp > 0 && Wi[v] + dp > hi[v]) {
+                    grad[v] = grad[v] * (hi[v] > Wi[v] ? (hi[v] - Wi[v]) / dp : 0.0);
+                    pattern.last[v] = k, pattern.upper[v] = true, pattern.zero[v] = !(hi[v] > Wi[v]);
+                } else if (dp < 0 && Wi[v] + dp < lo[v]) {
+                    grad[v] = grad[v] * (lo[v] < Wi[v] ? (lo[v] - Wi[v]) / dp : 0.0);
+                    pattern.last[v] = k, pattern.upper[v] = false, pattern.zero[v] = !(lo[v] < Wi[v]);
+                }
+            }
+        }
+        for (int v = 0; v < V; ++v) pattern.extreme[v] = pattern.last[v] < 0 ? -1 : pattern.upper[v] ? hi_k[v] : lo_k[v];
+        return grad;
+    }
+    // dg = J (dW_i, dW_j) of limited_gradient() (geometry fixed), at its branch pattern; g: the forward gradient.
+    template <class Entries>
+    KOKKOS_INLINE_FUNCTION static Gradient<D> limited_gradient_tangent(const State& Wi, const State& dWi, const Entries& e, Limiter limiter,
+                                                                       Gradient<D>& g) {
+        constexpr int U = fit_size;
+        LimitPattern pattern;
+        Gradient<D> g0;
+        double M[U][U];
+        g = limited_gradient(Wi, e, limiter, pattern, g0, M);
+        double db[V][U] = {}, dx[V][U];
+        for (int k = 0; k < e.count(); ++k) {
+            const Vec between = e.between(k);
+            const State dWj = e.dW(k);
+            const double w = e.weight(k);
+            for (int v = 0; v < V; ++v) {
+                const double dW = w * (dWj[v] - dWi[v]);
+                db[v][0] += dW;
+                for (int p = 1; p < U; ++p) db[v][p] += between[p - 1] * dW;
+            }
+        }
+        solve_all(M, db, dx);
+        Gradient<D> dg;
+        for (int v = 0; v < V; ++v) {
+            const Vec dg0 = make_vec<D>([&](int a) { return dx[v][1 + a]; });
+            if (pattern.last[v] < 0) {
+                dg[v] = dg0;
+            } else if (pattern.zero[v]) {
+                dg[v] = Vec{};
+            } else {
+                const Vec o = e.offset(pattern.last[v]);
+                const double den = dot(g0[v], o), bound = e.W(pattern.extreme[v])[v], dbound = e.dW(pattern.extreme[v])[v];
+                const double s = (bound - Wi[v]) / den, ds = (dbound - dWi[v] - s * dot(dg0, o)) / den;
+                dg[v] = dg0 * s + g0[v] * ds;
+            }
+        }
+        return dg;
+    }
+    // J^T gbar of limited_gradient(): the bars of b and of the bounds, which the neighbours collect, and the cell's own W bar.
+    template <class Entries>
+    KOKKOS_INLINE_FUNCTION static GradientAdjoint limited_gradient_adjoint(const State& Wi, const Entries& e, Limiter limiter, const Gradient<D>& gbar) {
+        constexpr int U = fit_size;
+        LimitPattern pattern;
+        Gradient<D> g0;
+        double M[U][U];
+        limited_gradient(Wi, e, limiter, pattern, g0, M);
+        GradientAdjoint out;
+        double xbar[V][U];
+        for (int v = 0; v < V; ++v) {
+            out.self[v] = 0;
+            out.bound[v] = 0;
+            out.entry[v] = -1;
+            Vec g0bar = gbar[v];
+            if (pattern.zero[v] && pattern.last[v] >= 0) {
+                g0bar = Vec{};
+            } else if (pattern.last[v] >= 0) {
+                const Vec o = e.offset(pattern.last[v]);
+                const double den = dot(g0[v], o), bound = e.W(pattern.extreme[v])[v];
+                const double s = (bound - Wi[v]) / den, t = dot(gbar[v], g0[v]) / den;
+                g0bar = gbar[v] * s - o * (s * t);
+                out.bound[v] = t;
+                out.entry[v] = pattern.extreme[v];
+                out.self[v] -= t;
+            }
+            xbar[v][0] = 0;
+            for (int a = 0; a < D; ++a) xbar[v][1 + a] = g0bar[a];
+        }
+        solve_all(M, xbar, out.b);  // M is symmetric: b bar = M^-1 x bar
+        for (int v = 0; v < V; ++v)
+            for (int p = 0; p < U; ++p) out.self[v] -= M[0][p] * out.b[v][p];
+        return out;
+    }
+    // The W bar of entry k's neighbour from limited_gradient_adjoint(). Used by: the derivative tests (step_adjoint gathers it per cell).
+    template <class Entries>
+    KOKKOS_INLINE_FUNCTION static State neighbour_bar(const Entries& e, int k, const GradientAdjoint& adjoint) {
+        const Vec between = e.between(k);
+        const double w = e.weight(k);
+        return make_state<D>([&](int v) {
+            double sum = adjoint.b[v][0];
+            for (int p = 1; p < fit_size; ++p) sum += between[p - 1] * adjoint.b[v][p];
+            return w * sum + (adjoint.entry[v] == k ? adjoint.bound[v] : 0.0);
+        });
+    }
+
     // The cell terms of the time step (AREPO rule). Used by: TimeStep.
     template <bool Moving>
     struct CellStep {
@@ -808,6 +1009,36 @@ public:
                 ++fallbacks;
                 return W;
             }
+        }
+        // side() at order 1 in double as a function of (W, g), r and dt fixed; fallback: the side took the cell's state.
+        // Used by: side_tangent(), side_adjoint(), step_adjoint, the derivative tests.
+        KOKKOS_INLINE_FUNCTION static State side_value(const State& W, const Gradient<D>& grad, Vec r, double dt, const Gas& gas, bool& fallback) {
+            State Wf = half_step(W, grad, dt, gas);
+            for (int v = 0; v < V; ++v) Wf[v] += dot(grad[v], r);
+            fallback = !(Wf[0] > 0 && Wf[D + 1] > 0);
+            return fallback ? W : Wf;
+        }
+        // dW_f = J (dW, dg) of side_value(); a side that fell back carries dW. Used by: step_tangent, the derivative tests.
+        KOKKOS_INLINE_FUNCTION static State side_tangent(const State& W, const State& dW, const Gradient<D>& grad, const Gradient<D>& dg, Vec r,
+                                                         double dt, const Gas& gas) {
+            bool fallback;
+            side_value(W, grad, r, dt, gas, fallback);
+            if (fallback) return dW;
+            State dWf = half_step_tangent(W, dW, grad, dg, dt, gas);
+            for (int v = 0; v < V; ++v) dWf[v] += dot(dg[v], r);
+            return dWf;
+        }
+        // Adds J^T Wfbar of side_value() to Wbar and gbar. Used by: step_adjoint, the derivative tests.
+        KOKKOS_INLINE_FUNCTION static void side_adjoint(const State& W, const Gradient<D>& grad, Vec r, double dt, const Gas& gas, const State& Wfbar,
+                                                        State& Wbar, Gradient<D>& gbar) {
+            bool fallback;
+            side_value(W, grad, r, dt, gas, fallback);
+            if (fallback) {
+                for (int v = 0; v < V; ++v) Wbar[v] += Wfbar[v];
+                return;
+            }
+            for (int v = 0; v < V; ++v) gbar[v] = gbar[v] + r * Wfbar[v];
+            half_step_adjoint(W, grad, dt, gas, Wfbar, Wbar, gbar);
         }
         // AREPO-ng's face velocity: the mean point velocity plus a correction along n, |c| limited to 0.9 |d|. Used by: operator().
         // wL, wR: the point velocities of owner and neighbour (FaceFlux: the rows of w; MovingFlux: from the grid steps).
@@ -1023,6 +1254,246 @@ public:
         phase_end(timings, &Timings::update);
     }
 
+    // Derivatives of a step (docs/derivatives.md): a static mesh, order 1, the per-face loop, double throughout (Precision<>), dt fixed.
+    // Throws otherwise. Used by: step_tangent(), step_adjoint().
+    void require_derivatives(const char* what) const {
+        static_assert(std::is_same_v<G, double> && std::is_same_v<FluxStore, double> && std::is_same_v<typename P::riemann, double> &&
+                          !Mesh::float_rows,
+                      "derivatives of a step: Precision<> (double throughout)");
+        if (motion_ != Motion::static_mesh || order_ != 1 || update_ != Update::per_face)
+            throw std::logic_error(std::string("hydro::FiniteVolume::") + what + ": a static mesh, order 1, the per-face loop");
+    }
+    using Rows = Kokkos::View<double**, Kokkos::LayoutRight, Memory>;
+    // A Rows view of at least rows x width, kept between steps. Used by: step_tangent(), step_adjoint().
+    static void fit_rows(Rows& r, const char* label, int rows, int width) {
+        if (static_cast<int>(r.extent(0)) < rows || static_cast<int>(r.extent(1)) != width)
+            r = Rows(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string(label)), rows, width);
+    }
+    // Entries of cell i for limited_gradient*(): its list, the primitive rows and, for the tangent, their tangents.
+    struct CellEntries {
+        Geometry geo;
+        Prims prim;
+        Rows dprim;
+        int i, first, n;
+        Vec centroid;
+        KOKKOS_INLINE_FUNCTION CellEntries(const Geometry& g, const Prims& p, const Rows& dp, int cell)
+            : geo(g), prim(p), dprim(dp), i(cell), first(g.start(cell)), n(g.start(cell + 1) - g.start(cell)), centroid(g.row(g.centroid, cell)) {}
+        KOKKOS_INLINE_FUNCTION int count() const { return n; }
+        KOKKOS_INLINE_FUNCTION int face(int k) const { return geo.face_at(first + k); }
+        KOKKOS_INLINE_FUNCTION int other(int k) const { return geo.other_at(first + k, face(k), i); }
+        KOKKOS_INLINE_FUNCTION State W(int k) const { return primitive_row(prim, other(k)); }
+        KOKKOS_INLINE_FUNCTION State dW(int k) const {
+            const int j = other(k);
+            return make_state<D>([&](int v) { return dprim(j, v); });
+        }
+        KOKKOS_INLINE_FUNCTION Vec between(int k) const {
+            const int j = other(k);
+            return geo.separation(i, j) + geo.row(geo.centroid, j) - centroid;
+        }
+        KOKKOS_INLINE_FUNCTION double weight(int k) const {
+            const Vec a = geo.area_of(face(k));
+            return Kokkos::sqrt(dot(a, a));
+        }
+        KOKKOS_INLINE_FUNCTION Vec offset(int k) const { return geo.face_offset(face(k), i); }
+    };
+    // Gradient row i of a double policy. Used by: step_adjoint.
+    KOKKOS_INLINE_FUNCTION static Gradient<D> gradient_row(const Gradients& g, int i) {
+        Gradient<D> grad;
+        for (int v = 0; v < V; ++v) grad[v] = make_vec<D>([&](int a) { return static_cast<double>(g(i, D * v + a)); });
+        return grad;
+    }
+
+    // Forward mode: the step of step() (the same Q, bit for bit on the host) and, in the same passes, the tangent dq -> J dq.
+    // dq: a tangent of Q (extensive, as state()). Primitives, sweep, fluxes and update each carry their tangent rows
+    // (40 + 120 B a cell, 40 B a face). dt is fixed: its dependence on Q (the CFL rule) is not differentiated.
+    void step_tangent(double dt, const Cells& dq, Timings* timings = nullptr) {
+        require_derivatives("step_tangent");
+        timer_.reset();
+        refresh();
+        borrow_scratch();
+        if (!prims_ready_) primitives();
+        prims_ready_ = false;
+        swept_ = false;
+        fit_rows(d_prims_, "hydro_d_prims", n_, V);
+        fit_rows(d_gradients_, "hydro_d_gradients", n_, V * D);
+        fit_rows(d_fluxes_, "hydro_d_fluxes", faces_, V);
+        const auto q = q_;
+        const auto prim = prims_;
+        const auto g = gradients_;
+        const auto F = flux_;
+        const auto dprim = d_prims_, dg = d_gradients_, dF = d_fluxes_;
+        const Geometry geo = geometry_;
+        const Gas gas = gas_;
+        const Limiter limiter = limiter_;
+        Kokkos::parallel_for(
+            "hydro::primitives_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                const State dW = primitive_tangent(geo.per_volume(q, i), geo.per_volume(dq, i), gas);
+                for (int v = 0; v < V; ++v) dprim(i, v) = dW[v];
+            });
+        phase_end(timings, &Timings::primitives);
+        Kokkos::parallel_for(
+            "hydro::sweep_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                const CellEntries e(geo, prim, dprim, i);
+                const State dWi = make_state<D>([&](int v) { return dprim(i, v); });
+                Gradient<D> grad;
+                const Gradient<D> dgrad = limited_gradient_tangent(primitive_row(prim, i), dWi, e, limiter, grad);
+                for (int v = 0; v < V; ++v)
+                    for (int a = 0; a < D; ++a) {
+                        g(i, D * v + a) = grad[v][a];
+                        dg(i, D * v + a) = dgrad[v][a];
+                    }
+            });
+        phase_end(timings, &Timings::sweep);
+        Kokkos::parallel_for(
+            "hydro::fluxes_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
+                const int o = geo.owner_of(f), j = geo.neighbour_of(f);
+                const Vec a = geo.area_of(f);
+                const double magnitude = Kokkos::sqrt(dot(a, a));
+                State value{}, tangent{};
+                if (magnitude != 0) {
+                    const Vec n = a * (1.0 / magnitude);
+                    auto sides = [&](int c, State& Wf, State& dWf) {
+                        const State W = primitive_row(prim, c), dW = make_state<D>([&](int v) { return dprim(c, v); });
+                        const Gradient<D> grad = gradient_row(g, c);
+                        Gradient<D> dgrad;
+                        for (int v = 0; v < V; ++v) dgrad[v] = make_vec<D>([&](int k) { return dg(c, D * v + k); });
+                        const Vec r = geo.face_offset(f, c) + Vec{};
+                        bool fallback;
+                        Wf = FaceFlux<1, false>::side_value(W, grad, r, dt, gas, fallback);
+                        dWf = FaceFlux<1, false>::side_tangent(W, dW, grad, dgrad, r, dt, gas);
+                    };
+                    State L, R, dL, dR;
+                    sides(o, L, dL);
+                    sides(j, R, dR);
+                    value = Riemann::flux(L, R, n, Vec{}, gas);
+                    tangent = Riemann::flux_tangent(L, R, dL, dR, n, Vec{}, gas);
+                    for (int v = 0; v < V; ++v) {
+                        value[v] *= magnitude;
+                        tangent[v] *= magnitude;
+                    }
+                }
+                for (int v = 0; v < V; ++v) {
+                    F(f, v) = value[v];
+                    dF(f, v) = tangent[v];
+                }
+            });
+        phase_end(timings, &Timings::fluxes);
+        Kokkos::parallel_for(
+            "hydro::update_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                State sum{}, dsum{};
+                for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
+                    const int f = geo.face_at(k);
+                    const double sign = geo.owned_at(k, f, i) ? 1.0 : -1.0;
+                    for (int v = 0; v < V; ++v) {
+                        sum[v] += sign * F(f, v);
+                        dsum[v] += sign * dF(f, v);
+                    }
+                }
+                for (int v = 0; v < V; ++v) {
+                    q(i, v) = q(i, v) - dt * sum[v];
+                    dq(i, v) = dq(i, v) - dt * dsum[v];
+                }
+            });
+        phase_end(timings, &Timings::update);
+    }
+
+    // Reverse mode: qbar = Q bar after the step on entry, before it on return (J^T qbar); Q stays the state at the start of the step,
+    // which the caller restores from a checkpoint. Recomputes the forward primitives and gradients, then three passes:
+    //  fluxes: per cell, each of its faces' flux adjoint (each face from both sides, no face rows) -> the cell's W and g bars
+    //  sweep:  per cell, the gradient's adjoint -> the fit's b bars and bound bars (rows), the cell's own W bar
+    //  update: per cell, the neighbours' b and bound bars gathered, then the primitive adjoint into qbar. No atomics: the same bits every run.
+    void step_adjoint(double dt, const Cells& qbar, Timings* timings = nullptr) {
+        require_derivatives("step_adjoint");
+        timer_.reset();
+        refresh();
+        borrow_scratch();
+        primitives();
+        prims_ready_ = true;  // Q is unchanged
+        swept_ = false;
+        Kokkos::parallel_for("hydro::sweep", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_),
+                             Sweep<false, true>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_, Magnitudes()});
+        phase_end(timings, &Timings::primitives);
+        fit_rows(bar_w_, "hydro_bar_w", n_, V);
+        fit_rows(bar_g_, "hydro_bar_g", n_, V * D);
+        fit_rows(bar_b_, "hydro_bar_b", n_, V * fit_size);
+        fit_rows(bar_bound_, "hydro_bar_bound", n_, V);
+        if (static_cast<int>(bound_face_.extent(0)) < n_)
+            bound_face_ = Kokkos::View<int* [V], Kokkos::LayoutRight, Memory>(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_bound_face")), n_);
+        const auto q = q_;
+        const auto prim = prims_;
+        const auto g = gradients_;
+        const auto wbar = bar_w_, gbar = bar_g_, bbar = bar_b_, boundbar = bar_bound_;
+        const auto bound_face = bound_face_;
+        const Geometry geo = geometry_;
+        const Gas gas = gas_;
+        const Limiter limiter = limiter_;
+        Kokkos::parallel_for(
+            "hydro::fluxes_adjoint", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                State Wi_bar{};
+                Gradient<D> gi_bar;
+                for (int v = 0; v < V; ++v) gi_bar[v] = Vec{};
+                for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
+                    const int f = geo.face_at(k);
+                    const Vec a = geo.area_of(f);
+                    const double magnitude = Kokkos::sqrt(dot(a, a));
+                    if (magnitude == 0) continue;
+                    const int o = geo.owner_of(f), j = geo.neighbour_of(f);
+                    const Vec n = a * (1.0 / magnitude);
+                    auto side = [&](int c) {
+                        bool fallback;
+                        return FaceFlux<1, false>::side_value(primitive_row(prim, c), gradient_row(g, c), geo.face_offset(f, c) + Vec{}, dt, gas, fallback);
+                    };
+                    const State L = side(o), R = side(j);
+                    // Q_o -= dt F, Q_j += dt F, F = |a| flux(L, R)
+                    const State Fbar = make_state<D>([&](int v) { return magnitude * dt * (qbar(j, v) - qbar(o, v)); });
+                    State Lbar{}, Rbar{};
+                    Riemann::flux_adjoint(L, R, n, Vec{}, gas, Fbar, Lbar, Rbar);
+                    const bool owned = geo.owned_at(k, f, i);
+                    FaceFlux<1, false>::side_adjoint(primitive_row(prim, i), gradient_row(g, i), geo.face_offset(f, i) + Vec{}, dt, gas,
+                                                     owned ? Lbar : Rbar, Wi_bar, gi_bar);
+                }
+                for (int v = 0; v < V; ++v) {
+                    wbar(i, v) = Wi_bar[v];
+                    for (int d = 0; d < D; ++d) gbar(i, D * v + d) = gi_bar[v][d];
+                }
+            });
+        phase_end(timings, &Timings::fluxes);
+        Kokkos::parallel_for(
+            "hydro::sweep_adjoint", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                const CellEntries e(geo, prim, Rows(), i);
+                Gradient<D> bar;
+                for (int v = 0; v < V; ++v) bar[v] = make_vec<D>([&](int d) { return gbar(i, D * v + d); });
+                const GradientAdjoint adjoint = limited_gradient_adjoint(primitive_row(prim, i), e, limiter, bar);
+                for (int v = 0; v < V; ++v) {
+                    wbar(i, v) += adjoint.self[v];
+                    for (int p = 0; p < fit_size; ++p) bbar(i, fit_size * v + p) = adjoint.b[v][p];
+                    boundbar(i, v) = adjoint.bound[v];
+                    bound_face(i, v) = adjoint.entry[v] < 0 ? -1 : e.face(adjoint.entry[v]);
+                }
+            });
+        phase_end(timings, &Timings::sweep);
+        Kokkos::parallel_for(
+            "hydro::update_adjoint", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int j) {
+                State W_bar = make_state<D>([&](int v) { return wbar(j, v); });
+                const Vec cj = geo.row(geo.centroid, j);
+                for (int k = geo.start(j); k < geo.start(j + 1); ++k) {
+                    const int f = geo.face_at(k), i = geo.other_at(k, f, j);
+                    const Vec between = geo.separation(i, j) + cj - geo.row(geo.centroid, i);  // j as cell i's fit sees it
+                    const Vec a = geo.area_of(f);
+                    const double w = Kokkos::sqrt(dot(a, a));
+                    for (int v = 0; v < V; ++v) {
+                        double sum = bbar(i, fit_size * v);
+                        for (int p = 1; p < fit_size; ++p) sum += between[p - 1] * bbar(i, fit_size * v + p);
+                        W_bar[v] += w * sum + (bound_face(i, v) == f ? boundbar(i, v) : 0.0);
+                    }
+                }
+                const double inv = 1.0 / geo.volume(j);
+                const State U_bar = primitive_adjoint(geo.per_volume(q, j), W_bar, gas);
+                for (int v = 0; v < V; ++v) qbar(j, v) += U_bar[v] * inv;
+            });
+        phase_end(timings, &Timings::update);
+    }
+
 private:
     ExecSpace exec_;
     Mesh* mesh_;
@@ -1059,6 +1530,11 @@ private:
     FaceFluxes flux_;
     Geometry geometry_;
     MeshStats mesh_stats_;
+    // Derivative rows, allocated by the first step_tangent() / step_adjoint() (empty otherwise): tangents of W, g, the face fluxes;
+    // bars of W, g, the fit's b, each variable's bound and the face it came through.
+    Rows d_prims_, d_gradients_, d_fluxes_;
+    Rows bar_w_, bar_g_, bar_b_, bar_bound_;
+    Kokkos::View<int* [V], Kokkos::LayoutRight, Memory> bound_face_;
 };
 
 }  // namespace hydro
