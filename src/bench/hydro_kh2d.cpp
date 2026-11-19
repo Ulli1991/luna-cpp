@@ -44,7 +44,7 @@ bool has(int argc, char** argv, const char* name) {
 struct Options {
     int n = 0, order = 1, steps = 0, repeats = 1;
     double jitter = 0, bulk = 0, courant = 0.8, fixed_dt = 0, t_end = 1.5, stop_after = 0;
-    bool moving = false, phases = false, memory = false, fixed = false, resume = false;
+    bool moving = false, phases = false, memory = false, fixed = false, resume = false, count_fallbacks = false;
     std::vector<double> out_times;
     hydro::StepRule rule = hydro::StepRule::luna;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
@@ -218,6 +218,7 @@ int run(const Options& o) {
         series.push_back({0.0, start.M, start.K});
         double t = o.resume ? saved[0] : 0, wall = o.resume ? saved[3] : 0;
         long long steps = o.resume ? static_cast<long long>(saved[2]) : 0;
+        long long fallbacks = 0;  // face sides that took the cell's state (--count-fallbacks)
         hydro::Timings phases;
         hydro::Timings* timing = o.phases ? &phases : nullptr;
         const int outputs = o.steps > 0 ? 1 : static_cast<int>(std::lround(o.t_end / 0.02));
@@ -231,6 +232,7 @@ int run(const Options& o) {
                 if (!o.fixed) dt = step;
                 dt = std::min(dt, target - t);
                 fv.step(dt, timing);
+                if (o.count_fallbacks) fallbacks += fv.fallbacks();  // a host read per step: off for speed runs
                 t = dt == target - t ? target : t + dt;
                 ++steps;
                 if (!(dt > 0)) {
@@ -282,6 +284,7 @@ int run(const Options& o) {
         for (int i = 0; i < n; ++i)
             for (int v = 0; v < 4; ++v) total[v] += q(i, v);
         std::printf("totals: t=%.6g mass=%.15e x_momentum=%.15e y_momentum=%.15e energy=%.15e\n", t, total[0], total[1], total[2], total[3]);
+        if (o.count_fallbacks) std::printf("fallbacks: total=%lld steps=%lld\n", fallbacks, steps);
         const double rate = n * double(steps) / wall * 1e-6;
         std::printf("run: wall_s=%.4f steps=%lld M_cell_updates_per_s=%.1f hash=%016llx\n", wall, steps, rate,
                     static_cast<unsigned long long>(hash));
@@ -345,6 +348,7 @@ int main(int argc, char** argv) {
     o.moving = has(argc, argv, "--moving");
     o.phases = has(argc, argv, "--phases");
     o.memory = has(argc, argv, "--memory");
+    o.count_fallbacks = has(argc, argv, "--count-fallbacks");
     o.order = std::stoi(flag(argc, argv, "--order", "1"));
     o.dt = flag(argc, argv, "--dt", "luna");
     o.courant = std::stod(flag(argc, argv, "--courant", o.dt == "arepo" ? "0.3" : "0.8"));
