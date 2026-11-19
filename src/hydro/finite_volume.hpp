@@ -77,7 +77,7 @@ public:
         if (order != 0 && order != 1) throw std::invalid_argument("hydro::FiniteVolume: order 0 or 1");
         if constexpr (D == 3) {
             if (owner_layout && !mesh.layout().owner_bit) {
-                mesh.set_layout(fast_layout(motion, mesh.layout()));
+                mesh.set_layout(fast_layout(motion, no_resort(mesh.layout())));  // the caller chose no layout: no re-sort either
                 mesh.update_cells();
             }
         }
@@ -96,9 +96,20 @@ public:
         refresh();
     }
 
+    // `layout` without re-sorts. voronoi-cpp re-sorts every 25 updates by default; the hydro keeps it off unless a caller
+    // asks (--every): a re-sort costs about a step, and at 256³ moving it does not fit in 40 GB
+    // (research_notes/moving_structure_2026-11-18.md). Used by: fast_layout, the constructor, hydro_wave3d.
+    static voronoi::Layout no_resort(voronoi::Layout layout = {}) {
+        layout.every = 0;
+        layout.flips = 0;
+        layout.far = 0;
+        return layout;
+    }
+
     // The mesh layout the hydro reads fastest: the owner bit, and on a static mesh faces numbered by owner (on a moving mesh
-    // that renumbering costs the mesh more than it saves here). Set it before the mesh's first update (faces are numbered there).
-    static voronoi::Layout fast_layout(Motion motion, voronoi::Layout layout = {}) {
+    // that renumbering costs the mesh more than it saves here); no re-sort unless `layout` asks for one. Set it before the
+    // mesh's first update (faces are numbered there).
+    static voronoi::Layout fast_layout(Motion motion, voronoi::Layout layout = no_resort()) {
         layout.owner_bit = true;
         layout.owner_faces = layout.owner_faces || motion == Motion::static_mesh;
         return layout;

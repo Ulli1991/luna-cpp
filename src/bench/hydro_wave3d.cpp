@@ -53,7 +53,8 @@ int run(int argc, char** argv) {
     const long long n = static_cast<long long>(points.size());
     const Exec exec;
     typename FV::Mesh mesh(exec, box);
-    if (!has(argc, argv, "--plain-faces")) mesh.set_layout(FV::fast_layout(moving ? hydro::Motion::moving : hydro::Motion::static_mesh));
+    mesh.set_layout(has(argc, argv, "--plain-faces") ? FV::no_resort()
+                                                     : FV::fast_layout(moving ? hydro::Motion::moving : hydro::Motion::static_mesh));
     mesh.update(to_device(points));
     mesh.update_cells();
     FV fv(exec, mesh, gas, 1, hydro::Update::per_face, has(argc, argv, "--limiter=none") ? hydro::Limiter::none : hydro::Limiter::face_centroid,
