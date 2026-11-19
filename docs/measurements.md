@@ -211,6 +211,35 @@ Bits: equal to main for all eight Sedov cases, the 3D vortex and both sound wave
 
 Not tried, and why: a compact per-face struct shared by both halves (the halves read different meshes, and float geometry is the `mixed` preset, which loses the 1e-6 sound wave); fusing the update with anything (each neighbour kernel needs all faces' fluxes first; the update is at its gather floor for 40 B rows; storing fluxes by owner was lever 1 above, refuted).
 
+### Fused flux and update (2026-11-19)
+
+`--update=fused` (F1 of `research_notes/fused_step_2026-11-19.md`; removed by the owner, the code and its scripts are on branch `fused-step`):
+- each flux pass and its update in one kernel, one team per block of 1024 face numbers;
+- each cell is updated by the team holding its highest-numbered face, after the flags of the lower blocks it needs;
+- against `--update=face` from one binary, merged main aac2bb1 (voronoi-cpp 1741a1a, `grad16`). One A100 at 1305 MHz;
+  `scripts/fused_step_a100.sh` and `scripts/fused_ncu_a100.sh` (on `fused-step`). Logs are in `/raven/u/uli/voronoi-cpp-joblogs/fused-step/`.
+
+| | face | fused | job |
+|---|---|---|---|
+| 128³ 40 steps, fluxes + update (fenced medians) | 9.30 ms | 12.47 ms | 32580042 |
+| 128³ step, G cell updates/s | 23.12 ms, 0.0907 | 26.33 ms, 0.0796 | same |
+| 256³ fluxes + update; step | 72.1; 169.5 ms (0.0990 G) | 96.5; 193.8 ms (0.0866 G) | same |
+| whole run to 1e4 yr, 128³: GPU s, G | 8.66, 0.0845 | 9.64, 0.0759 | 32580044 |
+| whole run, 256³ | 168.3, 0.0916 | 187.0, 0.0825 | same |
+| DRAM per pass (Nsight Compute, 128³) | 2090, 2274 B/cell | 1333, 1548 B/cell | 32580046 |
+| peak B/cell | 2251.8 | 2255.9 | 32580042 |
+
+**Bits.** The same as face in every case:
+- Sedov 128³ and 256³ checksums;
+- the whole runs (Q hash, steps, fallbacks, field L1 0.06481, 0.02102, 0.01702 at 128³ and 0.03774, 0.01075, 0.00990
+  at 256³);
+- the sound waves at 1e-3 and 1e-6 and the vortex 64 (npy files);
+- the A100 ctest 5/5 (job 32580047) and the host test (job 32582313).
+
+**Why it was slower.** The update phase runs at the flux code's 27 % of warps, where reading its rows from L2 takes as
+long as the separate update kernel's DRAM reads at 60 % of warps. The waits add 1.4-1.7 ms a step (42 % of list entries
+lie in lower face blocks) and the buckets 0.75 ms. Per part in the note; rows in [tried.md](tried.md).
+
 ### Precision levers of 2026-11-19
 
 The safe precision levers of `research_notes/moving_structure_2026-11-18.md` (branch `moving-structure`), approved by the owner: one per commit on branch `precision-levers` from `pin-1741a1a` (voronoi-cpp 1741a1a), each gated on the 3D sound wave of amplitude 1e-6. One A100 40 GB at 1305 MHz (application clock, logged by every job), Sedov 3D jittered moving, HLLC. Each lever is measured against the tree before it; the trees l1b, l2b, l3b are detached builds of the branch's commits with the multiply below (the branch's own history has lever 1 with a division first, then the multiply). Logs: `/raven/u/uli/voronoi-cpp-joblogs/precision-levers/`.
