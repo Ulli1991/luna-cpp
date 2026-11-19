@@ -55,6 +55,11 @@ SUPER_STAGES = (("A", 0.0, 1.0), ("B", 3.0, 4.0), ("C", 6.0, 6.05), ("C2", 8.05,
                 ("F", 17.60, 18.60), ("S", 22.60, 23.20), ("G", 27.20, 28.20), ("H", 32.20, 33.20))
 PROBLEMS["super-tube"] = dict(kind="super", box=(0.0, SUPER_LENGTH), t=2.0, gamma=G14, boundary=OUTFLOW, right=REFLECTIVE)
 MACHS = ("1.2", "1.6556", "2", "3", "5", "10")
+# Stage L of the tube v2 alone (problems_1d.hpp, research_notes/stage_l_2026-11-19.md): (1, 0, 0.1) | (r, 0, 1e-7 r) at 0 on [-2, 9],
+# t = 4, exact by the bisection solver (riemann(), pressures down to 1e-16).
+STAGE_L = {"3": (1e-3, 1e-10), "6": (1e-6, 1e-13), "9": (1e-9, 1e-16)}
+for _k, (_r, _p) in STAGE_L.items():
+    PROBLEMS[f"stage-l-{_k}"] = dict(tube((1.0, 0.0, 0.1), (_r, 0.0, _p), 0.0, (-2.0, 9.0), 4.0), bisection=True)
 
 
 def problem(name):
@@ -216,6 +221,8 @@ def vacuum_left(WR, g, xi):
 
 def sample(pb, xi):
     WL, WR, g = pb["WL"], pb["WR"], pb["gamma"]
+    if pb.get("bisection"):
+        return riemann(WL, WR, xi, g)
     if WL[0] == 0.0:
         return vacuum_left(WR, g, xi)
     if 2.0 * sum(np.sqrt(g * W[2] / W[0]) for W in (WL, WR)) / (g - 1.0) < WR[1] - WL[1]:

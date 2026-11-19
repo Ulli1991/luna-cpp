@@ -257,6 +257,12 @@ inline Problem table(const std::string& name, double amplitude) {
     if (name == "super-v2-so") return super_v2_stage(1892, 592);
     if (name == "super-v2-n") return super_v2_stage(2483, 306);
     if (name == "super-v2-v") return super_v2_stage(3383, 408);
+    // Stage L of the tube v2 alone, a long-time exact test (luna-cpp #30): (1, 0, 0.1) next to (r, 0, 1e-7 r) at x = 0 on [-2, 9],
+    // open walls, t = 4; r = 1e-3 (stage E's states), 1e-6 (stage L's), 1e-9. A single Riemann problem to t = 4: its waves stay
+    // within [-1.50, 8.21] (scripts/stage_l.py check), so no wave reaches a wall. N = 1024: h = 0.0107, about the tube's at N = 4096.
+    if (name == "stage-l-3") return tube(11.0, -2.0, 4.0, gamma_gas, {1.0, 0.0, 0.1}, {1e-3, 0.0, 1e-10}, 0.0, outflow);
+    if (name == "stage-l-6") return tube(11.0, -2.0, 4.0, gamma_gas, {1.0, 0.0, 0.1}, {1e-6, 0.0, 1e-13}, 0.0, outflow);
+    if (name == "stage-l-9") return tube(11.0, -2.0, 4.0, gamma_gas, {1.0, 0.0, 0.1}, {1e-9, 0.0, 1e-16}, 0.0, outflow);
     // Linear waves, one period, periodic.
     const double eps = amplitude != 0 ? amplitude : linear_amplitude;
     const auto wave = [&](double t, double v0, double drho, double dv, double dp) {

@@ -82,6 +82,7 @@ struct Options {
     bool fixed = false, phases = false, regularise = true, fused = true, smallest = false;
     hydro::TimeStep rule = hydro::TimeStep::luna;
     long long max_steps = 0;
+    std::vector<double> times;  // --times=t1,t2,...: snapshots, increasing
 };
 
 // What one simulate() run reports (steps, sorts, final cell count, wall time, state hash). Used by: main.
@@ -160,10 +161,33 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     const bool fused = o.fused && !o.fixed && !o.phases && o.rule == hydro::TimeStep::luna;
     double next = fused ? fv.time_step(o.courant, o.rule) : 0;
     double smallest = 1e300;
+    // --times: at each of these times (the step shortened to land on it) the generators and conserved totals, rows of (x, Q0, Q1, Q2)
+    // in <out stem>_t<time>.npy, and a line "t steps wall_s" in <out stem>_times.txt. Reads only: the run is the same without it.
+    std::size_t snap = 0;
+    const auto snapshot = [&](double at) {
+        const auto q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
+        std::vector<double> x(static_cast<std::size_t>(fv.cells()));
+        if (o.motion == hydro::Motion::moving) {
+            const auto p = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.positions());
+            for (int i = 0; i < fv.cells(); ++i) x[i] = p(i, 0);
+        } else {
+            const auto p = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
+            for (int i = 0; i < fv.cells(); ++i) x[i] = p(i, 0);
+        }
+        std::vector<std::array<double, 6>> rows(static_cast<std::size_t>(fv.cells()));
+        for (int i = 0; i < fv.cells(); ++i) rows[i] = std::array<double, 6>{x[i] + pb.origin, q(i, 0), q(i, 1), q(i, 2), 0.0, 0.0};
+        std::sort(rows.begin(), rows.end());
+        const std::string stem = out.substr(0, out.rfind(".npy"));
+        char name[64];
+        std::snprintf(name, sizeof name, "_t%g.npy", o.times[snap]);
+        write_npy(stem + name, rows);
+        std::ofstream(stem + "_times.txt", std::ios::app) << at << " " << r.steps << " " << timer.seconds() << "\n";
+    };
     while (t < pb.t_end * (1 - 1e-12) && (o.max_steps == 0 || r.steps < o.max_steps)) {
         double dt = fused ? next : o.fixed ? o.fixed_dt : fv.time_step(o.courant, o.rule, timings);
         if (!(dt > 1e-15 * pb.t_end) || (o.max_wall > 0 && timer.seconds() > o.max_wall)) break;
         dt = std::min(dt, pb.t_end - t);
+        if (snap < o.times.size()) dt = std::min(dt, o.times[snap] - t);
         r.cell_updates += fv.cells();
         if (fused)
             next = fv.step_and_time_step(dt, o.courant);
@@ -171,6 +195,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
             fv.step(dt, timings);
         t += dt;
         ++r.steps;
+        while (snap < o.times.size() && t >= o.times[snap] * (1 - 1e-12) && !out.empty()) snapshot(t), ++snap;
         if (o.smallest && o.motion == hydro::Motion::moving) {  // --smallest: the smallest inner cell over all steps, as hydro1d_cases
             const auto p = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.positions());
             std::vector<double> at(p.data(), p.data() + fv.cells());
@@ -216,7 +241,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|none|minmod|vanleer]"
                      " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--smallest]"
-                     " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name]\n";
+                     " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name] [--times=t1,t2,...]\n";
         return 1;
     }
     const std::string name = argv[1];
@@ -241,6 +266,11 @@ int main(int argc, char* argv[]) {
     o.regularise = !has(argc, argv, "--no-regularise");
     o.fused = !has(argc, argv, "--unfused");
     o.smallest = has(argc, argv, "--smallest");
+    for (std::string list = flag(argc, argv, "--times", ""); !list.empty();) {
+        const std::size_t comma = list.find(',');
+        o.times.push_back(std::stod(list.substr(0, comma)));
+        list = comma == std::string::npos ? "" : list.substr(comma + 1);
+    }
     const int repeats = std::stoi(flag(argc, argv, "--repeats", "2"));
     const std::string out = flag(argc, argv, "--out", "");
     o.limiter = limit == "none"    ? hydro::Limiter::none
