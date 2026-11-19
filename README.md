@@ -58,6 +58,7 @@ Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the backend y
 - OpenMP: `-fopenmp` from Kokkos. The project sets no `-march`; use `-DCMAKE_CXX_FLAGS=-march=icelake-server` on Raven's CPUs.
 - `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (always on in `CMakeLists.txt`) writes the database clang-tidy needs: `bash scripts/lint_cpp.sh build-omp` (Raven: `module load clang/20`).
 - `-DVORONOI_SANITIZERS=ON` adds address and undefined-behaviour sanitizers to a host build.
+- `-DLUNA_DERIVATIVE_TESTS=ON` adds `hydro_derivatives_test` (off by default while the derivatives are new).
 
 
 ## Running
@@ -319,6 +320,7 @@ Run times are in [TESTING.md](TESTING.md). The mesh's own tests are in voronoi-c
 | `hydro2d` | 2D hydro, static and moving: uniform states, conservation, sound-wave order, Sod, Noh, a Galilean blast |
 | `hydro1d_cases` | every 1D test of LUNA's suite plus two it lacks, 30 in all, against LUNA and the exact solutions, static and moving |
 | `hydro1d` | 1D hydro: conservation, inflow, cells from a wall with the budget through it, Sod against the exact solution; LUNA's final states of Sod, Shu-Osher and Woodward-Colella at N = 16 to 1e-12 |
+| `hydro_derivatives` (opt-in) | the hand-written tangents and adjoints of the 3D hydro (primitive, half step, HLL, HLLC, the limited gradient, a whole static step): tangent against central differences away from switches, adjoint against tangent by the dot test |
 
 ```sh
 ctest --test-dir build-cuda --output-on-failure

@@ -37,9 +37,9 @@ Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 | ID | Idea | Buys | First test | Status |
 |---|---|---|---|---|
 | O4, L4 | Geometric conservation: each cell's volume change over a step against the volume swept by its moving faces; uniform flow, and steps with flips | tests the moving step's time-centring | endpoint volumes against swept faces, no AD needed | next |
-| L1 | Derivatives of reconstruction, half step, Riemann flux and update against finite differences on a fixed mesh and branch pattern | finds wrong derivatives and silent bugs | Enzyme on the host build: clang 18 to 21 on Raven, Enzyme built from source; no Kokkos support in Enzyme yet | next |
-| L2 | Differentiable Riemann solver | verification, sensitivity | after L1 | open |
-| L7 | Limiter sensitivity, piecewise | understanding the Sod ringing and stalls | after L1 | open |
+| L1 | Derivatives of reconstruction, half step, Riemann flux and update against finite differences on a fixed mesh and branch pattern | finds wrong derivatives and silent bugs; the base of a differentiable step | hand-written tangent and adjoint beside each forward function (`*_tangent`, `*_adjoint` in euler.hpp and finite_volume.hpp), `FiniteVolume::step_tangent` and `step_adjoint` for the static step in double; `hydro_derivatives_test` (opt-in, `-DLUNA_DERIVATIVE_TESTS=ON`): tangent against central differences, adjoint against tangent, per piece and over whole steps (research_notes/autodiff_l1_2026-11-19.md). The owner chose hand-written derivatives over Enzyme on 2026-11-19; #12's Enzyme route is superseded | done for the static step (branch `autodiff-l1`, not merged) |
+| L2 | Differentiable Riemann solver | verification, sensitivity | HLL and HLLC tangent and adjoint done in L1; derivative at each wave case and guard defined there | done in L1 |
+| L7 | Limiter sensitivity, piecewise | understanding the Sod ringing and stalls | the limiter's derivative at a fixed clip pattern exists (L1); a smooth tangent at the clip, as LUNA's minmod, is proposed in the L1 note | open |
 | L6 | Time-step control sensitivity | stable larger steps | smooth surrogates of the CFL rule | research |
 | T1 | Metamorphic tests: uniform state on a moving mesh, conservation, Galilean invariance, frame changes | robustness | the first three exist; add rotations and frames | done, extend |
 | T3, O5 | Herbie and stochastic arithmetic on conserved-to-primitive conversion, energies and fluxes | accuracy | one expression first | open |
@@ -59,7 +59,7 @@ Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 | L3, O3, J1 | Mesh velocity optimised for accuracy, cell quality and fewer flips, with a smooth barrier near flips | fewer repairs, better cells | flips per step and error with and without the barrier | research |
 | J2, J3 | Regularisation aware of hydro error and of mesh cost | accuracy per GPU second | after L1 | research |
 | L8 | Mesh adaptation from error sensitivities | resolution where it matters | with refinement | research |
-| L5, L9, T8 | Adjoints over many steps; calibration of EOS and source terms | inverse problems | #12, after L1 | research |
+| L5, L9, T8 | Adjoints over many steps; calibration of EOS and source terms | inverse problems | #12: `step_adjoint` with checkpoints of Q (one step's reverse needs only Q^n); binomial checkpointing over many steps, design in the L1 note | research |
 | O2, J4 | Space-time control volumes swept by moving cells; a differentiable moving mesh | exact time-centring, gradients through the mesh | a 2D prototype with one flip | research |
 | R11 | Give the mesh the hydro's acceleration so it can predict flips better | fewer surprises in repair | see voronoi-cpp's R11 | research |
 | R19 | Recompute only what a step invalidated | less work per step | see voronoi-cpp's R19 | research |
