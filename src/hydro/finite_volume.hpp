@@ -408,9 +408,21 @@ public:
         return make_state<D>([&](int v) { return prim(i, v); });
     }
 
+    // No extra work in the sweep: the production instantiation of Sweep. Used by: Sweep (the default Hook).
+    struct NoSweepHook {
+        struct Cell {};
+        KOKKOS_INLINE_FUNCTION Cell begin(int, const State&) const { return {}; }
+        template <class... A>
+        KOKKOS_INLINE_FUNCTION void entry(Cell&, const A&...) const {}
+        template <class... A>
+        KOKKOS_INLINE_FUNCTION void solve(Cell&, const A&...) const {}
+        KOKKOS_INLINE_FUNCTION void clip(Cell&, const Vec&) const {}
+        KOKKOS_INLINE_FUNCTION void finish(Cell&, int) const {}
+    };
     // The sweep of time_step(), one thread per cell: the point velocity (moving), then the limited least-squares gradients (order 1).
-    // Reads prims_; writes gradients_/exponents_ (read by FaceFlux::gradient()) and w_ (read by face_velocity()). Used by: sweep().
-    template <bool Moving, bool Grad>
+    // Reads prims_; writes gradients_/exponents_ (read by FaceFlux::gradient()) and w_ (read by face_velocity()). Hook: work riding
+    // in the same walks (TangentSweepHook: the tangent of the gradients), nothing by default. Used by: sweep(), time_step_tangent().
+    template <bool Moving, bool Grad, class Hook = NoSweepHook>
     struct Sweep {
         Prims prim;
         Points w;
@@ -420,6 +432,7 @@ public:
         Gas gas;
         Limiter limiter;
         Kokkos::View<const double*, Memory> magnitudes;  // |area| per face from the last flux pass on this mesh, or empty
+        Hook hook{};
 
         // |area| of face f: cached (the same bits) or from the area row.
         KOKKOS_INLINE_FUNCTION double magnitude_of(int f) const {
@@ -431,6 +444,7 @@ public:
         KOKKOS_INLINE_FUNCTION void operator()(int i) const {
             constexpr bool exact = std::is_same_v<G, double>;
             const State Wi = primitive_row(prim, i);
+            [[maybe_unused]] auto cell = hook.begin(i, Wi);  // the hook's per-cell state (NoSweepHook: empty)
             double surface = 0, smallest_face = Kokkos::Experimental::infinity_v<double>, max_angle = 0;
             Gradient<D, G> grad;
             // The neighbours' range: W_j, or W_j - W_i in reduced precision (rounded once).
@@ -465,6 +479,7 @@ public:
                 if constexpr (Grad) {
                     G X[U];
                     const Vec between = d + geo.row(geo.centroid, j) - centroid;
+                    hook.entry(cell, f, j, Wj, between, magnitude);
                     X[0] = 1;
                     for (int p = 1; p < U; ++p) X[p] = static_cast<G>(between[p - 1]);
                     const G w = static_cast<G>(magnitude);
@@ -485,7 +500,10 @@ public:
             if constexpr (Grad) {
                 if (any_tiny) neighbour_range(i, Wi, tiny, lo, hi);
             }
-            if constexpr (Grad) solve(M, b, grad);
+            if constexpr (Grad) {
+                solve(M, b, grad);
+                hook.solve(cell, i, tiny, any_tiny, M, grad);
+            }
             if constexpr (Moving) {
                 double fraction = 0;
                 if (max_angle > 0.75 * cell_max_angle_factor)
@@ -504,6 +522,7 @@ public:
                     const int f = geo.face_at(k);
                     if (any_tiny && magnitude_of(f) < tiny) continue;
                     const Vec offset = geo.face_offset(f, i);
+                    hook.clip(cell, offset);
                     const hydro::Vec<D, G> rg = cast<G>(offset);
                     for (int v = 0; v < V; ++v) {
                         const G dp = dot(grad[v], rg);
@@ -520,6 +539,7 @@ public:
                         }
                     }
                 }
+                hook.finish(cell, i);
                 store(i, grad);
             }
         }
@@ -1394,6 +1414,204 @@ public:
                 for (int a = 0; a < D; ++a) dg(i, D * v + a) = dgrad[v][a];
         }
     };
+    // The double fit riding in the forward Sweep (Sweep<false, true, SweepFitHook<...>>): the same walks, the neighbours' rows loaded
+    // once. A double policy reuses the forward's M, unlimited gradient and clips; grad32 and grad16 keep their own fit and clips in double
+    // (the derivative of the double scheme, as TangentSweep). Tangent (time_step_tangent()): writes dg. Not (step_adjoint()): stores what
+    // the gradient's adjoint needs, so AdjointCell walks no neighbours for it: M's Cholesky factor, M's row 0, g0, and per variable the
+    // last clip's offset, bound, flags and the face its bound came through (fit: 55 doubles, flags: 2 V ints a cell).
+    template <bool Tangent>
+    struct SweepFitHook {
+        Rows dprim, dg;  // Tangent
+        Prims prim;
+        Geometry geo;
+        Rows fit;                                                // not Tangent
+        Kokkos::View<int**, Kokkos::LayoutRight, Memory> flags;  // not Tangent
+        static constexpr int U = fit_size;
+        static constexpr bool exact = std::is_same_v<G, double>;
+        static constexpr int UM = exact ? 1 : U, VM = exact ? 1 : V;  // the own fit, only for a reduced policy
+        static constexpr int VT = Tangent ? V : 1;
+        struct Cell {
+            State Wi, dWi;
+            double db[VT][U];
+            double M[UM][UM], b[VM][UM];
+            double lo[V], hi[V], dlo[V], dhi[V];
+            int lo_f[V], hi_f[V];
+            double Lc[U][U], M0[U];
+            Gradient<D> grad, g0, dg0;
+            bool clipped[V], upper[V], zero[V];
+            Vec offset[V];
+        };
+        KOKKOS_INLINE_FUNCTION Cell begin(int i, const State& Wi) const {
+            Cell c;
+            c.Wi = Wi;
+            if constexpr (Tangent) c.dWi = state_row(dprim, i);
+            for (int v = 0; v < VT; ++v)
+                for (int p = 0; p < U; ++p) c.db[v][p] = 0;
+            for (int v = 0; v < V; ++v) {
+                c.lo[v] = Kokkos::Experimental::finite_max_v<double>;
+                c.hi[v] = -Kokkos::Experimental::finite_max_v<double>;
+                c.dlo[v] = c.dhi[v] = 0;
+                c.lo_f[v] = c.hi_f[v] = -1;
+                c.clipped[v] = c.upper[v] = c.zero[v] = false;
+            }
+            for (int p = 0; p < UM; ++p)
+                for (int s = 0; s < UM; ++s) c.M[p][s] = 0;
+            for (int v = 0; v < VM; ++v)
+                for (int p = 0; p < UM; ++p) c.b[v][p] = 0;
+            return c;
+        }
+        // Neighbour j (face f) of the walk: the range with the bounds' tangents or faces, the tangent's right-hand side, the own fit.
+        KOKKOS_INLINE_FUNCTION void entry(Cell& c, int f, int j, const State& Wj, const Vec& between, double w) const {
+            double X[U];
+            X[0] = 1;
+            for (int p = 1; p < U; ++p) X[p] = between[p - 1];
+            State dWj{};
+            if constexpr (Tangent) dWj = state_row(dprim, j);
+            for (int v = 0; v < V; ++v) {
+                if constexpr (Tangent) {
+                    const double ddW = w * (dWj[v] - c.dWi[v]);
+                    for (int p = 0; p < U; ++p) c.db[v][p] += X[p] * ddW;
+                }
+                if (Wj[v] < c.lo[v]) c.lo[v] = Wj[v], c.dlo[v] = dWj[v], c.lo_f[v] = f;
+                if (Wj[v] > c.hi[v]) c.hi[v] = Wj[v], c.dhi[v] = dWj[v], c.hi_f[v] = f;
+            }
+            if constexpr (!exact) {
+                for (int p = 0; p < U; ++p)
+                    for (int s = p; s < U; ++s) c.M[p][s] += w * X[p] * X[s];
+                for (int v = 0; v < V; ++v)
+                    for (int p = 0; p < U; ++p) c.b[v][p] += w * X[p] * (Wj[v] - c.Wi[v]);
+            }
+        }
+        // After the walk: the range without faces below tiny (rare, another walk), the unlimited fit and its tangent.
+        template <class Matrix, class Grad>
+        KOKKOS_INLINE_FUNCTION void solve(Cell& c, int i, double tiny, bool any_tiny, const Matrix& M, const Grad& grad) const {
+            if (any_tiny) {
+                for (int v = 0; v < V; ++v) {
+                    c.lo[v] = Kokkos::Experimental::finite_max_v<double>;
+                    c.hi[v] = -Kokkos::Experimental::finite_max_v<double>;
+                }
+                for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
+                    const int f = geo.face_at(k), j = geo.other_at(k, f, i);
+                    const Vec a = geo.area_of(f);
+                    if (Kokkos::sqrt(dot(a, a)) < tiny) continue;
+                    const State Wj = primitive_row(prim, j);
+                    for (int v = 0; v < V; ++v) {
+                        const double dWj = Tangent ? dprim(j, v) : 0.0;
+                        if (Wj[v] < c.lo[v]) c.lo[v] = Wj[v], c.dlo[v] = dWj, c.lo_f[v] = f;
+                        if (Wj[v] > c.hi[v]) c.hi[v] = Wj[v], c.dhi[v] = dWj, c.hi_f[v] = f;
+                    }
+                }
+            }
+            double xs[V][U];
+            if constexpr (exact) {
+                cholesky(M, c.Lc);
+                for (int p = 0; p < U; ++p) c.M0[p] = M[0][p];
+                for (int v = 0; v < V; ++v) c.g0[v] = grad[v];
+            } else {
+                cholesky(c.M, c.Lc);
+                for (int p = 0; p < U; ++p) c.M0[p] = c.M[0][p];
+                solve_factored(c.Lc, c.b, xs);
+                for (int v = 0; v < V; ++v) c.g0[v] = make_vec<D>([&](int a) { return xs[v][1 + a]; });
+            }
+            if constexpr (Tangent) {
+                double rhs[V][U];
+                for (int v = 0; v < V; ++v)
+                    for (int p = 0; p < U; ++p) rhs[v][p] = c.db[v < VT ? v : 0][p];
+                solve_factored(c.Lc, rhs, xs);
+                for (int v = 0; v < V; ++v) c.dg0[v] = make_vec<D>([&](int a) { return xs[v][1 + a]; });
+            }
+            for (int v = 0; v < V; ++v) c.grad[v] = c.g0[v];
+        }
+        // A face of the limiter walk: the clip of limited_core(), on the double gradient.
+        KOKKOS_INLINE_FUNCTION void clip(Cell& c, const Vec& offset) const {
+            for (int v = 0; v < V; ++v) {
+                const double dp = dot(c.grad[v], offset);
+                if (dp > 0 && c.Wi[v] + dp > c.hi[v]) {
+                    c.grad[v] = c.grad[v] * (c.hi[v] > c.Wi[v] ? (c.hi[v] - c.Wi[v]) / dp : 0.0);
+                    c.clipped[v] = true, c.upper[v] = true, c.zero[v] = !(c.hi[v] > c.Wi[v]), c.offset[v] = offset;
+                } else if (dp < 0 && c.Wi[v] + dp < c.lo[v]) {
+                    c.grad[v] = c.grad[v] * (c.lo[v] < c.Wi[v] ? (c.lo[v] - c.Wi[v]) / dp : 0.0);
+                    c.clipped[v] = true, c.upper[v] = false, c.zero[v] = !(c.lo[v] < c.Wi[v]), c.offset[v] = offset;
+                }
+            }
+        }
+        // Tangent: the limited gradient's tangent at the clip pattern, as limited_gradient_tangent(), into dg.
+        // Not: the stored fit (FitRow layout) and flags (clipped | upper << 1 | zero << 2, then the bound's face).
+        KOKKOS_INLINE_FUNCTION void finish(Cell& c, int i) const {
+            if constexpr (Tangent) {
+                for (int v = 0; v < V; ++v) {
+                    Vec dgv = c.dg0[v];
+                    if (c.clipped[v] && c.zero[v]) {
+                        dgv = Vec{};
+                    } else if (c.clipped[v]) {
+                        const Vec o = c.offset[v];
+                        const double bound = c.upper[v] ? c.hi[v] : c.lo[v], dbound = c.upper[v] ? c.dhi[v] : c.dlo[v];
+                        const double den = dot(c.g0[v], o);
+                        const double s = (bound - c.Wi[v]) / den, ds = (dbound - c.dWi[v] - s * dot(c.dg0[v], o)) / den;
+                        dgv = c.dg0[v] * s + c.g0[v] * ds;
+                    }
+                    for (int a = 0; a < D; ++a) dg(i, D * v + a) = dgv[a];
+                }
+            } else {
+                for (int p = 0; p < U; ++p)
+                    for (int s = 0; s <= p; ++s) fit(i, FitRow::factor + p * U + s) = c.Lc[p][s];
+                for (int p = 0; p < U; ++p) fit(i, FitRow::row0 + p) = c.M0[p];
+                for (int v = 0; v < V; ++v) {
+                    for (int a = 0; a < D; ++a) {
+                        fit(i, FitRow::g0 + D * v + a) = c.g0[v][a];
+                        fit(i, FitRow::offset + D * v + a) = c.offset[v][a];
+                    }
+                    fit(i, FitRow::bound + v) = c.upper[v] ? c.hi[v] : c.lo[v];
+                    flags(i, v) = (c.clipped[v] ? 1 : 0) | (c.upper[v] ? 2 : 0) | (c.zero[v] ? 4 : 0);
+                    flags(i, V + v) = c.upper[v] ? c.hi_f[v] : c.lo_f[v];
+                }
+            }
+        }
+    };
+    using TangentSweepHook = SweepFitHook<true>;
+    // Columns of the stored fit of a cell (SweepFitHook<false>). Used by: SweepFitHook::finish, AdjointCell.
+    struct FitRow {
+        static constexpr int factor = 0, row0 = factor + fit_size * fit_size, g0 = row0 + fit_size, offset = g0 + V * D,
+                             bound = offset + V * D, width = bound + V;
+    };
+    // The global time step of the sweep's rows (the reductions of sweep(), without its Sweep launch). Used by: time_step_tangent().
+    double reduce_time_step(double courant) {
+        const Kokkos::RangePolicy<ExecSpace> cells(exec_, 0, n_);
+        double smallest = 0;
+        if constexpr (D == 2) {
+            if (rule_ == StepRule::luna) {
+                Kokkos::parallel_reduce("hydro::luna_step", cells, LunaStep<false>{prims_, w_, courant}, Kokkos::Min<double>(smallest));
+                return smallest;
+            }
+        }
+        Kokkos::parallel_reduce("hydro::time_step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, std::max(faces_, n_)),
+                                TimeStep<false>{{prims_, geometry_, courant}, {prims_, w_, courant}, faces_, n_}, Kokkos::Min<double>(smallest));
+        return smallest;
+    }
+    // time_step() with the tangent of its sweep (TangentSweepHook in the same Sweep): primitives, their tangents, the fused sweep, dt.
+    // The next step_tangent(dt, dq) with the same dq reuses both. Returns dt, the same as time_step()'s.
+    double time_step_tangent(double courant, const Cells& dq, Timings* timings = nullptr) {
+        require_derivatives("time_step_tangent");
+        timer_.reset();
+        refresh();
+        borrow_scratch();
+        if (!prims_ready_) primitives();
+        prims_ready_ = false;
+        fit_rows(d_prims_, "hydro_d_prims", n_, V);
+        fit_rows(d_gradients_, "hydro_d_gradients", n_, V * D);
+        const Kokkos::RangePolicy<ExecSpace> cells(exec_, 0, n_);
+        Kokkos::parallel_for("hydro::primitives_tangent", cells, TangentPrimitives{q_, dq, d_prims_, geometry_, gas_});
+        phase_end(timings, &Timings::primitives);
+        Kokkos::parallel_for("hydro::sweep_with_tangent", cells,
+                             Sweep<false, true, TangentSweepHook>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
+                                                                  magnitudes_valid_ ? magnitudes_ : Magnitudes(),
+                                                                  TangentSweepHook{d_prims_, d_gradients_, prims_, geometry_}});
+        const double dt = reduce_time_step(courant);
+        phase_end(timings, &Timings::sweep);
+        swept_ = true;
+        tangent_swept_ = true;
+        return dt;
+    }
     // The face state the derivatives linearise at: side() in double from the rows as stored (for a double policy exactly side();
     // for grad32/grad16 the float face state recomputed in double, so the tangent and the adjoint use the same point whatever each
     // kernel's multiply-add contraction). fallback: as side_value(). Used by: TangentFluxes, AdjointFaces.
@@ -1423,16 +1641,16 @@ public:
                 const State dR = FaceFlux<1, false>::side_tangent(primitive_row(flux.prim, j), state_row(dprim, j), flux.stored_gradient(j),
                                                                   gradient_row(dg, j), rj, flux.dt, flux.gas, fallback_j);
                 const Vec n = a * (1.0 / magnitude);
-                if constexpr (std::is_same_v<G, double>) {
-                    value = FaceFlux<1, false>::solve(L, R, n, Vec{}, flux.gas);
+                if constexpr (std::is_same_v<G, double>) {  // the value from the tangent's own intermediates: one Riemann solve
+                    tangent = Riemann::flux_tangent(L, R, dL, dR, n, Vec{}, flux.gas, &value);
                     for (int v = 0; v < V; ++v) value[v] *= magnitude;
                     count += fallback_o + fallback_j;
                 } else {
                     int fallbacks = 0;
                     value = flux(f, fallbacks, fallbacks);
                     count += fallbacks;
+                    tangent = Riemann::flux_tangent(L, R, dL, dR, n, Vec{}, flux.gas);
                 }
-                tangent = Riemann::flux_tangent(L, R, dL, dR, n, Vec{}, flux.gas);
                 for (int v = 0; v < V; ++v) tangent[v] *= magnitude;
             }
             for (int v = 0; v < V; ++v) {
@@ -1466,11 +1684,13 @@ public:
 
     // Forward mode: the step of step() (its kernels for the forward, so the same Q) and the tangent dq -> J dq beside it.
     // dq: a tangent of Q (extensive, as state()). Rows: dW 40 B and dg 120 B a cell, F and dF 80 B a face. Reuses the sweep of time_step()
-    // as step() does. dt is fixed: its dependence on Q (the CFL rule) is not differentiated.
+    // as step() does, and after time_step_tangent(courant, dq) also its tangents (the fused sweep). dt is fixed: its dependence on Q
+    // (the CFL rule) is not differentiated.
     void step_tangent(double dt, const Cells& dq, Timings* timings = nullptr) {
         require_derivatives("step_tangent");
         timer_.reset();
         refresh();
+        const bool fused = swept_ && tangent_swept_;  // time_step_tangent() ran: the sweep and the tangents are there
         if (!swept_) {
             borrow_scratch();
             if (!prims_ready_) primitives();
@@ -1482,14 +1702,17 @@ public:
         }
         prims_ready_ = false;
         swept_ = false;
+        tangent_swept_ = false;
         fit_rows(d_prims_, "hydro_d_prims", n_, V);
         fit_rows(d_gradients_, "hydro_d_gradients", n_, V * D);
         fit_rows(d_fluxes_, "hydro_d_fluxes", faces_, 2 * V);
         const Kokkos::RangePolicy<ExecSpace> cells(exec_, 0, n_);
-        Kokkos::parallel_for("hydro::primitives_tangent", cells, TangentPrimitives{q_, dq, d_prims_, geometry_, gas_});
-        phase_end(timings, &Timings::primitives);
-        Kokkos::parallel_for("hydro::sweep_tangent", cells, TangentSweep{prims_, d_prims_, d_gradients_, geometry_, limiter_});
-        phase_end(timings, &Timings::sweep);
+        if (!fused) {
+            Kokkos::parallel_for("hydro::primitives_tangent", cells, TangentPrimitives{q_, dq, d_prims_, geometry_, gas_});
+            phase_end(timings, &Timings::primitives);
+            Kokkos::parallel_for("hydro::sweep_tangent", cells, TangentSweep{prims_, d_prims_, d_gradients_, geometry_, limiter_});
+            phase_end(timings, &Timings::sweep);
+        }
         Kokkos::deep_copy(exec_, Kokkos::subview(fallback_counts_, 1), 0LL);
         fallbacks_read_ = false;
         const FaceFlux<1, false> flux{q_, prims_, gradients_, exponents_, w_, geometry_, gas_, dt};
@@ -1527,40 +1750,70 @@ public:
             }
         }
     };
-    // Reverse pass per cell, in one walk of its list (plus the clip walk): for each face, the bar of the cell's side (AdjointFaces' row,
-    // read in list order: no atomics, the same bits every run) through the face-state adjoint -> the cell's W and g bars; in the same
-    // walk the fit, then the gradient's adjoint -> the fit's b bars and bound bars (rows), the cell's own W bar. Used by: step_adjoint().
+    // Reverse pass per cell, one walk of its list: for each face, the bar of the cell's side (AdjointFaces' row, read in list order: no
+    // atomics, the same bits every run) through the face-state adjoint -> the cell's W and g bars; then the gradient's adjoint from the
+    // fit the forward recompute stored (SweepFitHook<false>), no neighbour rows -> the fit's b bars and bound bars (rows), the cell's own
+    // W bar. Used by: step_adjoint().
     struct AdjointCell {
         FaceFlux<1, false> flux;
         Rows face_bar, wbar, bbar, boundbar;
         Kokkos::View<int* [V], Kokkos::LayoutRight, Memory> bound_face;
-        Limiter limiter;
+        Rows fit;
+        Kokkos::View<int**, Kokkos::LayoutRight, Memory> flags;
         KOKKOS_INLINE_FUNCTION void operator()(int i) const {
+            constexpr int U = fit_size;
             const Geometry& geo = flux.geo;
-            const CellEntries e(geo, flux.prim, Rows(), i);
             const State Wi = primitive_row(flux.prim, i);
             const Gradient<D> gi = flux.stored_gradient(i);
             const Vec shift = Vec{} * (0.5 * flux.dt);
             State Wi_bar{};
             Gradient<D> gi_bar;
             for (int v = 0; v < V; ++v) gi_bar[v] = Vec{};
-            auto side = [&](int k) {
-                const int f = e.face(k);
+            for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
+                const int f = geo.face_at(k);
                 const Vec a = geo.area_of(f);
-                if (dot(a, a) == 0) return;
-                const int column = geo.owned_at(e.first + k, f, i) ? 0 : V;
+                if (dot(a, a) == 0) continue;
+                const int column = geo.owned_at(k, f, i) ? 0 : V;
                 const State mine = make_state<D>([&](int v) { return face_bar(f, column + v); });
                 const Vec r = geo.face_offset(f, i) + shift;
                 bool fallback;
                 FaceFlux<1, false>::side_value(Wi, gi, r, flux.dt, flux.gas, fallback);
                 FaceFlux<1, false>::side_adjoint(Wi, gi, r, flux.dt, flux.gas, mine, Wi_bar, gi_bar, fallback);
-            };
-            const GradientAdjoint adjoint = limited_gradient_adjoint(Wi, e, limiter, gi_bar, side);
+            }
+            // The gradient's adjoint, as limited_gradient_adjoint(), from the stored fit.
+            double Lc[U][U], xbar[V][U], b[V][U];
+            for (int p = 0; p < U; ++p)
+                for (int s = 0; s < U; ++s) Lc[p][s] = s <= p ? fit(i, FitRow::factor + p * U + s) : 0.0;
+            double self[V], bound[V];
+            int face[V];
             for (int v = 0; v < V; ++v) {
-                wbar(i, v) = Wi_bar[v] + adjoint.self[v];
-                for (int p = 0; p < fit_size; ++p) bbar(i, fit_size * v + p) = adjoint.b[v][p];
-                boundbar(i, v) = adjoint.bound[v];
-                bound_face(i, v) = adjoint.entry[v] < 0 ? -1 : e.face(adjoint.entry[v]);
+                const int flag = flags(i, v);
+                const Vec g0 = make_vec<D>([&](int a) { return fit(i, FitRow::g0 + D * v + a); });
+                Vec g0bar = gi_bar[v];
+                self[v] = 0;
+                bound[v] = 0;
+                face[v] = -1;
+                if ((flag & 1) && (flag & 4)) {
+                    g0bar = Vec{};
+                } else if (flag & 1) {
+                    const Vec o = make_vec<D>([&](int a) { return fit(i, FitRow::offset + D * v + a); });
+                    const double den = dot(g0, o);
+                    const double s = (fit(i, FitRow::bound + v) - Wi[v]) / den, t = dot(gi_bar[v], g0) / den;
+                    g0bar = gi_bar[v] * s - o * (s * t);
+                    bound[v] = t;
+                    face[v] = flags(i, V + v);
+                    self[v] -= t;
+                }
+                xbar[v][0] = 0;
+                for (int a = 0; a < D; ++a) xbar[v][1 + a] = g0bar[a];
+            }
+            solve_factored(Lc, xbar, b);  // M is symmetric: b bar = M^-1 x bar
+            for (int v = 0; v < V; ++v) {
+                for (int p = 0; p < U; ++p) self[v] -= fit(i, FitRow::row0 + p) * b[v][p];
+                wbar(i, v) = Wi_bar[v] + self[v];
+                for (int p = 0; p < U; ++p) bbar(i, U * v + p) = b[v][p];
+                boundbar(i, v) = bound[v];
+                bound_face(i, v) = face[v];
             }
         }
     };
@@ -1592,8 +1845,9 @@ public:
     };
 
     // Reverse mode: qbar = Q bar after the step on entry, before it on return (J^T qbar); Q stays the state at the start of the step,
-    // which the caller restores from a checkpoint. Recomputes the forward primitives and the sweep (production kernels, rows as stored),
-    // then AdjointFaces (once per face), AdjointCell, AdjointGather. No atomics: the same bits every run.
+    // which the caller restores from a checkpoint. Recomputes the forward primitives and the sweep (production Sweep, rows as stored;
+    // its SweepFitHook stores the double fit, 440 B a cell), then AdjointFaces (once per face), AdjointCell, AdjointGather.
+    // No atomics: the same bits every run.
     void step_adjoint(double dt, const Cells& qbar, Timings* timings = nullptr) {
         require_derivatives("step_adjoint");
         timer_.reset();
@@ -1603,9 +1857,13 @@ public:
         prims_ready_ = true;  // Q is unchanged
         swept_ = false;
         const Kokkos::RangePolicy<ExecSpace> cells(exec_, 0, n_);
-        Kokkos::parallel_for("hydro::sweep", cells,
-                             Sweep<false, true>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
-                                                magnitudes_valid_ ? magnitudes_ : Magnitudes()});
+        fit_rows(bar_fit_, "hydro_bar_fit", n_, FitRow::width);
+        if (static_cast<int>(fit_flags_.extent(0)) < n_)
+            fit_flags_ = Kokkos::View<int**, Kokkos::LayoutRight, Memory>(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_fit_flags")), n_, 2 * V);
+        Kokkos::parallel_for("hydro::sweep_with_fit", cells,
+                             Sweep<false, true, SweepFitHook<false>>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
+                                                                     magnitudes_valid_ ? magnitudes_ : Magnitudes(),
+                                                                     SweepFitHook<false>{Rows(), Rows(), prims_, geometry_, bar_fit_, fit_flags_}});
         phase_end(timings, &Timings::primitives);
         fit_rows(bar_w_, "hydro_bar_w", n_, V);
         fit_rows(bar_b_, "hydro_bar_b", n_, V * fit_size);
@@ -1616,7 +1874,7 @@ public:
         fit_rows(bar_face_, "hydro_bar_face", faces_, 2 * V);
         Kokkos::parallel_for("hydro::faces_adjoint", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), AdjointFaces{flux, qbar, bar_face_});
         phase_end(timings, &Timings::fluxes);
-        Kokkos::parallel_for("hydro::cell_adjoint", cells, AdjointCell{flux, bar_face_, bar_w_, bar_b_, bar_bound_, bound_face_, limiter_});
+        Kokkos::parallel_for("hydro::cell_adjoint", cells, AdjointCell{flux, bar_face_, bar_w_, bar_b_, bar_bound_, bound_face_, bar_fit_, fit_flags_});
         phase_end(timings, &Timings::sweep);
         Kokkos::parallel_for("hydro::update_adjoint", cells, AdjointGather{q_, qbar, bar_w_, bar_b_, bar_bound_, bound_face_, geometry_, gas_});
         phase_end(timings, &Timings::update);
@@ -1633,6 +1891,7 @@ private:
     bool both_meshes_;  // moving at order 1: step_moving()
     int n_, faces_ = 0;
     bool swept_ = false;
+    bool tangent_swept_ = false;  // time_step_tangent() also swept the tangents (dW, dg) for the next step_tangent()
     mutable bool prims_ready_ = false;  // the last update wrote prims_ for the current Q and mesh
     StepRule rule_ = StepRule::arepo;
     // |area| per face kept for the sweep (LUNA_NO_MAGNITUDES turns it off, for measurements).
@@ -1659,9 +1918,10 @@ private:
     Geometry geometry_;
     MeshStats mesh_stats_;
     // Derivative rows, allocated by the first step_tangent() / step_adjoint() (empty otherwise): tangents of W, g, the face fluxes;
-    // bars of W, the fit's b, each variable's bound and the face it came through, and of each face's two face states.
+    // bars of W, the fit's b, each variable's bound and the face it came through, of each face's two face states; the stored fit.
     Rows d_prims_, d_gradients_, d_fluxes_;
-    Rows bar_w_, bar_b_, bar_bound_, bar_face_;
+    Rows bar_w_, bar_b_, bar_bound_, bar_face_, bar_fit_;
+    Kokkos::View<int**, Kokkos::LayoutRight, Memory> fit_flags_;
     Kokkos::View<int* [V], Kokkos::LayoutRight, Memory> bound_face_;
 };
 

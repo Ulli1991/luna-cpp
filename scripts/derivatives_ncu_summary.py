@@ -7,7 +7,7 @@ import csv
 import sys
 from collections import OrderedDict
 
-KINDS = ("TangentPrimitives", "TangentSweep", "TangentFluxes", "TangentUpdate", "AdjointFaces", "AdjointCell", "AdjointGather",
+KINDS = ("TangentSweepHook", "TangentPrimitives", "TangentSweep", "TangentFluxes", "TangentUpdate", "AdjointFaces", "AdjointCell", "AdjointGather",
          "Sweep", "TimeStep")
 
 

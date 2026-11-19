@@ -435,30 +435,35 @@ struct HLL {
         const int cL = gas.gamma * L[D + 1] / L[0] > 0, cR = gas.gamma * R[D + 1] / R[0] > 0;
         return (b < a ? 0 : 1) | (B > A ? 0 : 2) | wave << 2 | cL << 4 | cR << 5;
     }
-    // dF = J (dL, dR) of flux(), n and w fixed; S_L and S_R take the derivative of the side min/max picked. Used by: FiniteVolume::step_tangent, tests.
+    // dF = J (dL, dR) of flux(), n and w fixed; S_L and S_R take the derivative of the side min/max picked. value: if given, flux()
+    // from the same intermediates (the same operations). Used by: FiniteVolume::step_tangent, tests.
     template <int D>
     KOKKOS_INLINE_FUNCTION static State<D> flux_tangent(const State<D>& L, const State<D>& R, const State<D>& dL, const State<D>& dR, Vec<D> n,
-                                                        Vec<D> w, const Gas& gas) {
+                                                        Vec<D> w, const Gas& gas, State<D>* value = nullptr) {
         const detail::Side<D, double> l = detail::side(L, n, w, gas), r = detail::side(R, n, w, gas);
         const detail::Side<D, double> dl = detail::side_tangent(L, dL, n, gas, l), dr = detail::side_tangent(R, dR, n, gas, r);
         const int pattern = branches(L, R, n, w, gas);
         const double SL = pattern & 1 ? l.vn - l.c : r.vn - r.c, dSL = pattern & 1 ? dl.vn - dl.c : dr.vn - dr.c;
         const double SR = pattern & 2 ? l.vn + l.c : r.vn + r.c, dSR = pattern & 2 ? dl.vn + dl.c : dr.vn + dr.c;
         const int wave = (pattern >> 2) & 3;
-        State<D> dF;
+        State<D> dF, F;
         if (wave == 1) {
+            F = l.F;
             dF = dl.F;
         } else if (wave == 2) {
+            F = r.F;
             dF = dr.F;
         } else {
             const double inv_dS = 1.0 / (SR - SL);
             for (int v = 0; v < D + 2; ++v) {
-                const double dU = r.U[v] - l.U[v], F = (SR * l.F[v] - SL * r.F[v] + SL * SR * dU) * inv_dS;
+                const double dU = r.U[v] - l.U[v];
+                F[v] = (SR * l.F[v] - SL * r.F[v] + SL * SR * dU) * inv_dS;
                 dF[v] = (dSR * l.F[v] + SR * dl.F[v] - dSL * r.F[v] - SL * dr.F[v] + (dSL * SR + SL * dSR) * dU + SL * SR * (dr.U[v] - dl.U[v]) -
-                         F * (dSR - dSL)) *
+                         F[v] * (dSR - dSL)) *
                         inv_dS;
             }
         }
+        if (value) *value = detail::to_lab(F, w);
         return detail::to_lab(dF, w);
     }
     // (Lbar, Rbar) = J^T Fbar of flux(): adds to Lbar and Rbar. Used by: FiniteVolume::step_adjoint, the derivative tests.
@@ -582,11 +587,12 @@ struct HLLC {
     KOKKOS_INLINE_FUNCTION static int branches(const State<D>& L, const State<D>& R, Vec<D> n, Vec<D> w, const Gas& gas) {
         return waves(L, R, n, w, gas).pattern;
     }
-    // dF = J (dL, dR) of flux(), n and w fixed: the derivative of the case flux() took; a guarded divisor has derivative 0.
+    // dF = J (dL, dR) of flux(), n and w fixed: the derivative of the case flux() took; a guarded divisor has derivative 0. value: if
+    // given, flux() from the same intermediates (the same operations).
     // Used by: FiniteVolume::step_tangent, the derivative tests.
     template <int D>
     KOKKOS_INLINE_FUNCTION static State<D> flux_tangent(const State<D>& L, const State<D>& R, const State<D>& dL, const State<D>& dR, Vec<D> n,
-                                                        Vec<D> w, const Gas& gas) {
+                                                        Vec<D> w, const Gas& gas, State<D>* value = nullptr) {
         constexpr int P = D + 1;
         const Waves<D> a = waves(L, R, n, w, gas);
         const bool left = a.pattern & 4, star = a.pattern & 8;
@@ -605,7 +611,10 @@ struct HLLC {
         const double vn = left ? a.vnL : a.vnR, dvn = left ? dvnL : dvnR;
         const detail::Side<D, double> s = detail::side_with(W, n, w, gas, vn);
         const detail::Side<D, double> ds = detail::side_with_tangent(W, dW, n, gas, s, dvn);
-        if (!star) return detail::to_lab(ds.F, w);
+        if (!star) {
+            if (value) *value = detail::to_lab(s.F, w);
+            return detail::to_lab(ds.F, w);
+        }
         const double S = left ? a.SL : a.SR, dS = left ? dSL : dSR, denom = left ? a.denomL : a.denomR, ddenom = left ? ddenomL : ddenomR;
         const double inv_side = left ? a.inv_rhoL : a.inv_rhoR, dinv_side = left ? dinvL : dinvR;
         const double q = nonzero(S - a.SM), dq = a.pattern & 256 ? 0.0 : dS - dSM;
@@ -616,14 +625,16 @@ struct HLLC {
         const double E_star = s.E * inv_side + a2 * a3;
         const double dE_star = ds.E * inv_side + s.E * dinv_side + da2 * a3 + a2 * da3;
         const Vec<D> v_star = s.v + n * a2, dv_star = ds.v + n * da2;
-        State<D> dF;
+        State<D> dF, F;
         for (int v = 0; v < D + 2; ++v) {
             const double U_star = v == 0 ? rho_star : v == P ? rho_star * E_star : rho_star * v_star[v - 1];
             const double dU_star = v == 0   ? drho_star
                                    : v == P ? drho_star * E_star + rho_star * dE_star
                                             : drho_star * v_star[v - 1] + rho_star * dv_star[v - 1];
+            F[v] = s.F[v] + S * (U_star - s.U[v]);
             dF[v] = ds.F[v] + dS * (U_star - s.U[v]) + S * (dU_star - ds.U[v]);
         }
+        if (value) *value = detail::to_lab(F, w);
         return detail::to_lab(dF, w);
     }
     // (Lbar, Rbar) = J^T Fbar of flux(): adds to Lbar and Rbar; only the case flux() took is differentiated, so an unselected

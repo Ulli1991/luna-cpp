@@ -390,7 +390,7 @@ HostCells smooth_state(const Points& points, const Kokkos::View<const double*, K
 // tangent against `reference`, the double policy's on the same mesh and state. Returns the tangent.
 template <class F>
 HostCells step_test(Check& check, const std::string& name, int n, int steps, double noise = 0.01, double h = 1e-6,
-                    const HostCells* reference = nullptr) {
+                    const HostCells* reference = nullptr, bool fused = true) {
     const hydro::Gas gas{5.0 / 3.0};
     const Points points = make_points_off_grid("jittered", n);
     typename F::Mesh mesh(Exec{}, 1.0);
@@ -427,10 +427,16 @@ HostCells step_test(Check& check, const std::string& name, int n, int steps, dou
     Kokkos::deep_copy(dqd, dq0);
     // The tangent run's own trajectory: the states its derivatives linearise at, and the adjoint's checkpoints.
     std::vector<HostCells> path;
+    bool same_dt = true;
     for (int s = 0; s < steps; ++s) {
         path.push_back(read(fv));
+        if (fused) {  // time_step_tangent: the sweep and its tangent in one kernel, and the same dt as time_step()
+            const double dt = fv.time_step_tangent(0.3, dqd);
+            if (s == 0) same_dt = dt == dts[0];  // later steps start from the tangent run's own Q (equal to rounding)
+        }
         fv.step_tangent(dts[s], dqd);
     }
+    if (fused) check.expect(same_dt, name + ": time_step_tangent gives time_step()'s dt");
     const HostCells forward = read(fv);
     HostCells tangent("tangent", n);
     Kokkos::deep_copy(tangent, dqd);
@@ -564,18 +570,19 @@ void cost(int n, const char* policy) {
         Kokkos::fence();
     });
     // As a run would: time_step() (sweep and dt), then the step with its tangent.
-    const double tangent = time([&] { fv.step_tangent(fv.time_step(0.3), dq); });
+    const double tangent = time([&] { fv.step_tangent(fv.time_step_tangent(0.3, dq), dq); });
+    const double unfused = time([&] { fv.step_tangent(fv.time_step(0.3), dq); });  // the tangent's sweep in a kernel of its own
     const double adjoint = time([&] {
         Kokkos::deep_copy(bar, 1.0);
         fv.step_adjoint(dt, bar);
     });
     hydro::Timings tt, ta;
     write(fv, q0);
-    fv.step_tangent(fv.time_step(0.3, &tt), dq, &tt);
+    fv.step_tangent(fv.time_step_tangent(0.3, dq, &tt), dq, &tt);
     write(fv, q0);
     fv.step_adjoint(dt, bar, &ta);
-    std::printf("cost n %d faces %d (%s): time_step+step %.3f ms (time_step alone %.3f), step_tangent %.3f (%.2fx), step_adjoint %.3f (%.2fx)\n",
-                n, fv.faces(), policy, forward, step_only, tangent, tangent / forward, adjoint, adjoint / forward);
+    std::printf("cost n %d faces %d (%s): time_step+step %.3f ms (time_step alone %.3f), step_tangent %.3f (%.2fx; unfused sweep %.3f, %.2fx), step_adjoint %.3f (%.2fx)\n",
+                n, fv.faces(), policy, forward, step_only, tangent, tangent / forward, unfused, unfused / forward, adjoint, adjoint / forward);
     std::printf("  tangent phases: primitives %.3f sweep %.3f fluxes %.3f update %.3f ms\n", tt.primitives, tt.sweep, tt.fluxes, tt.update);
     std::printf("  adjoint phases: forward recompute %.3f fluxes %.3f sweep %.3f gather %.3f ms\n", ta.primitives, ta.fluxes, ta.sweep, ta.update);
     hydro::Timings tf;
@@ -601,7 +608,7 @@ void profile(int n) {
         const double dt = fv.time_step(0.3);
         fv.step(dt);
         write(fv, q0);
-        fv.step_tangent(fv.time_step(0.3), dq);
+        fv.step_tangent(fv.time_step_tangent(0.3, dq), dq);
         write(fv, q0);
         Kokkos::deep_copy(bar, 1.0);
         fv.step_adjoint(dt, bar);
@@ -644,6 +651,7 @@ int main(int argc, char** argv) {
     const HostCells reference = step_test<FV>(check, "HLLC", 1000, 3);
     step_test<FVHLL>(check, "HLL", 1000, 1);
     step_test<FV>(check, "HLLC rough", 1000, 3, 0.3);
+    step_test<FV>(check, "HLLC unfused", 1000, 3, 0.01, 1e-6, nullptr, false);  // time_step, then step_tangent's own tangent sweep
     // The policies in use: grad16 (the 3D default) and grad32, rows as stored, the derivative in double.
     step_test<FV16>(check, "HLLC grad16", 1000, 3, 0.01, 1e-6, &reference);
     step_test<FV32>(check, "HLLC grad32", 1000, 3, 0.01, 1e-6, &reference);
