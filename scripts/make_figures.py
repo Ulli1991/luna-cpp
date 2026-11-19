@@ -1413,8 +1413,8 @@ def fig_super_end(n=SUPER_N):
 
 
 SUPER2_RUNS = os.environ.get("SUPER2_RUNS", os.path.join(HERE, "..", "build-tube2", "runs"))  # scripts/super_tube_v2_{run,gpu}.sh
-SUPER2_PENDING = {32768: 32522445}   # moving m0 to t = 4 still running when the figures were made
-SUPER2_STALL = {4096: "#30"}         # moving m0 to t = 4 stalled (stage L)
+SUPER2_PENDING = {}                  # moving m0 runs to t = 4 still running (job ids by N), when there are any
+SUPER2_STALL = {4096: "#30", 32768: "#30"}   # moving m0 to t = 4 stalled (stage L)
 
 
 def fig_super_v2(t, views, ylim, n=SUPER_N):
