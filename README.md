@@ -20,7 +20,7 @@ BSD 3-Clause, see [LICENSE](LICENSE).
 git clone --recursive https://github.com/Ulli1991/luna-cpp.git
 ```
 
-In an existing clone, run `git submodule update --init --recursive`. `extern/voronoi-cpp` holds the library's full source at a pinned commit, so it can be edited and committed from here. A build warns if the pin is behind voronoi-cpp `main`; the pin moves when luna-cpp needs a newer library (`git submodule update --remote extern/voronoi-cpp`, then commit). `-DLUNA_STRICT_PIN=ON` makes that warning stop the build. The pin is voronoi-cpp abd3d39 (main of 2026-11-18), moved from 6ead543 with the same bits in every 1D, 2D and 3D run checked ([TESTING.md](TESTING.md#moving-the-pin)).
+In an existing clone, run `git submodule update --init --recursive`. `extern/voronoi-cpp` holds the library's full source at a pinned commit, so it can be edited and committed from here. A build warns if the pin is behind voronoi-cpp `main`; the pin moves when luna-cpp needs a newer library (`git submodule update --remote extern/voronoi-cpp`, then commit). `-DLUNA_STRICT_PIN=ON` makes that warning stop the build. The pin is voronoi-cpp 1741a1a (main of 2026-11-18, its step-2x levers), moved from abd3d39: the mesh update is 9 to 10 % faster and the moving step 3.6 to 3.8 %, at 66 B/cell more. 1D, 2D and static 3D runs keep their bits; moving 3D runs differ in Q at rounding level with the same field errors ([TESTING.md](TESTING.md#moving-the-pin)).
 
 Dependencies:
 
@@ -84,8 +84,8 @@ sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 - **Precision.** 3D runs `grad32` by default: gradients and limiting in float, everything else in double, 8 to 12 % faster with no measurable loss of accuracy. 2D and 1D run in double.
 - **Bit-reproducible.** Every cell sums its faces in a fixed order, so an A100 run gives the same bits every time.
 - **Stuck mesh steps.** When the mesh's device repair leaves stuck entries, voronoi-cpp's default `Fallback::cheapest` clips the cells around them again on the device and stitches them in (local repair) up to n / 64 stuck entries, and rebuilds the mesh past that or when the local repair does not finish. Before abd3d39 a few stuck entries went to a host finish and more to a rebuild. `hydro_sedov` prints `stuck_steps`, `local_repairs`, `local_cells` and `rebuilds` in its `mesh_updates` line. Moving Sedov to 1e4 yr, two runs per pin: nothing stuck at 128³; at 256³ (919 steps) one run on abd3d39 had one step with 6 stuck entries, repaired locally (49 cells, no rebuild), and ended with the same bits as the runs that did not stick. Which step sticks follows the order of the device flips' atomics, so it changes from run to run.
-- **Static meshes keep only what a step reads.** After its set-up the hydro holds the mesh arrays a static step reads (face sides, face geometry, cell lists, cell volumes and centroids, positions) and scratch of its own (`FiniteVolume::release_mesh`), and `hydro_sedov` destroys the mesh with its tetrahedra, circumcentres, repair state, rings and face numbering: 1135 instead of 2366 B/cell during the steps, the same bits and speed; `--keep-mesh` keeps the whole mesh. The peak of the run is still the mesh build and set-up, 2106 B/cell.
-- **Mesh memory layout** (voronoi-cpp's `voronoi::Layout`, [#34](https://github.com/Ulli1991/voronoi-cpp/issues/34)). In 3D the cells' face lists carry the owner bit, so the hydro reads a face's side from the list; a static mesh also numbers its faces by owner (+135 B/cell). A moving mesh does not, because renumbering every step costs the mesh more than it saves the hydro ([#53](https://github.com/Ulli1991/voronoi-cpp/issues/53)). Same bits as without; `--plain-faces` turns both off. `--every=k` re-sorts the cells along `--curve` every k steps; the hydro carries its cell arrays across (`FiniteVolume::follow_resort`), and the run's bits change with the order.
+- **Static meshes keep only what a step reads.** After its set-up the hydro holds the mesh arrays a static step reads (face sides, face geometry, cell lists, cell volumes and centroids, positions) and scratch of its own (`FiniteVolume::release_mesh`), and `hydro_sedov` destroys the mesh with its tetrahedra, circumcentres, repair state, rings and face numbering: 1135 instead of 2366 B/cell during the steps, the same bits and speed; `--keep-mesh` keeps the whole mesh. The peak of the run is still the mesh build and set-up, 2172 B/cell (2106 before voronoi-cpp 1741a1a).
+- **Mesh memory layout** (voronoi-cpp's `voronoi::Layout`, [#34](https://github.com/Ulli1991/voronoi-cpp/issues/34)). In 3D the cells' face lists carry the owner bit, so the hydro reads a face's side from the list; a static mesh also numbers its faces by owner (+135 B/cell). A moving mesh does not, because renumbering every step costs the mesh more than it saves the hydro ([#53](https://github.com/Ulli1991/voronoi-cpp/issues/53)). Same bits as without; `--plain-faces` turns both off. `--every=k` re-sorts the cells along `--curve` every k steps; the hydro carries its cell arrays across (`FiniteVolume::follow_resort`), and the run's bits change with the order. Re-sorting is off unless asked for (`FiniteVolume::no_resort`), although voronoi-cpp's own default is every 25 updates: in whole Sedov runs a re-sort makes the hydro 6 to 8 % faster but itself costs about one step, and at 256³ moving it runs out of memory (research note `moving_structure_2026-11-18.md`, branch `moving-structure`).
 
 ## Results in 1D
 
@@ -231,21 +231,21 @@ A slice through the 3D mesh at 1e4 yr. The moving cells gather in the shell and 
 
 ## Speed
 
-Ours measured on one A100 with voronoi-cpp abd3d39, SM clock 1305 MHz (sampled every second through the job), Sedov 3D, 40 steps, the median step (static: the wall time of a step; moving: its fenced phases; jobs 32525301 and 32526178, 2026-11-18). LUNA (Sedov 3D, minmod, HLLC, its Pallas kernel, snapshots off) ran on the same GPU type in another job. G cell updates per second, a cell update being one whole step of one cell; jobs and the remaining rows are in [docs/measurements.md](docs/measurements.md).
+Ours measured on one A100, SM clock 1305 MHz (sampled every second through the job), Sedov 3D, 40 steps, the median step (static: the wall time of a step; moving: its fenced phases). Static and the hydro part: voronoi-cpp abd3d39, jobs 32525301 and 32526178; the moving whole step and memory: voronoi-cpp 1741a1a, job 32540742 (2026-11-18; the hydro part does not change with the pin). LUNA (Sedov 3D, minmod, HLLC, its Pallas kernel, snapshots off) ran on the same GPU type in another job. G cell updates per second, a cell update being one whole step of one cell; jobs and the remaining rows are in [docs/measurements.md](docs/measurements.md).
 
 | G cell updates/s | 128³ | 256³ |
 |---|---|---|
 | static mesh, HLLC | 0.226 | 0.233 |
-| moving mesh, whole step with the mesh update | 0.083 | 0.090 |
+| moving mesh, whole step with the mesh update | 0.086 | 0.093 |
 | moving mesh, the hydro part | 0.132 | 0.136 |
 | LUNA FP64 | 0.82 | 1.04 |
 | LUNA FP32 | 1.46 | 2.35 |
-| GPU memory, ours, moving | 2301 B/cell (4.8 GB) | 2301 B/cell (38.6 GB) |
+| GPU memory, ours, moving | 2366 B/cell (5.0 GB) | 2366 B/cell (39.7 GB) |
 | GPU memory, ours, static | 1135 B/cell (2.4 GB) | 1135 B/cell (19.0 GB) |
 | GPU memory, LUNA FP64 | 113 B/cell (0.24 GB) | 80 B/cell (1.34 GB) |
 | GPU memory, LUNA FP32 | | 40 B/cell (0.68 GB) |
 
-Per face the gap is smaller: a LUNA cell has 3 faces of its own, ours 7.95, so our static hydro runs 1.80 G face fluxes/s at 128³ against LUNA's 2.46 G in FP64, 73 % of its rate. LUNA's default XLA kernel runs 0.48 FP64 at 128³, the 0.47 earlier versions of this table quoted. Moving Sedov 128³ takes 9.46 GPU seconds to 1e4 yr (349 steps; 9.72 before the levers of 2026-11-18, job 32525893).
+Per face the gap is smaller: a LUNA cell has 3 faces of its own, ours 7.95, so our static hydro runs 1.80 G face fluxes/s at 128³ against LUNA's 2.46 G in FP64, 73 % of its rate. LUNA's default XLA kernel runs 0.48 FP64 at 128³, the 0.47 earlier versions of this table quoted. Moving Sedov 128³ takes 9.10 GPU seconds to 1e4 yr (349 steps; 9.43 on voronoi-cpp abd3d39, job 32540742; 9.72 before the levers of 2026-11-18, job 32525893).
 
 Memory is in bytes per cell and in GB of 10⁹ bytes throughout. Ours is the peak of all the arrays the code allocates during a step; LUNA's is what JAX reports in use at a progress line (LUNA prints it in GiB, converted here), so it is not a peak and the two measure slightly different things.
 
@@ -293,7 +293,7 @@ CI (`.github/workflows/checks.yml`) runs clang-tidy (ordinary build) and the CPU
 - **1D moving mesh:** Woodward-Colella stalls near N = 2¹⁵; nothing removes points where gas leaves through an open wall.
 - **2D and 3D moving mesh on smooth flow:** on a jittered mesh, which the regularisation relaxes, the density carries an error that does not fall with N: about 3e-8 in 2D (jitter 0.4) and 1.5e-6 in 3D (jitter 0.25), the same with or without the grid fix, so not rounding; its cause is open. It is invisible at the usual amplitudes and decides the error of a 1e-3 sound wave in 3D from nx = 96. On a lattice the moving mesh equals static.
 - **Boxes:** periodic only in 3D and 2D; only 1D has walls.
-- **Memory:** a static run peaks at 2106 B/cell while the mesh is built and the hydro set up, though its steps need 1135; `--precision=mixed` does not fit a moving 256³ run on a 40 GB A100; a forced rebuild beside a moving 256³ run runs out of memory ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)).
+- **Memory:** a moving 256³ run uses 41.3 of the 42.4 GB of a 40 GB A100 (2366 B/cell); a re-sort (`--every`) does not fit beside it; a static run peaks at 2172 B/cell while the mesh is built and the hydro set up, though its steps need 1135; `--precision=mixed` does not fit a moving 256³ run on a 40 GB A100; a forced rebuild beside a moving 256³ run runs out of memory ([#11](https://github.com/Ulli1991/luna-cpp/issues/11)).
 - **Bits:** CPU builds can differ from the GPU in the last bits for some modes; A100 runs are identical run to run.
 - **Open bugs:** stuck flips at 256³ ([#8](https://github.com/Ulli1991/luna-cpp/issues/8): still seen, now handled. Moving Sedov 256³ to 1e4 yr sticks now and then: in one of four runs here, one step with 6 stuck entries. Since abd3d39 voronoi-cpp repairs such a step locally on the device, and that run ended with the same bits as the others. Why the repair sticks is not investigated.); NaN from zero-area faces on an exact lattice ([#6](https://github.com/Ulli1991/luna-cpp/issues/6)). Mesh bugs are listed in the [voronoi-cpp README](https://github.com/Ulli1991/voronoi-cpp#limitations-and-open-items).
 
