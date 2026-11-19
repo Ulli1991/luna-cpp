@@ -817,8 +817,9 @@ public:
             const Vec c = geo.face_centroid_of(f) - d * 0.5;
             const double inv_dist = 1.0 / dist;
             double facv = dot(c, wL - wR) * inv_dist;
-            const double cc = Kokkos::sqrt(dot(c, c));
-            if (cc > 0.9 * dist) facv *= 0.9 * dist / cc;
+            // |c| only where the limit applies: the squares compared, one double square root a face fewer.
+            const double limit = 0.9 * dist, c2 = dot(c, c);
+            if (c2 > limit * limit) facv *= limit / Kokkos::sqrt(c2);
             return (wL + wR) * 0.5 + d * (facv * inv_dist);
         }
         // The Riemann solve along the unit normal n; float: in the face's frame, the flux back in the lab frame in double.
