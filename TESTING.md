@@ -102,4 +102,5 @@ static and moving on CPU cores, and `scripts/super_tube_v2_gpu.sh` runs them on 
 2^20 at t = 4, positivity, budgets and stops, a figure per stage, the final states for luna-reference-solutions, and initial cells for
 other codes. LUNA runs with its positivity floors on (`FLOOR=1`, `luna_1d_run.py floor=1`); without them it goes NaN in the Noh stage
 after t = 0.32 at N = 4096 and 32768. The moving mesh cannot run the tube (#14, #29): `super-tube-v2-m0`, the tube without stage M's
-stream, stands in for it. Results: research_notes/super_tube_v2_2026-11-18.md (moving to t = 4 pending).
+stream, stands in for it; it stalls in stage L at t = 0.81 at N = 4096 (#30). Results: research_notes/super_tube_v2_2026-11-18.md
+(moving to t = 4 at N = 32768 pending).

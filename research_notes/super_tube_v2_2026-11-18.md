@@ -1,7 +1,8 @@
 # The super-hard 1D tube, v2 (2026-11-18)
 
-**Preliminary**: the moving mesh's runs to t = 4 (m0 tube, N = 4096 and 32768, SLURM 32522444 and 32522445 on gpu1) were still running when
-this went in; their rows follow in a later commit. Everything else here is measured and final.
+**Preliminary**: the moving mesh's run to t = 4 at N = 32768 (m0 tube, SLURM 32522445 on gpu1) was still running when this went in; its
+column follows in a later commit. The run at 4096 (SLURM 32522444) stalled in stage L at t = 0.809 (#30). Everything else here is measured
+and final.
 
 Branch super-tube-v2 (from main 2d08e1e, merged with main 73f763a and 68d1e65). [M] measured, [I] inference.
 v1: research_notes/super_tube_2026-11-10.md. v2 keeps v1's stages A to H unchanged and adds five of the hardest known 1D problems.
@@ -114,10 +115,13 @@ Tables: reports/super_tube_v2_tube.md and reports/super_tube_v2_single.md (`scri
 |---|---|---|
 | luna-cpp moving | 4096 (A100) | stops at t = 0.00126 after 32 steps: stage M's end cell collapses at the open wall (#14) |
 | luna-cpp moving | 4096 (one core), 32768 | the same collapse, but the run carries on: NaN spreads from the wall cell by 2 cells a step; every cell is NaN at step 16428 (t = 0.0437, 32768); the next step jumps to t_end, and the run reports reached = 1 at t = 0.1 and at t = 4 (#29, filed) |
+| luna-cpp moving, m0 | 4096 (A100) | stalls in stage L: t = 0.809 after 428.6 million steps when the 12 h job ended (mean dt 1.9e-9). 96 cells are squeezed into a layer 2.6e-5 wide (2.7e-3 h together, the smallest 3.2e-6 h) at x = 14.9071, a contact at uniform P = 5.108 and v = −1.604. That is #25's kind of collapse, now in stage L (#30, filed). Stage L alone to t = 0.1 keeps 0.045 h |
+| luna-cpp moving, m0 | 32768 (A100) | running (SLURM 32522445, 24 h limit) |
 | LUNA, floors on | 4096, 32768, 2^20 | reaches t = 4: 12953 and 106188 steps (luna-cpp static's counts), 5828783 steps in 3695 s on one A100 for 2^20; ρ and P positive |
 | luna-cpp static | 4096 to 2^20 | reaches t = 4 at every N, ρ and P positive (min ρ 0.032, min P 0.15 at t = 4) |
 
-So stage M stops the moving mesh, and no stage stops LUNA or luna-cpp static when floors are on. Stage N needs them; see "LUNA and its
+So stage M stops the moving mesh at once; without M, stage L stalls it at t = 0.81 (N = 4096). No stage stops LUNA or luna-cpp static when
+floors are on. Stage N needs them; see "LUNA and its
 floors".
 
 ### t₁ = 0.1: L1(ρ) per stage
@@ -162,19 +166,20 @@ serves for both. Moving is the m0 tube; at t₁ its stages A and on are those of
 | A | 6.77e-4 | 1.34e-4 | 6.77e-4 | 1.34e-4 | - | - | 2.69e-6 | 4.6e-12 |
 | B | 7.71e-4 | 8.52e-5 | 7.71e-4 | 8.52e-5 | - | - | 3.80e-6 | 9.2e-12 |
 | C | 5.89e-3 | 1.20e-3 | 5.89e-3 | 1.20e-3 | - | - | 5.14e-5 | 1.2e-7 |
-| C2 | 1.23 | 2.92e-1 | 1.23 | 2.92e-1 | pending | pending | 1.94e-2 | 1.7e-4 |
-| D | 1.04 | 2.57e-1 | 1.04 | 2.57e-1 | pending | pending | 2.41e-2 | 9.4e-4 |
-| E | 2.49e-1 | 7.22e-2 | 2.49e-1 | 7.22e-2 | pending | pending | 5.81e-3 | 2.0e-4 |
-| L | 1.47e-1 | 5.52e-2 | 1.47e-1 | 5.53e-2 | pending | pending | 4.95e-3 | 2.0e-4 |
-| F | 9.54e-1 | 4.29e-1 | 9.54e-1 | 4.29e-1 | pending | pending | 3.45e-2 | 3.5e-4 |
-| SO | 3.07e-1 | 7.92e-2 | 3.07e-1 | 7.92e-2 | pending | pending | 5.12e-3 | 6.7e-5 |
-| N | 3.27e-2 | 1.26e-2 | 3.27e-2 | 1.26e-2 | pending | pending | 1.03e-3 | 1.2e-5 |
-| S | 4.37e-1 | 1.31e-1 | 4.37e-1 | 1.31e-1 | pending | pending | 1.30e-2 | 1.8e-4 |
-| G | 5.76e-1 | 1.53e-1 | 5.76e-1 | 1.53e-1 | pending | pending | 1.28e-2 | 2.9e-4 |
-| V | 7.98e-2 | 2.21e-2 | 7.98e-2 | 2.21e-2 | pending | pending | 1.61e-3 | 1.4e-5 |
-| H | 2.20e-1 | 5.42e-2 | 2.20e-1 | 5.42e-2 | pending | pending | 3.21e-3 | 7.4e-6 |
+| C2 | 1.23 | 2.92e-1 | 1.23 | 2.92e-1 | stalled at t = 0.81 (#30) | pending | 1.94e-2 | 1.7e-4 |
+| D | 1.04 | 2.57e-1 | 1.04 | 2.57e-1 | stalled at t = 0.81 (#30) | pending | 2.41e-2 | 9.4e-4 |
+| E | 2.49e-1 | 7.22e-2 | 2.49e-1 | 7.22e-2 | stalled at t = 0.81 (#30) | pending | 5.81e-3 | 2.0e-4 |
+| L | 1.47e-1 | 5.52e-2 | 1.47e-1 | 5.53e-2 | stalled at t = 0.81 (#30) | pending | 4.95e-3 | 2.0e-4 |
+| F | 9.54e-1 | 4.29e-1 | 9.54e-1 | 4.29e-1 | stalled at t = 0.81 (#30) | pending | 3.45e-2 | 3.5e-4 |
+| SO | 3.07e-1 | 7.92e-2 | 3.07e-1 | 7.92e-2 | stalled at t = 0.81 (#30) | pending | 5.12e-3 | 6.7e-5 |
+| N | 3.27e-2 | 1.26e-2 | 3.27e-2 | 1.26e-2 | stalled at t = 0.81 (#30) | pending | 1.03e-3 | 1.2e-5 |
+| S | 4.37e-1 | 1.31e-1 | 4.37e-1 | 1.31e-1 | stalled at t = 0.81 (#30) | pending | 1.30e-2 | 1.8e-4 |
+| G | 5.76e-1 | 1.53e-1 | 5.76e-1 | 1.53e-1 | stalled at t = 0.81 (#30) | pending | 1.28e-2 | 2.9e-4 |
+| V | 7.98e-2 | 2.21e-2 | 7.98e-2 | 2.21e-2 | stalled at t = 0.81 (#30) | pending | 1.61e-3 | 1.4e-5 |
+| H | 2.20e-1 | 5.42e-2 | 2.20e-1 | 5.42e-2 | stalled at t = 0.81 (#30) | pending | 3.21e-3 | 7.4e-6 |
 
-The moving columns are **pending**: jobs 32522444 (4096) and 32522445 (32768). They are scored on C2 to H only: by t = 4 stage M changes
+Moving (m0) at 4096 has no t = 4 state: it stalled at t = 0.809 (#30); the 32768 column is **pending** (job 32522445). It is scored on
+C2 to H only: by t = 4 stage M changes
 the regions of M, A, B and C (static 32768, max |Δρ| between v2 and m0: 0.74, 0.55, 0.32, 0.08) and nothing after them (≤ 1e-12). LUNA
 with its floors equals luna-cpp static to 7e-12 at 4096 and to L1(ρ) 1.5e-3 at 32768 over the tube (max |Δρ| 9e-3).
 
@@ -208,14 +213,15 @@ An earlier draft of this note said stage N breaks LUNA because LUNA has no press
 | stage | LUNA (floors on) | luna-cpp static | luna-cpp moving |
 |---|---|---|---|
 | M Mach 1e4 out through the open wall | runs; rear edge heats to 1e4-1e5 P₀ | the same | **fails at once** (#14); in the tube the NaN state is reported as reached (#29) |
-| L 1e6 / 1e12 jump | runs, positive | runs | runs; 2.6× better than static at t₁ (32768) |
+| L 1e6 / 1e12 jump | runs, positive | runs | runs to t₁, 2.6× better than static there (32768); in the tube **stalls at t = 0.81** (4096, m0): points collapse onto a contact (#30) |
 | SO Shu-Osher | runs | runs | runs; level with static (alone 1.3× worse) |
 | N Noh streams | runs; without its floors NaN at t ≈ 0.32 (negative P at the cold-stream shock). At t₁, 4096, it overshoots to ρ = 9.2 where the streams meet (exact 6) | runs (floors) | runs; 4.3× better at t₁ (32768) |
 | V true vacuum | runs; ρ down to 1.8e-3 at 32768, alone (exact 0) | runs | runs; 3.1× better at t₁ (32768) |
 
 ## Open
 
-- Moving to t = 4 (m0) at 4096 and 32768: jobs 32522444 and 32522445 still running; their columns go into the t = 4 table.
+- Moving to t = 4 (m0) at 32768: job 32522445 still running; its column goes into the t = 4 table. 4096 stalled at t = 0.809 (#30).
+- #30: points collapsing onto a contact in stage L (as #25 at stage E).
 - #14: a wall that gas leaves through must remove cells. Until then, the moving mesh cannot run v2 as defined.
 - #29: a non-finite state must stop the run.
 - An independent reference at 2^20 (AthenaK) for t = 4. AREPO and GIZMO runs of v2 (the next step) from the initial cells in

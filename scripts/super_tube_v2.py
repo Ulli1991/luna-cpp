@@ -305,7 +305,8 @@ def figures(runs, singles, out):
                             notes.append(f"moving (m0): pending (job {PENDING[n]})")
                         continue
                     if not r[2]["reached"] or not np.isfinite(r[2]["t"]):
-                        notes.append(f"{style[s]['label']}{tag}: stopped at t = {r[2]['t']:.3g}" if np.isfinite(r[2]["t"]) else
+                        stall = " (stall in L, luna-cpp #30)" if tag and t == "4" else ""
+                        notes.append(f"{style[s]['label']}{tag}: stopped at t = {r[2]['t']:.3g}{stall}" if np.isfinite(r[2]["t"]) else
                                      f"{style[s]['label']}{tag}: NaN after {r[2]['steps']} steps")
                         continue
                     if not np.isfinite(r[1]).all():
