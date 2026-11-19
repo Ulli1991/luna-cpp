@@ -211,6 +211,52 @@ Bits: equal to main for all eight Sedov cases, the 3D vortex and both sound wave
 
 Not tried, and why: a compact per-face struct shared by both halves (the halves read different meshes, and float geometry is the `mixed` preset, which loses the 1e-6 sound wave); fusing the update with anything (each neighbour kernel needs all faces' fluxes first; the update is at its gather floor for 40 B rows; storing fluxes by owner was lever 1 above, refuted).
 
+### Precision levers of 2026-11-19
+
+The safe precision levers of `research_notes/moving_structure_2026-11-18.md` (branch `moving-structure`), approved by the owner: one per commit on branch `precision-levers` from `pin-1741a1a` (voronoi-cpp 1741a1a), each gated on the 3D sound wave of amplitude 1e-6. One A100 40 GB at 1305 MHz (application clock, logged by every job), Sedov 3D jittered moving, HLLC. Each lever is measured against the tree before it; the trees l1b, l2b, l3b are detached builds of the branch's commits with the multiply below (the branch's own history has lever 1 with a division first, then the multiply). Logs: `/raven/u/uli/voronoi-cpp-joblogs/precision-levers/`.
+
+The levers: (1) each point's move over the step as int32 grid steps (`Steps`, 12 B a cell) instead of the quantised w (24 B), the flux passes and the drift reading the steps; (2) face centroids of a moving mesh as float relative to the owner (`Layout::float_centroids`, 12 B a face instead of 24); (3) FP16 gradient rows as the 3D default (`grad16`, 32 B a row instead of 64); (4) the sound speed and radius of a primitive row as two floats in one slot (48 B a row instead of 56).
+
+**Speed** (job 32545389; 40 steps, three rounds, trees alternating; fenced phases, ms per step, means of the round medians; the rounds agree within 0.1 ms at 128³ and 0.5 ms at 256³):
+
+| tree | 128³ step | sweep | fluxes | update | mesh + cells | 256³ step | sweep | fluxes | update | mesh + cells |
+|---|---|---|---|---|---|---|---|---|---|---|
+| base (pin 1741a1a, `grad32`) | 24.44 | 5.47 | 6.13 | 4.25 | 8.43 | 180.14 | 43.50 | 47.96 | 32.44 | 55.08 |
+| + int32 steps (l1b) | 24.16 | 5.47 | 5.80 | 4.26 | 8.50 | 177.42 | 43.48 | 45.42 | 32.44 | 55.12 |
+| + float face centroids (l2b) | 23.66 | 5.58 | 5.38 | 4.26 | 8.32 | 173.27 | 44.12 | 42.00 | 32.44 | 53.75 |
+| + FP16 gradients (l3b) | 23.17 | 5.40 | 5.05 | 4.26 | 8.34 | 169.59 | 42.67 | 39.83 | 32.44 | 53.70 |
+| + float c and r (l4b, the branch tip) | 23.28 | 5.51 | 5.03 | 4.23 | 8.37 | 170.14 | 43.58 | 39.57 | 32.28 | 53.75 |
+
+Per lever, whole step at 128³ / 256³: int32 steps −1.1 % / −1.5 %; float face centroids −2.1 % / −2.3 % (the fluxes and the mesh's cell sums read less; the sweep +2 %); FP16 gradients −2.1 % / −2.1 %; float c and r +0.4 % / +0.3 % (the sweep unpacks them). Together −4.7 % / −5.5 %; without the fourth −5.2 % / −5.9 %. In G cell updates/s, the moving step goes 0.0858 → 0.0901 (128³) and 0.0931 → 0.0986 (256³).
+
+Lever 1 with a division (w = steps · grid step / dt per component, which keeps the bits of the stored w exactly) made the flux passes 33 % slower (6.12 → 8.13 ms at 128³, 47.9 → 64.0 at 256³; job 32543982): up to 18 double divisions a face in pass 2. One multiply by the step's unit (grid step / dt, divided once on the host) removes it; the bits then change at rounding level.
+
+**Whole runs to 1e4 yr** (jobs 32545390, 32545391; G cell updates/s from the median step wall, GPU s over the run, peak B/cell of the steps, GPU memory in use, field L1 of rho, v_r, P):
+
+| tree | 128³ G | GPU s | B/cell | L1 | 256³ G | GPU s | B/cell, GB in use | L1 |
+|---|---|---|---|---|---|---|---|---|
+| base | 0.0808 | 9.21 | 2366 | 0.06479, 0.02099, 0.01702 | 0.0874 | 176.9 | 2366, 41.28 | 0.03774, 0.01074, 0.00990 |
+| l1b | 0.0820 | 8.97 | 2378 | same | 0.0892 | 174.2 | 2378, 41.49 | same |
+| l2b | 0.0829 | 8.83 | 2280 | same | 0.0909 | 171.1 | 2379, 39.84 | same |
+| l3b | 0.0845 | 8.68 | 2252 | 0.06481, 0.02102, 0.01702 | 0.0924 | 168.6 | 2252, 39.37 | 0.03774, 0.01075, 0.00990 |
+| l4b | 0.0842 | 8.69 | 2244 | 0.06480, 0.02101, 0.01702 | 0.0921 | 169.0 | 2343, 39.23 | 0.03774, 0.01075, 0.00990 |
+
+Fallbacks (face sides that took the cell's state): 163,824 at 128³ through l2b, 175,033 with FP16 gradients (+6.8 %); 256³ 1,488,468 → 1,591,036 (+6.9 %). The 256³ peak of l2b and l4b (2379, 2343 B/cell) is above their 128³ peak, while the GPU memory in use falls; a transient, not investigated. Static 128³ to 1e4 yr at the tip (job 32545393): field L1 0.07757, 0.02996, 0.02159 as before, positions and volumes equal, Q at rounding level, 1099 instead of 1135 B/cell, 0.2271 against 0.2253 G.
+
+**Accuracy gate** (job 32545392; 3D vortex 64 L1 of rho, v, P against the cell averages; sound wave 64, L1(rho)/amplitude):
+
+| tree | vortex moving | vortex static | sound 1e-3 moving / static | sound 1e-6 moving / static |
+|---|---|---|---|---|
+| base | 4.426e-4, 1.246e-3, 6.196e-4 | 4.983e-4, 1.590e-3, 7.396e-4 | 4.3191e-3 / 4.3222e-3 | 3.6837e-3 / 3.6837e-3 |
+| l1b, l2b | the same | the same | the same | the same |
+| l3b, l4b | 4.425e-4, 1.246e-3, 6.196e-4 | 4.982e-4, 1.589e-3, 7.394e-4 | 4.3194e-3 / 4.3221e-3 | 3.6839e-3 / 3.6840e-3 |
+
+Every lever keeps the 1e-6 wave. KH 2D 512 to t = 1.5 (job 32545410): static the same hash and M = 0.147880523; moving with int32 steps differs at rounding level (the 2D moving step shares the code).
+
+**A bug caught by the gate:** lever 2 as first committed (192ac75) tested the float rows by `data()`; a static mesh's zero-row view can hold a pointer, so static runs read empty float rows and the static sound wave blew up (L1/amp 36-39, job 32541499). 3b9571e tests the extent; the static rows above are with the fix.
+
+**Tests:** A100 ctest 5 of 5 (job 32545395). On the host (CI's steps, job 32545396) `hydro` failed one check with sanitizers off and on: the Galilean test, cell by cell, 2.02e-6 against its 1e-6 bound. One host build per tree (job 32572255): 4.2e-8 with int32 steps and with float centroids, 2.02e-6 with FP16 gradients (A100 2.2e-7). A rounding difference between the frames can flip an FP16 rounding (2^-11 of its group), and the blast grows it. d02d022 gives FP16 rows the bound 1e-5 and keeps 1e-6 for `grad32` (whose moving tests stay in) and double. The radial profiles of the same test stay within 1e-9.
+
 ### Hydro levers of 2026-11-18
 
 The levers of the profile of 2026-11-18 (branch `profile-2026-11-18`, `research_notes/profile_2026-11-18.md`), on branch `hydro-speed-2` from main `73f763a` (voronoi-cpp `abd3d39`). One A100 40 GB, application clock 1305 MHz (logged by every job), Sedov 3D jittered, HLLC, `grad32`, 40 steps, phase medians with `--phases` (fenced) unless a row says wall. Each row in [tried.md](tried.md). Experiments ran from one binary with the variant chosen by an environment variable (not kept), against main's binary in the same job.

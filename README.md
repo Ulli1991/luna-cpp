@@ -81,7 +81,7 @@ sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 - **MUSCL-Hancock.** Least-squares gradients of the primitive variables, limited at the face centroids as in AREPO, a half step in time, then HLLC (default) or HLL along each face normal, with one global time step (AREPO next generation's face and cell terms, taken in one reduction).
 - **Moving mesh.** Points follow the gas, with a small drift towards their cell centroids that keeps cells round. The mesh is repaired every step, and fluxes go through the moving faces. MUSCL-Hancock on a moving mesh takes the fluxes on the old mesh, half applied, moves the mesh, then takes them on the new mesh, half applied; that is the only moving step, in 1D, 2D and 3D. A single flux at the half step, an option until November 2026, is first order on a moving mesh and is gone. Points move by whole steps of the grid the mesh quantises them to, and the face velocities come from those moves, so rounding no longer makes a cell's volume change differ from what its faces swept ([#23](https://github.com/Ulli1991/luna-cpp/issues/23)).
 - **Timing.** `hydro_sedov --phases` fences and times each phase of a step (the `phases_ms_median` and `throughput_M_per_s` lines); by default a step runs with no fences inside it and is timed whole (`step_wall_ms_median` and `G_cell_updates_per_s` in the `run` line; `gpu_s` sums those).
-- **Precision.** 3D runs `grad32` by default: gradients and limiting in float, everything else in double, 8 to 12 % faster with no measurable loss of accuracy. 2D and 1D run in double.
+- **Precision.** 3D runs `grad16` by default: gradients and limiting in float with the gradient rows stored as FP16, everything else in double, except what the hydro only reads as offsets or step terms: on a moving mesh the face centroids are stored as float relative to the owner, each point's move as int32 grid steps, and the sound speed and radius as floats. Against `grad32` the moving step is 4.7 % (128³) and 5.5 % (256³) faster, with the field errors unchanged to three or four digits and a sound wave of amplitude 1e-6 kept (docs/measurements.md, "Precision levers of 2026-11-19"). 2D and 1D run in double.
 - **Bit-reproducible.** Every cell sums its faces in a fixed order, so an A100 run gives the same bits every time.
 - **Stuck mesh steps.** When the mesh's device repair leaves stuck entries, voronoi-cpp's default `Fallback::cheapest` clips the cells around them again on the device and stitches them in (local repair) up to n / 64 stuck entries, and rebuilds the mesh past that or when the local repair does not finish. Before abd3d39 a few stuck entries went to a host finish and more to a rebuild. `hydro_sedov` prints `stuck_steps`, `local_repairs`, `local_cells` and `rebuilds` in its `mesh_updates` line. Moving Sedov to 1e4 yr, two runs per pin: nothing stuck at 128³; at 256³ (919 steps) one run on abd3d39 had one step with 6 stuck entries, repaired locally (49 cells, no rebuild), and ended with the same bits as the runs that did not stick. Which step sticks follows the order of the device flips' atomics, so it changes from run to run.
 - **Static meshes keep only what a step reads.** After its set-up the hydro holds the mesh arrays a static step reads (face sides, face geometry, cell lists, cell volumes and centroids, positions) and scratch of its own (`FiniteVolume::release_mesh`), and `hydro_sedov` destroys the mesh with its tetrahedra, circumcentres, repair state, rings and face numbering: 1135 instead of 2366 B/cell during the steps, the same bits and speed; `--keep-mesh` keeps the whole mesh. The peak of the run is still the mesh build and set-up, 2172 B/cell (2106 before voronoi-cpp 1741a1a).
@@ -231,21 +231,21 @@ A slice through the 3D mesh at 1e4 yr. The moving cells gather in the shell and 
 
 ## Speed
 
-Ours measured on one A100, SM clock 1305 MHz (sampled every second through the job), Sedov 3D, 40 steps, the median step (static: the wall time of a step; moving: its fenced phases). Static and the hydro part: voronoi-cpp abd3d39, jobs 32525301 and 32526178; the moving whole step and memory: voronoi-cpp 1741a1a, job 32540742 (2026-11-18; the hydro part does not change with the pin). LUNA (Sedov 3D, minmod, HLLC, its Pallas kernel, snapshots off) ran on the same GPU type in another job. G cell updates per second, a cell update being one whole step of one cell; jobs and the remaining rows are in [docs/measurements.md](docs/measurements.md).
+Ours measured on one A100, SM clock 1305 MHz (sampled every second through the job), Sedov 3D, 40 steps, the median step (static: the wall time of a step; moving: its fenced phases). Static: voronoi-cpp abd3d39, jobs 32525301 and 32526178; moving (whole step, hydro part): voronoi-cpp 1741a1a and the default `grad16` with the precision levers, job 32545389 (2026-11-19; the application clock logged, not sampled), memory from the whole runs, jobs 32545390 and 32545391. LUNA (Sedov 3D, minmod, HLLC, its Pallas kernel, snapshots off) ran on the same GPU type in another job. G cell updates per second, a cell update being one whole step of one cell; jobs and the remaining rows are in [docs/measurements.md](docs/measurements.md).
 
 | G cell updates/s | 128³ | 256³ |
 |---|---|---|
 | static mesh, HLLC | 0.226 | 0.233 |
-| moving mesh, whole step with the mesh update | 0.086 | 0.093 |
-| moving mesh, the hydro part | 0.132 | 0.136 |
+| moving mesh, whole step with the mesh update | 0.090 | 0.099 |
+| moving mesh, the hydro part | 0.142 | 0.145 |
 | LUNA FP64 | 0.82 | 1.04 |
 | LUNA FP32 | 1.46 | 2.35 |
-| GPU memory, ours, moving | 2366 B/cell (5.0 GB) | 2366 B/cell (39.7 GB) |
+| GPU memory, ours, moving | 2244 B/cell (4.7 GB) | 2343 B/cell (39.3 GB) |
 | GPU memory, ours, static | 1135 B/cell (2.4 GB) | 1135 B/cell (19.0 GB) |
 | GPU memory, LUNA FP64 | 113 B/cell (0.24 GB) | 80 B/cell (1.34 GB) |
 | GPU memory, LUNA FP32 | | 40 B/cell (0.68 GB) |
 
-Per face the gap is smaller: a LUNA cell has 3 faces of its own, ours 7.95, so our static hydro runs 1.80 G face fluxes/s at 128³ against LUNA's 2.46 G in FP64, 73 % of its rate. LUNA's default XLA kernel runs 0.48 FP64 at 128³, the 0.47 earlier versions of this table quoted. Moving Sedov 128³ takes 9.10 GPU seconds to 1e4 yr (349 steps; 9.43 on voronoi-cpp abd3d39, job 32540742; 9.72 before the levers of 2026-11-18, job 32525893).
+Per face the gap is smaller: a LUNA cell has 3 faces of its own, ours 7.95, so our static hydro runs 1.80 G face fluxes/s at 128³ against LUNA's 2.46 G in FP64, 73 % of its rate. LUNA's default XLA kernel runs 0.48 FP64 at 128³, the 0.47 earlier versions of this table quoted. Moving Sedov 128³ takes 8.69 GPU seconds to 1e4 yr (349 steps, job 32545390; 9.10 before the precision levers, 9.43 on voronoi-cpp abd3d39, job 32540742; 9.72 before the levers of 2026-11-18, job 32525893).
 
 Memory is in bytes per cell and in GB of 10⁹ bytes throughout. Ours is the peak of all the arrays the code allocates during a step; LUNA's is what JAX reports in use at a progress line (LUNA prints it in GiB, converted here), so it is not a peak and the two measure slightly different things.
 
@@ -299,7 +299,7 @@ CI (`.github/workflows/checks.yml`) runs clang-tidy (ordinary build) and the CPU
 
 ## Roadmap
 
-Done: 3D, 2D and 1D hydro on the exact mesh, one moving step (MUSCL-Hancock on both meshes) in every dimension, a first round of speed work, `grad32` in 3D.
+Done: 3D, 2D and 1D hydro on the exact mesh, one moving step (MUSCL-Hancock on both meshes) in every dimension, a first round of speed work, `grad16` and the moving-mesh precision levers in 3D.
 
 1. One `main` and one general runner for 1D, 2D and 3D, reading a LUNA-style parameter file ([#18](https://github.com/Ulli1991/luna-cpp/issues/18)).
 2. Hydro speed: the moving hydro below 3.1 ns per cell: fluxes summed where they are computed instead of stored, and a gradient sweep that hides its load latency.
