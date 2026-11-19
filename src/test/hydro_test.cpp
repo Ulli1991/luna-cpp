@@ -322,9 +322,10 @@ std::array<double, 8> profile(const HydroMesh& mesh, const HostCells& u, double 
     return sum;
 }
 
-// Checks FiniteVolume<3>::step on a moving mesh; profile_within: the bound of the Galilean test on the radial profiles. Used by: main.
+// Checks FiniteVolume<3>::step on a moving mesh; profile_within, cells_within: the bounds of the Galilean test on the radial
+// profiles and cell by cell. Used by: main.
 template <class Precision>
-void moving_tests(Check& check, const std::string& name_of_precision, double profile_within) {
+void moving_tests(Check& check, const std::string& name_of_precision, double profile_within, double cells_within) {
     std::cout << "moving tests, " << name_of_precision << ":\n";
     using Run = MovingRun<Precision>;
     const hydro::Gas gas{5.0 / 3.0};
@@ -502,8 +503,8 @@ void moving_tests(Check& check, const std::string& name_of_precision, double pro
             profile_error[motion == hydro::Motion::static_mesh] = diff / total;
         }
         check.expect(dt <= cfl, "Galilean test: the fixed step " + sci(dt) + " is within the time-step criterion (" + sci(cfl) + ")");
-        // Rounding (v - bulk is not exact) grows through the nonlinear blast and limiter; measured 7e-8 on the CPU and A100, double and grad32.
-        check.expect(moving_error < 1e-6, "moving mesh: a blast moving with the box equals the blast at rest, cell by cell, after " +
+        // Rounding (v - bulk is not exact) grows through the nonlinear blast and limiter (cells_within, set by main).
+        check.expect(moving_error < cells_within, "moving mesh: a blast moving with the box equals the blast at rest, cell by cell, after " +
                                                std::to_string(steps) + " steps (" + sci(moving_error) + ")");
         check.expect(profile_error[0] < profile_within && profile_error[1] > 1e3 * profile_error[0],
                      "radial density profiles, moving blast against blast at rest: moving mesh " + sci(profile_error[0]) +
@@ -673,13 +674,16 @@ int main(int argc, char** argv) {
     mesh_tests<hydro::HLLC, hydro::Precision<float, hydro::Half, float, float>>(check, "jittered", "HLLC low");
     using Default = hydro::DefaultPrecision<3>;
     // Float gradients carry the frame's rounding into the profiles: measured 2.5e-10 on the CPU, 1.2e-10 on the A100; double 6e-14.
-    moving_tests<Default>(check, "grad32", 1e-9);
-    moving_tests<hydro::Precision<>>(check, "double", 1e-10);
-    moving_step_tests<Default>(check, "grad32", 1e-13);
+    // Cell by cell: 4e-8 to 7e-8 in double and grad32 (CPU, A100); FP16 gradient rows (the default) 2.0e-6 on the CPU and 2.2e-7
+    // on the A100 (2026-11-19), where a rounding difference between the frames can flip an FP16 rounding (2^-11 of its group).
+    moving_tests<Default>(check, "default (grad16)", 1e-9, 1e-5);
+    moving_tests<hydro::Grad32>(check, "grad32", 1e-9, 1e-6);
+    moving_tests<hydro::Precision<>>(check, "double", 1e-10, 1e-6);
+    moving_step_tests<Default>(check, "default (grad16)", 1e-13);
     moving_step_tests<hydro::Precision<>>(check, "double", 1e-13);
     moving_step_tests<hydro::Precision<float, float, float>>(check, "mixed", 1e-6);
     moving_step_tests<hydro::Precision<float, hydro::Half, float, float>>(check, "low", 1e-6);
-    magnitude_tests<Default>(check, "grad32");
+    magnitude_tests<Default>(check, "default (grad16)");
     magnitude_tests<hydro::Precision<>>(check, "double");
     lattice_tests<hydro::HLLC>(check, "HLLC");
     lattice_tests<hydro::HLL>(check, "HLL");

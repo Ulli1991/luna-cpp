@@ -38,14 +38,19 @@ struct Precision {
     using riemann = Riemann;
 };
 
-// The gradients, limiter and face-state change in float, the rest double (`--precision=grad32`).
-// Used by: DefaultPrecision<3>, run_precision (hydro_sedov), main (hydro_wave3d).
+// The gradients, limiter and face-state change in float, the rest double (`--precision=grad32`; the 3D default until 2026-11-19).
+// Used by: run_precision (hydro_sedov), main (hydro_wave3d).
 using Grad32 = Precision<double, float>;
 
-// The default P of FiniteVolume: Grad32 in 3D (L1 unchanged to ~1e-3, +8 to +12 %, 64 B/cell less; README); double in 2D and 1D.
-// Used by: FiniteVolume<D> default argument, run_precision / main (`--precision=default`).
+// Grad32 with the gradient rows stored as FP16 (one power-of-two exponent per group rho, v, P), float arithmetic (`--precision=grad16`).
+// Used by: DefaultPrecision<3>, run_precision (hydro_sedov), main (hydro_wave3d).
+using Grad16 = Precision<double, Half>;
+
+// The default P of FiniteVolume: Grad16 in 3D (rows of 32 B instead of Grad32's 64) and in 2D (the owner, 2026-11-19; there the
+// 8 FP16 values pad to the same 32-B sector as 8 floats, so it saves no bytes). 1D has no policies (FiniteVolume<1> keeps its
+// gradients in registers). Used by: FiniteVolume<D> default argument, run_precision / main (`--precision=default`).
 template <int D>
-using DefaultPrecision = std::conditional_t<D == 3, Grad32, Precision<>>;
+using DefaultPrecision = std::conditional_t<D == 3 || D == 2, Grad16, Precision<>>;
 
 namespace half {
 
