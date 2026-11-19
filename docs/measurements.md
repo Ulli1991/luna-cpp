@@ -146,7 +146,7 @@ The README's 0.47 to 0.76 FP64 at 128³ were the XLA kernel (`hydro_a100.sh` pas
 | mixed (float face rows too, Riemann double) | 10.8, 19.2 | 0.0648, 0.0776 | 2426 | equal | 4.32e-3, 4.32e-3 | 7.2e-3, 2.4e-2 |
 | low (mixed with FP16 gradients and float Riemann) | 10.4, 17.8 | 0.0648, 0.0776 | 2398 | equal | 4.30e-3, 4.32e-3 | 1.24, 1.56 |
 
-Every option keeps Sedov, the vortex and the 1e-3 sound wave to the digits printed, so on those GPU time to the same error is GPU time: `single` is 10 % (moving) and 15 % (static) ahead of `grad32`. But a float Riemann solve or float stored fluxes lose a 1e-6 wave: with `single` and `low` the error exceeds the wave itself, `mixed` doubles it moving and is 6.5 times worse static. `grad16` matches double on every test, is 2 to 4 % faster than `grad32` and saves 28 B/cell; it does not make a larger run fit: 384³ (56.6M cells) needs 707 B/cell on 40 GB, three times less than any option, so 256³ stays the largest power-of-two size. 2D has no presets; KH 2D runs double.
+Every option keeps Sedov, the vortex and the 1e-3 sound wave to the digits printed, so on those GPU time to the same error is GPU time: `single` is 10 % (moving) and 15 % (static) ahead of `grad32`. But a float Riemann solve or float stored fluxes lose a 1e-6 wave: with `single` and `low` the error exceeds the wave itself, `mixed` doubles it moving and is 6.5 times worse static. `grad16` matches double on every test, is 2 to 4 % faster than `grad32` and saves 28 B/cell; it does not make a larger run fit: 384³ (56.6M cells) needs 707 B/cell on 40 GB, three times less than any option, so 256³ stays the largest power-of-two size. 2D has no presets in `hydro_wave3d`; KH 2D takes `--precision` since 2026-11-19 and runs `grad16` by default (section "Precision levers of 2026-11-19").
 
 ### Faces once by the owner, R14 and cheaper fluxes (2026-11-15)
 
@@ -256,6 +256,21 @@ Every lever keeps the 1e-6 wave. KH 2D 512 to t = 1.5 (job 32545410): static the
 **A bug caught by the gate:** lever 2 as first committed (192ac75) tested the float rows by `data()`; a static mesh's zero-row view can hold a pointer, so static runs read empty float rows and the static sound wave blew up (L1/amp 36-39, job 32541499). 3b9571e tests the extent; the static rows above are with the fix.
 
 **Tests:** A100 ctest 5 of 5 (job 32545395). On the host (CI's steps, job 32545396) `hydro` failed one check with sanitizers off and on: the Galilean test, cell by cell, 2.02e-6 against its 1e-6 bound. One host build per tree (job 32572255): 4.2e-8 with int32 steps and with float centroids, 2.02e-6 with FP16 gradients (A100 2.2e-7). A rounding difference between the frames can flip an FP16 rounding (2^-11 of its group), and the blast grows it. d02d022 gives FP16 rows the bound 1e-5 and keeps 1e-6 for `grad32` (whose moving tests stay in) and double. The radial profiles of the same test stay within 1e-9. On the tip with the docs (fe4085e): A100 ctest 5 of 5 (job 32573138); CI's host steps 5 of 5 with sanitizers off and on, lint clean (job 32573139).
+
+**FP16 gradients on harder 3D cases** (job 32575158; one measurement build with per-cell fallback counts, not committed; `grad32` against `grad16`, the default):
+- 3D vortex L1 of rho, v, P: moving 64 4.426e-4, 1.246e-3, 6.196e-4 against 4.425e-4, 1.246e-3, 6.196e-4; moving 128 9.593e-5, 2.132e-4, 1.014e-4 against 9.585e-5, 2.133e-4, 1.013e-4; static 64 4.983e-4 against 4.982e-4, static 128 6.533e-5 against 6.527e-5 (rho). Order of rho from 64 to 128: 2.21 moving and 2.93 static in both. No fallbacks.
+- luna-cpp has no 3D KH slab (`hydro_wave3d`: sound, simple, vortex, tube).
+- Moving Sedov 256³ to 1e4 yr: field L1 0.03774, 0.01074, 0.00990 against 0.03774, 0.01075, 0.00990. Fallbacks 1,488,472 against 1,591,036 (+6.9 %). By radius from the blast centre, r / R_s: in the shell, 0.75 to 1.05, 1,394,330 against 1,411,113 (+1.2 %); behind it, 0.5 to 0.75, 89,563 against 165,189 (+84 %), and 0.25 to 0.5, 4,491 against 14,587; none outside 1.05 R_s. The extra fallbacks are in the hot, rarefied interior, where the extrapolated density is small and an FP16 rounding of its gradient (2^-11 of the group's largest component) can take it to zero; the field there is volume-weighted into the L1 and does not move it.
+
+**2D** (job 32575256; `hydro_kh2d --precision`, KH at N = 512, 1024, 2048 to t = 1.5, max |M / M_ref − 1| against McNally et al.'s Pencil 4096² curve; no fallbacks in any run):
+
+| N | static double | static grad32 | static grad16 | moving double | moving grad32 | moving grad16 |
+|---|---|---|---|---|---|---|
+| 512 | 4.448e-4 | 4.448e-4 | 4.450e-4 | 3.434e-3 | 3.434e-3 | 3.427e-3 |
+| 1024 | 1.158e-4 | 1.158e-4 | 1.158e-4 | 4.233e-4 | 4.231e-4 | 4.115e-4 |
+| 2048 | 3.784e-5 | 3.784e-5 | 3.771e-5 | 4.672e-5 | 4.669e-5 | 3.628e-5 |
+
+Speed at 2048, 300 steps, three rounds (M cell updates/s): static 831, 935, 931; moving 348, 370, 368 (double, grad32, grad16). `grad16` is 8 to 12 % faster than double and 0.4 to 0.6 % slower than `grad32` in 2D: a 2D gradient row is 8 values, padded to whole 32-B sectors, so FP16 saves no bytes there. The owner chose `grad16` as the 2D default as well (8dafac6). 1D has no precision policy: `FiniteVolume<1>` computes its gradients in registers inside one fused kernel and stores none, so FP16 would only add rounding; it stays double.
 
 ### Hydro levers of 2026-11-18
 
