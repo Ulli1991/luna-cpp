@@ -2,7 +2,11 @@
 
 Run with LUNA's environment, LUNA's src on the path, outside LUNA's tree:
     python luna_1d_run.py <problem of problems_1d.py> <N> <hllc|hll> <out.npz> [LIMITER=1] [CFL=0.8] [steps=0]
-        [kernel=auto] [repeats=2] [series=luna] [max_s=0] [resume=<state.npz>] [eps=1e-6] [t=t_end]
+        [kernel=auto] [repeats=2] [series=luna] [max_s=0] [resume=<state.npz>] [eps=1e-6] [t=t_end] [floor=0]
+
+Unphysical Hancock faces (rho or p <= 0) take the cell-centre state (allow_first_order_faces, LUNA's audit C8) in every run.
+floor=1: LUNA's positivity floors as well (preserve_face_states, RAMSES smallr = smallc = 1e-10 on primitives, faces, Riemann
+inputs and dt; default off in LUNA). Runs before 2026-11-18 (v1's tube, the ladder) ran without them.
 
 steps > 0: stop after that many steps; max_s > 0: stop after about that long and write the state, resume=<state.npz> continues.
 Writes rho, u, p, steps, wall_s and <out>.json for scripts/compare_1d.py; with max_s, only when t_end is reached, or with reached = 0 on a NaN dt.
@@ -42,7 +46,7 @@ def main():
     cfg = Config(SPATIAL_DIMENSION=1, Nx=n, gamma=G, ORDER=1, LIMITER=limiter, riemann_solver=solver, CFL=cfl,
                  enable_x64=True, PLOT_AFTER_SIM=False, enable_checkpointing=False, hydro_kernel=kernel,
                  test_problem=test_problem, Lx=(2 if mirror else 1) * (pb["box"][1] - pb["box"][0]), BOUNDARY=pb["boundary"], t_end=t_end,
-                 allow_first_order_faces=True)
+                 allow_first_order_faces=True, preserve_face_states=bool(int(extra.get("floor", 0))))
     cfg.validate()
     U0 = pr.initial(problem, n_box, float(extra.get("eps", pr.EPS)))
     if mirror:
