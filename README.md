@@ -165,6 +165,20 @@ A small sound wave travelling once across a periodic line, the cleanest test of 
 
 Our own test that puts the hard parts of the other 1D tests on one line: a quiet region, smooth waves, a standing and a moving density peak, a sonic-point rarefaction, a jump with a pressure ratio of 10⁹, a slow shock, colliding streams, a near-vacuum gap and a double blast against a reflecting wall, with an open wall on the left. At t = 0.1 the stages have not met yet and most have an exact solution; by t = 2 the blast's reflections have swept through all of them. Shown are LUNA, static and moving at N = 4096 against the exact solution and LUNA's own run at 2²⁰ cells. Our static mesh matches LUNA in every stage; the moving mesh is ahead in every stage at t = 0.1 except the smooth waves (2.7 % behind) and the sonic rarefaction (level), and holds the peaks and the front of the blast in far fewer cells at t = 2. The moving mesh reaches t = 2 since a point whose cell is lopsided, its generator beyond 0.75 r of the centroid, moves with the gas velocity at the generator ([#25](https://github.com/Ulli1991/luna-cpp/issues/25)): at N = 4096 its density error over all stages is 1.15 against static's 2.66. The setup is in research_notes/super_tube_2026-11-10.md, the problem is `super-tube` in `problems_1d.hpp`.
 
+**Against AREPO and GIZMO.** The same tube in AREPO (master e6227faf, moving Voronoi mesh) and GIZMO (`gpu_kokkos_unified` 7fe8985, MFM and MFV), from the same cell averages, at t = 0.1. The plot shows the L1 error per stage against the exact solution (stages A to G) or LUNA at 2²⁰ cells (S, H).
+
+![Super-hard tube against AREPO and GIZMO at t = 0.1](docs/figures/super_tube_codes_t01.png)
+
+| code, L1 of ρ / v / P over all stages | N = 4096 | N = 32768 |
+|---|---|---|
+| LUNA = luna-cpp static | 1.02 / 1.53 / 10.0 | 0.231 / 0.305 / 2.12 |
+| luna-cpp moving | 0.386 / 0.955 / 6.71 | 0.0571 / 0.151 / 0.916 |
+| AREPO | 0.644 / 1.69 / 11.5 | 0.111 / 0.322 / 1.61 |
+| GIZMO MFM | 1.10 / 2.51 / 20.0 | 0.168 / 0.548 / 2.72 |
+| GIZMO MFV | 0.894 / 1.71 / 18.0 | 0.134 / 0.315 / 2.51 |
+
+The Riemann solver (AREPO uses its exact solver: with HLLC it stops in the first step), limiters, time integrators and mesh regularisation are each code's own. The walls are matched by a mirror image of the tube. Details and the final states are in luna-reference-solutions (`arepo/super_tube/`, `gizmo/super_tube/`). Neither code reached t = 2: AREPO stops with a NaN velocity at t = 0.53 (N = 4096), and GIZMO MFM's time step falls to 6·10⁻⁸ at t ≈ 0.91, both in stage E's swept-up thin gas.
+
 Version 2 (`super-tube-v2`, research_notes/super_tube_v2_2026-11-18.md; preliminary: the moving mesh's run to t = 4 at N = 32768 is still running) keeps these stages and adds five of the hardest known 1D problems, to t = 4 on [0, 40.25]:
 - cold gas at Mach 10⁴ leaving through the open wall;
 - a jump with a density ratio of 10⁶ and a pressure ratio of 10¹²;
