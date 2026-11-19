@@ -20,6 +20,13 @@ namespace hydro {
 
 enum class Update { per_cell, per_face };
 
+// Whether a flux functor offers its two face sides separately (side_of, from_sides): the moving step's MovingFlux.
+// Used by: FiniteVolume::apply() (two threads per face).
+template <class T, class = void>
+struct has_sides : std::false_type {};
+template <class T>
+struct has_sides<T, std::void_t<decltype(std::declval<const T&>().side_of(0, 0, std::declval<int&>()))>> : std::true_type {};
+
 // Used by: Sweep (limiter). Where the gradient limiter keeps the extrapolated values within the neighbours' range: face centroids, or nowhere.
 // minmod and van_leer: the 1D hydro only, LUNA's limiters 0 and 2.
 enum class Limiter { face_centroid, none, minmod, van_leer };
@@ -901,6 +908,25 @@ public:
             for (int v = 0; v < V; ++v) F[v] *= magnitude;
             return F;
         }
+        // Two threads per face (LUNA_FLUX_PAIR): side s (0 owner, 1 neighbour) of face f, as operator() computes it; nothing
+        // for a face of zero area. Used by: apply() with the pair kernel.
+        KOKKOS_INLINE_FUNCTION State side_of(int f, int s, int& fallbacks) const {
+            const Vec a = this->geo.area_of(f);
+            if (Kokkos::sqrt(dot(a, a)) == 0) return State{};
+            const int i = s == 0 ? this->geo.owner_of(f) : this->geo.neighbour_of(f);
+            return pass_side(i, this->geo.face_offset(f, i), fallbacks);
+        }
+        // The flux of face f from its two sides, as operator() computes it. Used by: apply() with the pair kernel.
+        KOKKOS_INLINE_FUNCTION State from_sides(int f, const State& L, const State& R) const {
+            const int o = this->geo.owner_of(f), j = this->geo.neighbour_of(f);
+            const Vec a = this->geo.area_of(f);
+            const double magnitude = Kokkos::sqrt(dot(a, a));
+            if (magnitude == 0) return State{};
+            const Vec wf = this->face_velocity(f, o, j, velocity(o), velocity(j));
+            State F = this->solve(L, R, a * (1.0 / magnitude), wf, this->gas);
+            for (int v = 0; v < V; ++v) F[v] *= magnitude;
+            return F;
+        }
     };
 
     // MUSCL-Hancock on a moving mesh, AREPO next generation's step, replacing advance()+move() in step():
@@ -985,19 +1011,65 @@ public:
         // The magnitudes the next sweep reads: from a moving step's second pass, or once on a static mesh.
         const bool keep = cache_magnitudes_ && (pass == 1 || (motion_ == Motion::static_mesh && !magnitudes_valid_));
         const auto mag = magnitudes_;
-        Kokkos::parallel_reduce(
-            "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
-            KOKKOS_LAMBDA(int f, long long& count) {
-                int fallbacks = 0;
-                const State value = flux(f, fallbacks, fallbacks);
-                count += fallbacks;
-                for (int v = 0; v < V; ++v) F(f, v) = static_cast<FluxStore>(value[v]);
-                if (keep) {
-                    const Vec a = geo.area_of(f);
-                    mag(f) = Kokkos::sqrt(dot(a, a));
-                }
-            },
-            Kokkos::subview(fallback_counts_, pass));
+        const auto body = KOKKOS_LAMBDA(int f, long long& count) {
+            int fallbacks = 0;
+            const State value = flux(f, fallbacks, fallbacks);
+            count += fallbacks;
+            for (int v = 0; v < V; ++v) F(f, v) = static_cast<FluxStore>(value[v]);
+            if (keep) {
+                const Vec a = geo.area_of(f);
+                mag(f) = Kokkos::sqrt(dot(a, a));
+            }
+        };
+        // Block size of the flux kernel (LUNA_FLUX_BLOCK, measurement): Kokkos's choice, or 64 / 128 / 256 threads with
+        // no register cap (LaunchBounds<B, 1>).
+        const auto counter = Kokkos::subview(fallback_counts_, pass);
+        bool paired = false;
+        if constexpr (has_sides<Flux>::value && !host_space) {
+            if (flux_pair_) {
+                // Two threads per face (LUNA_FLUX_PAIR): each gathers and extrapolates one side, the pair swaps its states
+                // by a warp shuffle, both solve, the even one stores. The same functions with the same inputs as above.
+                paired = true;
+                Kokkos::deep_copy(exec_, counter, 0LL);
+                const auto counts = fallback_counts_;
+                const int which = pass;
+                Kokkos::parallel_for(
+                    "hydro::fluxes_pair", Kokkos::RangePolicy<ExecSpace, Kokkos::LaunchBounds<128, 1>>(exec_, 0, 2 * faces_),
+                    KOKKOS_LAMBDA(int t) {
+                        const int f = t >> 1, s = t & 1;
+                        int fallbacks = 0;
+                        const State mine = flux.side_of(f, s, fallbacks);
+                        State other = mine;
+#if defined(__CUDA_ARCH__)
+                        unsigned lane;
+                        asm volatile("mov.u32 %0, %%laneid;" : "=r"(lane));
+                        const unsigned pair = 3u << (lane & ~1u);
+                        for (int v = 0; v < V; ++v) other[v] = __shfl_xor_sync(pair, mine[v], 1);
+#endif
+                        // Entry by entry, not a reference to one of the two states (that puts both in local memory).
+                        const State L = make_state<D>([&](int v) { return s == 0 ? mine[v] : other[v]; });
+                        const State R = make_state<D>([&](int v) { return s == 0 ? other[v] : mine[v]; });
+                        const State value = flux.from_sides(f, L, R);
+                        if (s == 0) {
+                            for (int v = 0; v < V; ++v) F(f, v) = static_cast<FluxStore>(value[v]);
+                            if (keep) {
+                                const Vec a = geo.area_of(f);
+                                mag(f) = Kokkos::sqrt(dot(a, a));
+                            }
+                        }
+                        if (fallbacks) Kokkos::atomic_add(&counts(which), static_cast<long long>(fallbacks));
+                    });
+            }
+        }
+        if (paired) {
+        } else if (flux_block_ == 64)
+            Kokkos::parallel_reduce("hydro::fluxes", Kokkos::RangePolicy<ExecSpace, Kokkos::LaunchBounds<64, 1>>(exec_, 0, faces_), body, counter);
+        else if (flux_block_ == 128)
+            Kokkos::parallel_reduce("hydro::fluxes", Kokkos::RangePolicy<ExecSpace, Kokkos::LaunchBounds<128, 1>>(exec_, 0, faces_), body, counter);
+        else if (flux_block_ == 256)
+            Kokkos::parallel_reduce("hydro::fluxes", Kokkos::RangePolicy<ExecSpace, Kokkos::LaunchBounds<256, 1>>(exec_, 0, faces_), body, counter);
+        else
+            Kokkos::parallel_reduce("hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), body, counter);
         phase_end(timings, &Timings::fluxes);
         Kokkos::parallel_for(
             "hydro::update", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
@@ -1040,6 +1112,9 @@ private:
     Magnitudes magnitudes_;
     bool magnitudes_valid_ = false;
     bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr;
+    int flux_block_ = std::getenv("LUNA_FLUX_BLOCK") ? std::atoi(std::getenv("LUNA_FLUX_BLOCK")) : 0;  // apply(): flux kernel block size (measurement)
+    bool flux_pair_ = std::getenv("LUNA_FLUX_PAIR") != nullptr;  // apply(): two threads per face on the device (measurement)
+    static constexpr bool host_space = Kokkos::SpaceAccessibility<Kokkos::HostSpace, Memory>::accessible;
     // Fallbacks of the two flux passes of the last step (one pass: the first), read back by fallbacks() once a step.
     Kokkos::View<long long[2], Memory> fallback_counts_{"hydro_fallbacks"};
     Kokkos::View<long long[2], Kokkos::HostSpace> fallback_host_{"hydro_fallbacks_host"};
