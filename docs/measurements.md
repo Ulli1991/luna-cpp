@@ -257,6 +257,19 @@ Every lever keeps the 1e-6 wave. KH 2D 512 to t = 1.5 (job 32545410): static the
 
 **Tests:** A100 ctest 5 of 5 (job 32545395). On the host (CI's steps, job 32545396) `hydro` failed one check with sanitizers off and on: the Galilean test, cell by cell, 2.02e-6 against its 1e-6 bound. One host build per tree (job 32572255): 4.2e-8 with int32 steps and with float centroids, 2.02e-6 with FP16 gradients (A100 2.2e-7). A rounding difference between the frames can flip an FP16 rounding (2^-11 of its group), and the blast grows it. d02d022 gives FP16 rows the bound 1e-5 and keeps 1e-6 for `grad32` (whose moving tests stay in) and double. The radial profiles of the same test stay within 1e-9. On the tip with the docs (fe4085e): A100 ctest 5 of 5 (job 32573138); CI's host steps 5 of 5 with sanitizers off and on, lint clean (job 32573139).
 
+**The final combination** (branch tip: levers 1-3, lever 4 reverted by the owner in 4111814, luna-cpp main c9d6a1f merged; job 32575043 against the pin base, both builds without `-lineinfo`; speed 40 steps, three rounds alternating, fenced phases):
+
+| | 128³ base | 128³ tip | 256³ base | 256³ tip |
+|---|---|---|---|---|
+| moving step, ms (G cell updates/s) | 24.54 (0.0855) | 23.16 (0.0906) | 180.05 (0.0932) | 169.61 (0.0989) |
+| hydro part, ms | 15.85 | 14.71 | 123.91 | 114.98 |
+| mesh update and cell sums, ms | 8.54 | 8.32 | 54.98 | 53.67 |
+| to 1e4 yr: GPU s, fallbacks | 9.11, 163,824 | 8.68, 175,033 | 177.1, 1,488,468 | 168.7, 1,591,036 |
+| field L1 rho, v_r, P | 0.06479, 0.02099, 0.01702 | 0.06481, 0.02102, 0.01702 | 0.03774, 0.01074, 0.00990 | 0.03774, 0.01075, 0.00990 |
+| peak B/cell (GB in use at 256³) | 2366 | 2252 | 2366 (41.28) | 2252 (39.37) |
+
+The step is 5.6 % (128³) and 5.8 % (256³) faster; whole runs take 4.7 % less GPU time at both sizes. Gate on the tip's binaries: vortex 64 L1 4.425e-4 moving, 4.982e-4 static (base 4.426e-4, 4.983e-4); sound wave L1/amp 4.3193e-3 and 4.3221e-3 at 1e-3, 3.6839e-3 and 3.6840e-3 at 1e-6 (base 3.6837e-3). CI on 334952d (2D default included): A100 ctest 5 of 5 (job 32576533), the gate on its binaries as above (job 32576534), CI's host steps 5 of 5 with sanitizers off and on, lint clean (job 32576528).
+
 **FP16 gradients on harder 3D cases** (job 32575158; one measurement build with per-cell fallback counts, not committed; `grad32` against `grad16`, the default):
 - 3D vortex L1 of rho, v, P: moving 64 4.426e-4, 1.246e-3, 6.196e-4 against 4.425e-4, 1.246e-3, 6.196e-4; moving 128 9.593e-5, 2.132e-4, 1.014e-4 against 9.585e-5, 2.133e-4, 1.013e-4; static 64 4.983e-4 against 4.982e-4, static 128 6.533e-5 against 6.527e-5 (rho). Order of rho from 64 to 128: 2.21 moving and 2.93 static in both. No fallbacks.
 - luna-cpp has no 3D KH slab (`hydro_wave3d`: sound, simple, vortex, tube).
