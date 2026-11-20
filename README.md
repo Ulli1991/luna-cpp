@@ -180,7 +180,7 @@ Our own test that puts the hard parts of the other 1D tests on one line: a quiet
 
 The Riemann solver (AREPO uses its exact solver: with HLLC it stops in the first step), limiters, time integrators and mesh regularisation are each code's own. The walls are matched by a mirror image of the tube. Details and the final states are in luna-reference-solutions (`arepo/super_tube/`, `gizmo/super_tube/`). Neither code reached t = 2: AREPO stops with a NaN velocity at t = 0.53 (N = 4096), and GIZMO MFM's time step falls to 6·10⁻⁸ at t ≈ 0.91, both in stage E's swept-up thin gas.
 
-Version 2 (`super-tube-v2`, research_notes/super_tube_v2_2026-11-18.md; preliminary: the moving mesh's run to t = 4 at N = 32768 is still running) keeps these stages and adds five of the hardest known 1D problems, to t = 4 on [0, 40.25]:
+Version 2 (`super-tube-v2`, research_notes/super_tube_v2_2026-11-18.md) keeps these stages and adds five of the hardest known 1D problems, to t = 4 on [0, 40.25]:
 - cold gas at Mach 10⁴ leaving through the open wall;
 - a jump with a density ratio of 10⁶ and a pressure ratio of 10¹²;
 - Shu-Osher;
@@ -191,13 +191,13 @@ Version 2 (`super-tube-v2`, research_notes/super_tube_v2_2026-11-18.md; prelimin
 
 ![Super-hard tube v2 at t = 4](docs/figures/super_tube_v2_t4.png)
 
-The whole v2 tube at N = 4096: LUNA (floors on), static and moving against the exact solution (t = 0.1) and LUNA's run at 2²⁰ cells, with zooms below. Moving is the tube without the Mach 10⁴ stream, drawn where the two are the same. At t = 4 it stalled at t = 0.81 (#30). Below, the same at N = 32768; there the moving run to t = 4 is still running.
+The whole v2 tube at N = 4096: LUNA (floors on), static and moving against the exact solution (t = 0.1) and LUNA's run at 2²⁰ cells, with zooms below. Moving is the tube without the Mach 10⁴ stream, drawn where the two are the same. At t = 4 it stalled at t = 0.81 (#30). Below, the same at N = 32768, where it stalled at t = 0.65 (#30).
 
 ![Super-hard tube v2 at t = 0.1, N = 32768](docs/figures/super_tube_v2_t01_32768.png)
 
 ![Super-hard tube v2 at t = 4, N = 32768](docs/figures/super_tube_v2_t4_32768.png)
 
-At t = 0.1 the moving mesh is level with static or ahead in every stage except the Mach 10⁴ stream. It cannot run that stream at all: cells cannot leave through the wall ([#14](https://github.com/Ulli1991/luna-cpp/issues/14)), and the resulting NaN state is reported as reaching the end ([#29](https://github.com/Ulli1991/luna-cpp/issues/29)). Without that stream it stalls at N = 4096 at t = 0.81, its points collapsing onto a contact in the 10⁶ density jump ([#30](https://github.com/Ulli1991/luna-cpp/issues/30)). LUNA reaches t = 4 with its positivity floors on (`preserve_face_states`, off by default). Without them its pressure goes negative in the Noh stage after t ≈ 0.32 at N = 4096 and 32768. LUNA at 2²⁰ serves as the reference, and our static mesh at 2¹⁹ lies within 3.5·10⁻² of it in every stage.
+At t = 0.1 the moving mesh is level with static or ahead in every stage except the Mach 10⁴ stream. It cannot run that stream at all: cells cannot leave through the wall ([#14](https://github.com/Ulli1991/luna-cpp/issues/14)), and the resulting NaN state is reported as reaching the end ([#29](https://github.com/Ulli1991/luna-cpp/issues/29)). Without that stream it stalls at t = 0.81 (N = 4096) and t = 0.65 (N = 32768), when the 10⁻⁶ slab, squeezed between two shocks, takes all its points into a layer about 10⁻⁶ wide ([#30](https://github.com/Ulli1991/luna-cpp/issues/30)). LUNA reaches t = 4 with its positivity floors on (`preserve_face_states`, off by default). Without them its pressure goes negative in the Noh stage after t ≈ 0.32 at N = 4096 and 32768. LUNA at 2²⁰ serves as the reference, and our static mesh at 2¹⁹ lies within 3.5·10⁻² of it in every stage.
 
 Density in three of the new stages at t = 0.1 (top) and t = 4 (bottom), at N = 4096 (left) and 32768 (right): the 10⁶ density jump, Noh's colliding streams and the true vacuum. The other stages are in `docs/figures/super_tube_v2_*.png`.
 

@@ -1412,6 +1412,85 @@ def fig_super_end(n=SUPER_N):
     fig_super_tube("2", views, (0.03, 60), n)
 
 
+SUPER2_RUNS = os.environ.get("SUPER2_RUNS", os.path.join(HERE, "..", "build-tube2", "runs"))  # scripts/super_tube_v2_{run,gpu}.sh
+SUPER2_PENDING = {}                  # moving m0 runs to t = 4 still running (job ids by N), when there are any
+SUPER2_STALL = {4096: "#30", 32768: "#30"}   # moving m0 to t = 4 stalled (stage L)
+
+
+def fig_super_v2(t, views, ylim, n=SUPER_N):
+    """The super-hard tube v2 at t: density over the line, LUNA (floors on), static, moving at N = n; exact (its exact stages at 0.1),
+    LUNA 2^20; zooms below. Moving is the m0 tube (stage M's stream replaced, luna-cpp #14, #29), drawn only where m0 equals v2."""
+    p = "super-tube-v2"
+
+    def run(s, problem):
+        f = f"{SUPER2_RUNS}/{s}_{problem}_{n}_t{t}" + (".npz" if s == "luna" else ".npy")
+        if not os.path.exists(f + ".json"):
+            return None
+        meta = json.load(open(f + ".json"))
+        a, b, W = lad.cells(f, p)
+        return 0.5 * (a + b), W[0], meta
+    d = np.load(f"{SUPER2_RUNS}/luna_{p}_{SUPER_REF}_t{t}.npz")
+    e = np.linspace(0.0, pr1d.SUPER2_LENGTH, d["rho"].size + 1)
+    refs = [(0.5 * (e[:-1] + e[1:]), d["rho"], dict(AK, label=f"LUNA $2^{{{SUPER_REF.bit_length() - 1}}}$"))]
+    if t == "0.1":
+        e = np.linspace(0.0, pr1d.SUPER2_LENGTH, 2 ** 16 + 1)
+        xe, re_ = 0.5 * (e[:-1] + e[1:]), pr1d.super2_exact(e[:-1], e[1:], 0.1)[0]
+        inexact = [pr1d.super2_region(k) for k in ("SO", "S", "H")]   # not single Riemann problems
+        re_ = np.where(np.any([(xe >= lo) & (xe < hi) for lo, hi in inexact], axis=0) | (re_ <= 0), np.nan, re_)
+        refs = [(xe, re_, dict(REF, label="exact"))] + refs
+    runs, notes = [], [f"$t = {t}$, $N = {n}$"]
+    for s in ("luna", "static"):
+        r = run(s, p)
+        if r is not None:
+            runs.append((r[0], r[1], s))
+    r = run("moving", p + "-m0")
+    cut = pr1d.super2_region("M")[1] if t == "0.1" else pr1d.super2_region("C2")[0]   # where m0 and v2 are the same tube
+    if r is not None and r[2].get("reached"):
+        keep = r[0] >= cut
+        runs.append((r[0][keep], r[1][keep], "moving"))
+        notes.append(f"moving: the tube without M's stream, $x \\geq {cut:.2f}$")
+    elif r is not None:
+        notes.append(f"moving: stalled at $t = {r[2]['t']:.3g}$ ({SUPER2_STALL.get(n, '')})")
+    elif t != "0.1" and n in SUPER2_PENDING:
+        notes.append(f"moving: pending (job {SUPER2_PENDING[n]})")
+    fig = plt.figure(figsize=(WIDTH, FIGSIZE[1] * 1.8))
+    outer = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.16)
+    ax = fig.add_subplot(outer[0])
+    for x, y, kw in refs:
+        ax.plot(x, y, **{k: v for k, v in kw.items() if k != "label"})
+    for x, y, s in runs:
+        line(ax, x, y, s)
+    ax.set_xlim(0.0, pr1d.SUPER2_LENGTH)
+    ax.set_ylim(*ylim)
+    ax.set_yscale("log")
+    ax.set_ylabel(r"$\rho$")
+    corner(ax, "\n".join(notes), x=0.99, y=0.96, ha="right")
+    names = {"luna": "LUNA MC (floors on)", "static": "static", "moving": "moving"}
+    ax.legend(handles=[key(s, names[s]) for *_, s in runs] + [rkey(kw["label"], {k: v for k, v in kw.items() if k != "label"}) for *_, kw in refs],
+              **dict(LEGEND, loc="upper left", ncol=3, handlelength=1.6, columnspacing=1.0, labelspacing=0.3))
+    z = outer[1].subgridspec(1, 4, wspace=0.3).subplots()
+    for a, (vx, ticks, letter, label, vy) in zip(z, views):
+        zoom(ax, a, vx, ticks, runs, [r[:2] + ({k: v for k, v in r[2].items() if k != "label"},) for r in refs], letter, label, vy)
+        a.set_xlabel(r"$x$")
+        if vy and vy[1] / vy[0] > 100:
+            a.set_yscale("log")
+            a.yaxis.set_major_locator(matplotlib.ticker.LogLocator(numticks=4))
+    z[0].set_ylabel(r"$\rho$")
+    save(fig, f"super_tube_v2_t{t.replace('.', '')}" + ("" if n == SUPER_N else f"_{n}"))
+
+
+def fig_super_v2_early(n=SUPER_N):
+    views = (((0.1, 1.05), [0.2, 0.6, 1.0], "a", "M Mach $10^4$ stream", (3e-3, 60)), ((15.1, 15.75), [15.2, 15.4, 15.6], "b", "L $10^6$ jump", (3e-7, 3)),
+             ((25.55, 25.75), [25.6, 25.65, 25.7], "c", "N Noh centre", (0.5, 12)), ((34.1, 34.9), [34.2, 34.5, 34.8], "d", "V true vacuum", (5e-5, 4)))
+    fig_super_v2("0.1", views, (1e-7, 3e5), n)
+
+
+def fig_super_v2_end(n=SUPER_N):
+    views = (((8.95, 9.15), [9.0, 9.05, 9.1], "a", "C2 peak", (0.5, 18)), ((14.75, 15.35), [14.8, 15.0, 15.2], "b", "L", (1.4, 3.4)),
+             ((29.35, 30.1), [29.5, 29.75, 30.0], "c", "S and G", (0.05, 2.6)), ((34.6, 35.3), [34.7, 34.95, 35.2], "d", "V front", (0.02, 0.9)))
+    fig_super_v2("4", views, (1e-2, 3e3), n)
+
+
 GRID_N = 4096
 GRID_LIM = {"noh": (0.0, 0.4), "titarev-toro": (1.0, 2.0)}
 GRID_LOG = ("leblanc",)
@@ -1481,7 +1560,9 @@ FIGURES = {"sod": fig_sod, "shu_osher": fig_shu_osher, "woodward_colella": fig_w
            "ladder_1d": fig_ladder, "hard_1d": fig_hard, "grid_1d": fig_grid, "titarev_toro": fig_titarev_toro,
            "toro_5": fig_toro5, "toro_2": fig_toro2, "leblanc": fig_leblanc, "noh": fig_noh, "sound_right": fig_sound,
            "super_tube_t01": fig_super_early, "super_tube_t2": fig_super_end,
-           "super_tube_t01_32768": lambda: fig_super_early(32768), "super_tube_t2_32768": lambda: fig_super_end(32768)}
+           "super_tube_t01_32768": lambda: fig_super_early(32768), "super_tube_t2_32768": lambda: fig_super_end(32768),
+           "super_tube_v2_t01": fig_super_v2_early, "super_tube_v2_t4": fig_super_v2_end,
+           "super_tube_v2_t01_32768": lambda: fig_super_v2_early(32768), "super_tube_v2_t4_32768": lambda: fig_super_v2_end(32768)}
 
 
 def main():

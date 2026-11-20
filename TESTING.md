@@ -107,7 +107,7 @@ Sod's reference is the exact solution; Shu-Osher's and Woodward-Colella's a fine
 `compare_1d.py ref <problem> <run> <refs>`, checked against AthenaK PPMX 16384. Results and pass bars:
 research_notes/stage1_1d_2026-11-04.md.
 
-## The super-hard tube v2 (not in CTest; preliminary)
+## The super-hard tube v2 (not in CTest)
 
 `super-tube-v2` (problems_1d.hpp and scripts/problems_1d.py; layout from `scripts/super_tube_layout.py v2`) and its new stages alone
 (`super-v2-m`, `-l`, `-so`, `-n`, `-v`, t = 0.1). `scripts/super_tube_v2_run.sh <out> <max_s> "<series> <problem> <N> <t>" ...` runs LUNA,
@@ -116,5 +116,5 @@ static and moving on CPU cores, and `scripts/super_tube_v2_gpu.sh` runs them on 
 2^20 at t = 4, positivity, budgets and stops, a figure per stage, the final states for luna-reference-solutions, and initial cells for
 other codes. LUNA runs with its positivity floors on (`FLOOR=1`, `luna_1d_run.py floor=1`); without them it goes NaN in the Noh stage
 after t = 0.32 at N = 4096 and 32768. The moving mesh cannot run the tube (#14, #29): `super-tube-v2-m0`, the tube without stage M's
-stream, stands in for it; it stalls in stage L at t = 0.81 at N = 4096 (#30). Results: research_notes/super_tube_v2_2026-11-18.md
-(moving to t = 4 at N = 32768 pending).
+stream, stands in for it; it stalls in stage L at t = 0.81 (N = 4096) and 0.65 (N = 32768), #30. Results:
+research_notes/super_tube_v2_2026-11-18.md.
