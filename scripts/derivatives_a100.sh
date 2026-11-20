@@ -12,7 +12,7 @@
 set -uo pipefail
 source /etc/profile.d/modules.sh; module purge; module load gcc/14 cuda/13.0 cmake hdf5-serial
 nvidia-smi --query-gpu=name,clocks.sm,clocks.max.sm --format=csv,noheader
-repo=/raven/u/uli/luna-cpp-ad
+repo=${REPO:-/raven/u/uli/luna-cpp-ad}
 b=${BUILD:-/ptmp/uli/luna-cpp-ad/build-ad-cuda}  # builds on /ptmp (the /raven/u quota)
 cd $repo && git log --oneline -1
 cmake -S . -B $b -DCMAKE_BUILD_TYPE=Release -DKokkos_DIR=/u/uli/kokkos-cuda/lib64/cmake/Kokkos \

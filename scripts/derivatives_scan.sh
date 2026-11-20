@@ -9,7 +9,7 @@
 #SBATCH --time=00:40:00
 source /etc/profile.d/modules.sh; module purge; module load gcc/15 cmake; module load hdf5-serial 2>/dev/null
 export OMP_NUM_THREADS=8 OMP_PROC_BIND=false
-repo=/raven/u/uli/luna-cpp-ad
+repo=${REPO:-/raven/u/uli/luna-cpp-ad}
 b=${BUILD:-/ptmp/uli/luna-cpp-ad}/build-ad-scan
 cd $repo
 cmake -S . -B $b -DCMAKE_BUILD_TYPE=Release -DKokkos_DIR=/u/uli/kokkos-gcc15/lib64/cmake/Kokkos -DLUNA_DERIVATIVE_TESTS=ON > $b.cfg.log 2>&1

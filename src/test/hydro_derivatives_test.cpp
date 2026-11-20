@@ -4,6 +4,9 @@
 
 #include "check.hpp"
 #include "finite_volume.hpp"
+#include "finite_volume_1d.hpp"
+#include "luna_derivative_values.hpp"
+#include "problems_1d.hpp"
 #include "support.hpp"
 
 #include <algorithm>
@@ -591,6 +594,319 @@ void cost(int n, const char* policy) {
     std::printf("  forward phases: primitives %.3f sweep+dt %.3f fluxes %.3f update %.3f ms\n", tf.primitives, tf.sweep, tf.fluxes, tf.update);
 }
 
+// ---- 1D (finite_volume_1d.hpp): the gradient of each limiter as a piece, and whole static steps with every kind of wall.
+using FV1 = hydro::FiniteVolume<1, Exec, hydro::HLLC>;
+using FV1HLL = hydro::FiniteVolume<1, Exec, hydro::HLL>;
+using State1 = hydro::State<1>;
+using HostCells1 = Kokkos::View<double* [3], Kokkos::LayoutRight, Kokkos::HostSpace>;
+
+// Stencil::gradient(): (W of the left neighbour, the cell, the right neighbour) -> the limited slope of each variable, gaps and centroids
+// fixed. Category: bit 0 some variable clipped (face centroid) or with a one-signed slope pair (minmod, van Leer), bit 1 some to zero.
+struct GradientPiece1D {
+    static constexpr int inputs = 9, outputs = 3;
+    struct Sample {
+        double x[9];
+        double gapL, gapR, c[3];
+    };
+    hydro::Limiter limiter;
+    using Cell1 = FV1::Stencil::Cell;
+    KOKKOS_INLINE_FUNCTION Sample make(std::uint64_t& seed) const {
+        Sample s;
+        const double Wi[3] = {uniform(seed, 0.2, 2), uniform(seed, -1, 1), uniform(seed, 0.2, 2)};
+        for (int k = 0; k < 3; ++k)
+            for (int v = 0; v < 3; ++v) s.x[3 * k + v] = k == 1 ? Wi[v] : Wi[v] + uniform(seed, -0.5, 0.5) * (v == 1 ? 1.0 : Wi[v]);
+        s.gapL = uniform(seed, 0.5, 1.5);
+        s.gapR = uniform(seed, 0.5, 1.5);
+        for (int k = 0; k < 3; ++k) s.c[k] = uniform(seed, -0.15, 0.15);
+        return s;
+    }
+    KOKKOS_INLINE_FUNCTION void cells(const Sample& s, const double* x, Cell1 (&cell)[3]) const {
+        for (int k = 0; k < 3; ++k) {
+            cell[k].W = State1{x[3 * k], x[3 * k + 1], x[3 * k + 2]};
+            cell[k].c = s.c[k];
+        }
+    }
+    KOKKOS_INLINE_FUNCTION FV1::Stencil stencil() const {
+        FV1::Stencil st{};
+        st.limiter = limiter;
+        return st;
+    }
+    KOKKOS_INLINE_FUNCTION int used_inputs(const Sample&) const { return inputs; }
+    KOKKOS_INLINE_FUNCTION long long f(const Sample& s, const double* x, double* y) const {
+        Cell1 cell[3];
+        cells(s, x, cell);
+        const FV1::Stencil st = stencil();
+        long long code = 0;
+        for (int v = 0; v < 3; ++v) {
+            y[v] = st.gradient(cell + 1, s.gapL, s.gapR, v);
+            const double dL = -s.gapL + cell[0].c - cell[1].c, dR = s.gapR + cell[2].c - cell[1].c;
+            const double sL = (cell[0].W[v] - cell[1].W[v]) / dL, sR = (cell[2].W[v] - cell[1].W[v]) / dR;
+            int last = -1;
+            bool upper = false, zero = false;
+            if (limiter == hydro::Limiter::face_centroid) st.clips(cell + 1, s.gapL, s.gapR, v, last, upper, zero);
+            const int c = (sL * sR > 0) | (Kokkos::fabs(sL) < Kokkos::fabs(sR)) << 1 | (last + 1) << 2 | upper << 4 | zero << 5 |
+                          (cell[2].W[v] > cell[0].W[v]) << 6;
+            code = code * 128 + c;
+        }
+        return code;
+    }
+    KOKKOS_INLINE_FUNCTION void tangent(const Sample& s, const double* x, const double* dx, double* dy) const {
+        Cell1 cell[3];
+        cells(s, x, cell);
+        const FV1::Stencil st = stencil();
+        for (int v = 0; v < 3; ++v) dy[v] = st.gradient_tangent(cell + 1, s.gapL, s.gapR, v, dx[v], dx[3 + v], dx[6 + v]);
+    }
+    KOKKOS_INLINE_FUNCTION void adjoint(const Sample& s, const double* x, const double* ybar, double* xbar) const {
+        Cell1 cell[3];
+        cells(s, x, cell);
+        const FV1::Stencil st = stencil();
+        for (int v = 0; v < 3; ++v) st.gradient_adjoint(cell + 1, s.gapL, s.gapR, v, ybar[v], xbar[v], xbar[3 + v], xbar[6 + v]);
+    }
+    KOKKOS_INLINE_FUNCTION int category(long long pattern) const {
+        int clipped = 0, zero = 0;
+        for (int v = 0; v < 3; ++v, pattern /= 128) {
+            const int c = static_cast<int>(pattern % 128);
+            clipped |= limiter == hydro::Limiter::face_centroid ? (c >> 2 & 3) != 0 : c & 1;
+            zero |= limiter == hydro::Limiter::face_centroid ? (c >> 5 & 1) : !(c & 1);
+        }
+        return clipped + 2 * zero;
+    }
+};
+
+// A static 1D line of n cells on [0, 1] (periodic, or walls), its state smooth with noise of relative size `noise`.
+struct Line1D {
+    voronoi::Mesh<1, Exec> mesh;
+    Line1D(int n, bool periodic) : mesh(Exec{}, 1.0, periodic ? voronoi::Ends::periodic : voronoi::Ends::walls) {
+        Kokkos::View<double* [1], Exec::memory_space> x("x", n);
+        auto h = Kokkos::create_mirror_view(x);
+        for (int i = 0; i < n; ++i) h(i, 0) = (i + 0.5) / n;
+        Kokkos::deep_copy(x, h);
+        mesh.update(x);
+        mesh.update_cells();
+    }
+};
+HostCells1 state_1d(voronoi::Mesh<1, Exec>& mesh, const hydro::Gas& gas, double noise) {
+    std::mt19937_64 rng(23);
+    std::uniform_real_distribution<double> unit(-noise, noise);
+    const auto x = to_host(mesh.positions());
+    const auto c = to_host(mesh.centroid());
+    const auto V = to_host(mesh.volume());
+    const int n = static_cast<int>(V.extent(0));
+    HostCells1 h("state", n);
+    const double k = 2 * M_PI;
+    for (int i = 0; i < n; ++i) {
+        const double p = x(i, 0) + c(i, 0);
+        const State1 W{1 + 0.2 * std::sin(k * p) + unit(rng), 0.3 * std::sin(k * p + 0.5) + unit(rng), 1 + 0.2 * std::cos(k * p) + unit(rng)};
+        const State1 U = hydro::conserved(W, gas);
+        for (int v = 0; v < 3; ++v) h(i, v) = U[v] * V(i);
+    }
+    return h;
+}
+
+// Whole static 1D steps: forward bits against step(), J dq against central differences (one-sided at a switch, `rough`), the dot test.
+template <class F>
+void step_test_1d(Check& check, const std::string& name, int n, int steps, bool periodic, hydro::Walls walls, hydro::Limiter limiter, int order,
+                  double noise = 0.01) {
+    const hydro::Gas gas{5.0 / 3.0};
+    Line1D line(n, periodic);
+    F fv(Exec{}, line.mesh, gas, order, limiter, hydro::Motion::static_mesh, walls);
+    const HostCells1 q0 = state_1d(line.mesh, gas, noise);
+    auto write1 = [&](const HostCells1& h) { Kokkos::deep_copy(fv.state(), h); };
+    auto read1 = [&]() {
+        HostCells1 h("read", n);
+        Kokkos::deep_copy(h, fv.state());
+        return h;
+    };
+    std::mt19937_64 rng(31);
+    std::uniform_real_distribution<double> unit(-1, 1);
+    HostCells1 dq0("dq0", n), wbar("wbar", n);
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 3; ++v) {
+            dq0(i, v) = unit(rng) * std::abs(q0(i, v)) + 0.1 * unit(rng) / n;
+            wbar(i, v) = unit(rng);
+        }
+    write1(q0);
+    std::vector<double> dts;
+    std::vector<HostCells1> checkpoints{q0};
+    for (int s = 0; s < steps; ++s) {
+        dts.push_back(fv.time_step(0.8, hydro::TimeStep::luna));
+        fv.step(dts.back());
+        checkpoints.push_back(read1());
+    }
+    auto run = [&](const HostCells1& start) {
+        write1(start);
+        for (int s = 0; s < steps; ++s) fv.step(dts[s]);
+        return read1();
+    };
+    auto combine1 = [&](const HostCells1& a, double s, const HostCells1& b) {
+        HostCells1 c("c", n);
+        for (int i = 0; i < n; ++i)
+            for (int v = 0; v < 3; ++v) c(i, v) = a(i, v) + s * b(i, v);
+        return c;
+    };
+    write1(q0);
+    typename F::Cells dq("dq", n);
+    Kokkos::deep_copy(dq, dq0);
+    std::vector<HostCells1> path;
+    for (int s = 0; s < steps; ++s) {
+        path.push_back(read1());
+        fv.step_tangent(dts[s], dq);
+    }
+    const HostCells1 forward = read1();
+    HostCells1 tangent("tangent", n);
+    Kokkos::deep_copy(tangent, dq);
+    double bits = 0;
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 3; ++v)
+            bits = std::max(bits, std::abs(forward(i, v) - checkpoints.back()(i, v)) / std::max(std::abs(checkpoints.back()(i, v)), 1e-300));
+    check.expect(bits < 1e-11, name + ": step_tangent's Q equals step()'s over " + std::to_string(steps) + " steps (" + sci(bits) + ")");
+    const double h = 1e-6;
+    const HostCells1 plus = run(combine1(q0, h, dq0)), minus = run(combine1(q0, -h, dq0));
+    const HostCells1& at = checkpoints.back();
+    double worst = 0, scale = 0, worst_one_sided = 0;
+    int cells_off = 0;
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 3; ++v) scale = std::max(scale, std::abs(plus(i, v) - minus(i, v)) / (2 * h));
+    for (int i = 0; i < n; ++i) {
+        double cell_diff = 0, cell_scale = 1e-6 * scale, plus_diff = 0, minus_diff = 0;
+        for (int v = 0; v < 3; ++v) {
+            const double fd = (plus(i, v) - minus(i, v)) / (2 * h);
+            cell_diff = std::max(cell_diff, std::abs(tangent(i, v) - fd));
+            cell_scale = std::max(cell_scale, std::abs(fd));
+            plus_diff = std::max(plus_diff, std::abs(tangent(i, v) - (plus(i, v) - at(i, v)) / h));
+            minus_diff = std::max(minus_diff, std::abs(tangent(i, v) - (at(i, v) - minus(i, v)) / h));
+        }
+        worst = std::max(worst, cell_diff);
+        if (cell_diff > 1e-6 * cell_scale) {
+            ++cells_off;
+            worst_one_sided = std::max(worst_one_sided, std::min(plus_diff, minus_diff) / cell_scale);
+        }
+    }
+    const bool rough = noise > 0.05;
+    check.expect(rough ? worst_one_sided < 1e-4 : worst < 1e-6 * scale,
+                 name + ": J dq equals central differences (h = 1e-6) over " + std::to_string(steps) + " steps (" + sci(worst / scale) + "; " +
+                     std::to_string(cells_off) + " of " + std::to_string(n) + " cells at a switch, one-sided there " + sci(worst_one_sided) + ")");
+    typename F::Cells bar("bar", n);
+    Kokkos::deep_copy(bar, wbar);
+    for (int s = steps - 1; s >= 0; --s) {
+        write1(path[s]);
+        fv.step_adjoint(dts[s], bar);
+    }
+    HostCells1 adjoint("adjoint", n);
+    Kokkos::deep_copy(adjoint, bar);
+    double lhs = 0, rhs = 0, size = 0;
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 3; ++v) {
+            lhs += wbar(i, v) * tangent(i, v);
+            rhs += adjoint(i, v) * dq0(i, v);
+            size += std::abs(wbar(i, v) * tangent(i, v)) + std::abs(adjoint(i, v) * dq0(i, v));
+        }
+    const double dot = std::abs(lhs - rhs) / size;
+    check.expect(dot < 1e-13, name + ": <w, J dq> = <J^T w, dq> over " + std::to_string(steps) + " steps (" + sci(dot) + ")");
+    std::printf("step1d %-34s n %d steps %d: forward %.2e, tangent-FD %.2e (cells at a switch %d, one-sided %.2e), dot %.2e\n", name.c_str(), n, steps,
+                bits, worst / scale, cells_off, worst_one_sided, dot);
+}
+
+// LUNA's JAX derivatives (luna_derivative_values.hpp) against ours: the same problem, N, limiter (LUNA's 0 minmod, 1 MC = our face
+// centroid, 2 van Leer), HLLC, dt and steps; U per volume, so J dU = (J dq) / V and J^T w = (J^T (w / V)) V on our extensive Q.
+// Prints the largest differences relative to LUNA's largest entry, and the cells where they exceed 1e-8 (a branch either code takes
+// differently: a flat state, a tie). Used by: tests_1d().
+void luna_case(Check& check, const char* problem, int n, int limiter, int steps, double dt, const double (*U0)[3], const double (*dU)[3],
+               const double (*w)[3], const double (*U)[3], const double (*JdU)[3], const double (*JTw)[3], bool gate = true) {
+    const auto pb = hydro::problems_1d::problem(problem);
+    const hydro::Gas gas{pb.gamma};
+    voronoi::Mesh<1, Exec> mesh(Exec{}, pb.L, pb.ends);
+    Kokkos::View<double* [1], Exec::memory_space> x("x", n);
+    auto hx = Kokkos::create_mirror_view(x);
+    for (int i = 0; i < n; ++i) hx(i, 0) = pb.L * (i + 0.5) / n;
+    Kokkos::deep_copy(x, hx);
+    mesh.update(x);
+    mesh.update_cells();
+    const hydro::Limiter lim = limiter == 0 ? hydro::Limiter::minmod : limiter == 2 ? hydro::Limiter::van_leer : hydro::Limiter::face_centroid;
+    FV1 fv(Exec{}, mesh, gas, 1, lim, hydro::Motion::static_mesh, pb.walls);
+    const auto V = to_host(mesh.volume());
+    HostCells1 q0("q0", n), dq0("dq0", n), bar0("bar0", n);
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 3; ++v) {
+            q0(i, v) = U0[i][v] * V(i);
+            dq0(i, v) = dU[i][v] * V(i);
+            bar0(i, v) = w[i][v] / V(i);
+        }
+    Kokkos::deep_copy(fv.state(), q0);
+    typename FV1::Cells dq("dq", n), bar("bar", n);
+    Kokkos::deep_copy(dq, dq0);
+    std::vector<HostCells1> path;
+    for (int s = 0; s < steps; ++s) {
+        HostCells1 h("path", n);
+        Kokkos::deep_copy(h, fv.state());
+        path.push_back(h);
+        fv.step_tangent(dt, dq);
+    }
+    HostCells1 Q("Q", n), J("J", n), JT("JT", n);
+    Kokkos::deep_copy(Q, fv.state());
+    Kokkos::deep_copy(J, dq);
+    Kokkos::deep_copy(bar, bar0);
+    for (int s = steps - 1; s >= 0; --s) {
+        Kokkos::deep_copy(fv.state(), path[s]);
+        fv.step_adjoint(dt, bar);
+    }
+    Kokkos::deep_copy(JT, bar);
+    double scale[3] = {0, 0, 0}, diff[3] = {0, 0, 0};
+    int cells[3] = {0, 0, 0};
+    for (int k = 0; k < 3; ++k) {
+        for (int i = 0; i < n; ++i)
+            for (int v = 0; v < 3; ++v) scale[k] = std::max(scale[k], std::abs(k == 0 ? U[i][v] : k == 1 ? JdU[i][v] : JTw[i][v]));
+        for (int i = 0; i < n; ++i) {
+            double cell = 0;
+            for (int v = 0; v < 3; ++v) {
+                const double ours = k == 0 ? Q(i, v) / V(i) : k == 1 ? J(i, v) / V(i) : JT(i, v) * V(i);
+                const double theirs = k == 0 ? U[i][v] : k == 1 ? JdU[i][v] : JTw[i][v];
+                cell = std::max(cell, std::abs(ours - theirs) / scale[k]);
+            }
+            diff[k] = std::max(diff[k], cell);
+            cells[k] += cell > 1e-8;
+        }
+    }
+    const std::string name = std::string(problem) + " N = " + std::to_string(n) + " LIMITER = " + std::to_string(limiter);
+    std::printf("luna %-32s forward %.2e, J dU %.2e (%d cells above 1e-8), J^T w %.2e (%d cells)\n", name.c_str(), diff[0], diff[1], cells[1],
+                diff[2], cells[2]);
+    check.expect(diff[0] < 1e-12, name + ": our forward equals LUNA's after " + std::to_string(steps) + " steps (" + sci(diff[0]) + ")");
+    // 1e-8: van Leer's derivative divides by (sL + sR)^2, and on the 1e-6 sound wave the two codes' arrangements round apart (7e-10).
+    if (gate) check.expect(diff[1] < 1e-8 && diff[2] < 1e-8, name + ": J dU and J^T w equal LUNA's jax.jvp and jax.vjp (" + sci(diff[1]) + ", " +
+                                                         sci(diff[2]) + ")");
+}
+
+// The 1D tests. Used by: main.
+void tests_1d(Check& check, int samples) {
+    using L = hydro::Limiter;
+    using W = hydro::Wall;
+    piece_test(check, "1D gradient MC", GradientPiece1D{L::face_centroid}, samples, "unclipped/clipped/zero/both:");
+    piece_test(check, "1D gradient minmod", GradientPiece1D{L::minmod}, samples, "-/one-signed/zero/-:");
+    piece_test(check, "1D gradient van Leer", GradientPiece1D{L::van_leer}, samples, "-/one-signed/zero/-:");
+    const hydro::Walls periodic{}, outflow{W::outflow, W::outflow}, reflective{W::reflective, W::reflective};
+    for (const auto& [limiter, label] : {std::pair{L::face_centroid, "MC"}, std::pair{L::minmod, "minmod"}, std::pair{L::van_leer, "van Leer"}}) {
+        step_test_1d<FV1>(check, std::string("HLLC ") + label + " periodic", 64, 5, true, periodic, limiter, 1);
+        step_test_1d<FV1>(check, std::string("HLLC ") + label + " outflow", 64, 5, false, outflow, limiter, 1);
+        step_test_1d<FV1>(check, std::string("HLLC ") + label + " reflective", 64, 5, false, reflective, limiter, 1);
+    }
+    step_test_1d<FV1HLL>(check, "HLL MC outflow", 64, 5, false, outflow, L::face_centroid, 1);
+    step_test_1d<FV1>(check, "HLLC order 0 reflective", 64, 5, false, reflective, L::face_centroid, 0);
+    step_test_1d<FV1>(check, "HLLC MC rough reflective", 64, 5, false, reflective, L::face_centroid, 1, 0.3);
+    // Against LUNA's jax.jvp and jax.vjp of the same five steps (luna_derivative_values.hpp, scripts/luna_derivatives.py).
+#define LUNA_CASE(problem, ns, ...) luna_case(check, problem, ns::n, ns::limiter, ns::steps, ns::dt, ns::U0, ns::dU, ns::w, ns::U, ns::JdU, ns::JTw __VA_OPT__(, ) __VA_ARGS__)
+    // Sod with MC starts exactly flat either side of the jump, where MC has no derivative: LUNA's jvp takes the zero branch of its
+    // where(a b > 0, ...), ours the unlimited central slope (as LUNA's own limiter_tangent_eps gives for minmod). Reported, not checked;
+    // the same problem with no cell exactly flat (noisy) is checked.
+    LUNA_CASE("sod", luna_d_sod_64_l1, false);
+    LUNA_CASE("sod", luna_d_sod_64_l1_noisy);
+    LUNA_CASE("sod", luna_d_sod_64_l2_noisy);
+    LUNA_CASE("sound-right", luna_d_sound_right_64_l2);
+    LUNA_CASE("sod", luna_d_sod_64_l0);
+    LUNA_CASE("sound-right", luna_d_sound_right_64_l1);
+    LUNA_CASE("sound-right", luna_d_sound_right_64_l0);
+#undef LUNA_CASE
+}
+
 // One warm-up of each, then time_step + step, time_step + step_tangent, step_adjoint once each: the kernels ncu measures.
 template <class F>
 void profile(int n) {
@@ -655,5 +971,6 @@ int main(int argc, char** argv) {
     // The policies in use: grad16 (the 3D default) and grad32, rows as stored, the derivative in double.
     step_test<FV16>(check, "HLLC grad16", 1000, 3, 0.01, 1e-6, &reference);
     step_test<FV32>(check, "HLLC grad32", 1000, 3, 0.01, 1e-6, &reference);
+    tests_1d(check, samples);
     return check.failed() != 0;
 }

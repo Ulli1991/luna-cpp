@@ -10,8 +10,9 @@
 #SBATCH --time=01:30:00
 source /etc/profile.d/modules.sh; module purge; module load gcc/15 cmake; module load hdf5-serial 2>/dev/null
 export OMP_NUM_THREADS=2 OMP_PROC_BIND=false UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=1
-repo=/raven/u/uli/luna-cpp-ad
+repo=${REPO:-/raven/u/uli/luna-cpp-ad}
 root=${BUILD:-/ptmp/uli/luna-cpp-ad}
+mkdir -p "$root"
 cd $repo && git log --oneline -1
 for san in OFF ON; do
     b=$root/build-ad-host-$san

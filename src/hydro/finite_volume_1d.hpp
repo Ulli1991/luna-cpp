@@ -204,6 +204,98 @@ public:
             return g;
         }
 
+        // d(gradient()) for the tangents dl, di, dr of W[v] of the left neighbour, the cell and the right neighbour (geometry fixed), at
+        // gradient()'s branch: the slope it picked (minmod), van Leer's at sL sR > 0, else 0; the face-centroid clip as one scaling by
+        // its last clip, (bound - W_i) / r (0 if it clipped to zero). Used by: face_tangent(), the derivative tests.
+        KOKKOS_INLINE_FUNCTION double gradient_tangent(const Cell* cell, double gapL, double gapR, int v, double dl, double di, double dr) const {
+            const Cell& me = *cell;
+            const double dL = -gapL + cell[-1].c - me.c, dR = gapR + cell[1].c - me.c;
+            const double Wi = me.W[v], left = cell[-1].W[v], right = cell[1].W[v];
+            if (limiter == Limiter::minmod || limiter == Limiter::van_leer) {
+                const double sL = (left - Wi) / dL, sR = (right - Wi) / dR, dsL = (dl - di) / dL, dsR = (dr - di) / dR;
+                if (!(sL * sR > 0)) return 0.0;
+                if (limiter == Limiter::van_leer) {
+                    const double sum = sL + sR, g = 2 * sL * sR / sum;
+                    return (2 * (dsL * sR + sL * dsR) - g * (dsL + dsR)) / sum;
+                }
+                return Kokkos::fabs(sL) < Kokkos::fabs(sR) ? dsL : dsR;
+            }
+            const double dg = (dr - dl) / (dR - dL);
+            if (limiter == Limiter::none) return dg;
+            int last = -1;
+            bool upper = false, zero = false;
+            const double r[2] = {-0.5 * gapL - me.c, 0.5 * gapR - me.c};
+            clips(cell, gapL, gapR, v, last, upper, zero);
+            if (last < 0) return dg;
+            if (zero) return 0.0;
+            const bool from_left = upper ? !(right > left) : !(right < left);  // the neighbour holding the bound (fmax / fmin)
+            return ((from_left ? dl : dr) - di) / r[last];
+        }
+        // The face-centroid clips of gradient() for variable v: the last face that clipped (-1: none), to which bound, and whether to zero.
+        // Used by: gradient_tangent(), gradient_adjoint().
+        KOKKOS_INLINE_FUNCTION void clips(const Cell* cell, double gapL, double gapR, int v, int& last, bool& upper, bool& zero) const {
+            const Cell& me = *cell;
+            const double dL = -gapL + cell[-1].c - me.c, dR = gapR + cell[1].c - me.c;
+            const double Wi = me.W[v], left = cell[-1].W[v], right = cell[1].W[v];
+            double g = ((right - Wi) - (left - Wi)) / (dR - dL);
+            const double r[2] = {-0.5 * gapL - me.c, 0.5 * gapR - me.c};
+            const double lo = Kokkos::fmin(left, right), hi = Kokkos::fmax(left, right);
+            for (int f = 0; f < 2; ++f) {
+                const double dp = g * r[f];
+                if (dp > 0 && Wi + dp > hi) {
+                    g = g * (hi > Wi ? (hi - Wi) / dp : 0.0);
+                    last = f, upper = true, zero = !(hi > Wi);
+                } else if (dp < 0 && Wi + dp < lo) {
+                    g = g * (lo < Wi ? (lo - Wi) / dp : 0.0);
+                    last = f, upper = false, zero = !(lo < Wi);
+                }
+            }
+        }
+        // Adds J^T gbar of gradient() to the bars of W[v] of the left neighbour, the cell and the right neighbour. Used by: face_adjoint(), tests.
+        KOKKOS_INLINE_FUNCTION void gradient_adjoint(const Cell* cell, double gapL, double gapR, int v, double gbar, double& bl, double& bi,
+                                                     double& br) const {
+            const Cell& me = *cell;
+            const double dL = -gapL + cell[-1].c - me.c, dR = gapR + cell[1].c - me.c;
+            const double Wi = me.W[v], left = cell[-1].W[v], right = cell[1].W[v];
+            if (limiter == Limiter::minmod || limiter == Limiter::van_leer) {
+                const double sL = (left - Wi) / dL, sR = (right - Wi) / dR;
+                if (!(sL * sR > 0)) return;
+                double aL, aR;  // d g = aL dsL + aR dsR
+                if (limiter == Limiter::van_leer) {
+                    const double sum = sL + sR, g = 2 * sL * sR / sum;
+                    aL = (2 * sR - g) / sum, aR = (2 * sL - g) / sum;
+                } else {
+                    const bool pick_left = Kokkos::fabs(sL) < Kokkos::fabs(sR);
+                    aL = pick_left ? 1.0 : 0.0, aR = pick_left ? 0.0 : 1.0;
+                }
+                bl += gbar * aL / dL, bi -= gbar * aL / dL;
+                br += gbar * aR / dR, bi -= gbar * aR / dR;
+                return;
+            }
+            int last = -1;
+            bool upper = false, zero = false;
+            if (limiter != Limiter::none) clips(cell, gapL, gapR, v, last, upper, zero);
+            if (last < 0) {
+                br += gbar / (dR - dL), bl -= gbar / (dR - dL);
+                return;
+            }
+            if (zero) return;
+            const double r[2] = {-0.5 * gapL - me.c, 0.5 * gapR - me.c};
+            const bool from_left = upper ? !(right > left) : !(right < left);
+            if (from_left)
+                bl += gbar / r[last];
+            else
+                br += gbar / r[last];
+            bi -= gbar / r[last];
+        }
+        // The tangent of ghost() (affine in W: mirror, copy or a constant); its adjoint is the same map. Used by: the derivatives.
+        KOKKOS_INLINE_FUNCTION State ghost_tangent(const State& dW, bool left) const {
+            const Wall wall = left ? walls.left : walls.right;
+            if (wall == Wall::reflective) return mirror(dW);
+            if (wall == Wall::inflow) return State{};
+            return dW;
+        }
+
         // The point velocity's difference from the fluid's (AREPO-ng's regularisation) for primitives W, density gradient g, centroid c, volume.
         // Used by: time_step(), Kernel::body().
         KOKKOS_INLINE_FUNCTION double drift(const State& W, double g, double c, double volume) const {
@@ -615,6 +707,233 @@ public:
         return smallest;
     }
 
+    // Derivatives of a static step (order 0 or 1, every wall, dt fixed): the face between positions a and b = a + 1 of load<2>(s) as
+    // Kernel::body() computes it, its tangent and its adjoint, then step_tangent() and step_adjoint(). Each function sits beside the
+    // operations of body(): slope() is its gradients, face_value() is Kernel::face_state(). Used by: the derivative tests.
+    using Cell1 = typename Stencil::Cell;
+    template <int Order>
+    KOKKOS_INLINE_FUNCTION static State slope(const Stencil& st, const Cell1 (&cell)[5], const double (&gap)[4], int k) {
+        State g{};
+        if constexpr (Order == 1)
+            if (cell[k].real)
+                for (int v = 0; v < V; ++v) g[v] = st.gradient(cell + k, gap[k - 1], gap[k], v);
+        return g;
+    }
+    template <int Order>
+    KOKKOS_INLINE_FUNCTION static State slope_tangent(const Stencil& st, const Cell1 (&cell)[5], const double (&gap)[4], const State (&dW)[5], int k) {
+        State dg{};
+        if constexpr (Order == 1)
+            if (cell[k].real)
+                for (int v = 0; v < V; ++v) dg[v] = st.gradient_tangent(cell + k, gap[k - 1], gap[k], v, dW[k - 1][v], dW[k][v], dW[k + 1][v]);
+        return dg;
+    }
+    // Kernel::face_state(): the cell's state at a face at offset r half a step on, or W where rho or P would not stay positive (fallback).
+    template <int Order>
+    KOKKOS_INLINE_FUNCTION static State face_value(const Stencil& st, const State& W, const State& g, double r, double dt, bool& fallback) {
+        fallback = false;
+        if constexpr (Order == 0) {
+            return W;
+        } else {
+            Gradient<1> grad;
+            for (int v = 0; v < V; ++v) grad[v][0] = g[v];
+            State Wf = half_step(W, grad, dt, st.gas);
+            for (int v = 0; v < V; ++v) Wf[v] += g[v] * r;
+            fallback = !(Wf[0] > 0 && Wf[2] > 0);
+            return fallback ? W : Wf;
+        }
+    }
+    template <int Order>
+    KOKKOS_INLINE_FUNCTION static State face_value_tangent(const Stencil& st, const State& W, const State& dW, const State& g, const State& dg, double r,
+                                                           double dt, bool fallback) {
+        if (Order == 0 || fallback) return dW;
+        Gradient<1> grad, dgrad;
+        for (int v = 0; v < V; ++v) grad[v][0] = g[v], dgrad[v][0] = dg[v];
+        State dWf = half_step_tangent(W, dW, grad, dgrad, dt, st.gas);
+        for (int v = 0; v < V; ++v) dWf[v] += dg[v] * r;
+        return dWf;
+    }
+    template <int Order>
+    KOKKOS_INLINE_FUNCTION static void face_value_adjoint(const Stencil& st, const State& W, const State& g, double r, double dt, bool fallback,
+                                                          const State& Wfbar, State& Wbar, State& gbar) {
+        if (Order == 0 || fallback) {
+            for (int v = 0; v < V; ++v) Wbar[v] += Wfbar[v];
+            return;
+        }
+        Gradient<1> grad, gb;
+        for (int v = 0; v < V; ++v) grad[v][0] = g[v], gb[v][0] = Wfbar[v] * r;
+        half_step_adjoint(W, grad, dt, st.gas, Wfbar, Wbar, gb);
+        for (int v = 0; v < V; ++v) gbar[v] += gb[v][0];
+    }
+    // The face between positions a and a + 1 (a = 1: the left face of the stencil's slot, a = 2: its right face): its flux (value) and
+    // the flux's tangent for the stencil's tangents dW. Used by: step_tangent().
+    template <int Order>
+    KOKKOS_INLINE_FUNCTION static State face_tangent(const Stencil& st, const Cell1 (&cell)[5], const double (&gap)[4], const State (&dW)[5], int a,
+                                                     double dt, State& value) {
+        const int b = a + 1;
+        const State ga = slope<Order>(st, cell, gap, a), gb = slope<Order>(st, cell, gap, b);
+        const State dga = slope_tangent<Order>(st, cell, gap, dW, a), dgb = slope_tangent<Order>(st, cell, gap, dW, b);
+        const double ra = 0.5 * gap[a] - cell[a].c, rb = -0.5 * gap[a] - cell[b].c;
+        State L{}, R{}, dL{}, dR{};
+        bool fallback;
+        if (cell[a].real) {
+            L = face_value<Order>(st, cell[a].W, ga, ra, dt, fallback);
+            dL = face_value_tangent<Order>(st, cell[a].W, dW[a], ga, dga, ra, dt, fallback);
+        }
+        if (cell[b].real) {
+            R = face_value<Order>(st, cell[b].W, gb, rb, dt, fallback);
+            dR = face_value_tangent<Order>(st, cell[b].W, dW[b], gb, dgb, rb, dt, fallback);
+        }
+        if (!cell[a].real) {
+            L = st.ghost_face(R, cell[b].W, true);
+            dL = st.walls.left == Wall::reflective ? Stencil::mirror(dR) : st.ghost_tangent(dW[b], true);
+        }
+        if (!cell[b].real) {
+            R = st.ghost_face(L, cell[a].W, false);
+            dR = st.walls.right == Wall::reflective ? Stencil::mirror(dL) : st.ghost_tangent(dW[a], false);
+        }
+        return Riemann::flux_tangent(L, R, dL, dR, Vec<1>{1.0}, Vec<1>{0.0}, st.gas, &value);
+    }
+    // Adds J^T Fbar of the face between positions a and a + 1 to the bars of the stencil's W (ghost positions included: their bar goes
+    // to their wall's end cell through the ghost map). Used by: step_adjoint().
+    template <int Order>
+    KOKKOS_INLINE_FUNCTION static void face_adjoint(const Stencil& st, const Cell1 (&cell)[5], const double (&gap)[4], int a, double dt,
+                                                    const State& Fbar, State (&Wbar)[5]) {
+        const int b = a + 1;
+        const State ga = slope<Order>(st, cell, gap, a), gb = slope<Order>(st, cell, gap, b);
+        const double ra = 0.5 * gap[a] - cell[a].c, rb = -0.5 * gap[a] - cell[b].c;
+        State L{}, R{};
+        bool fallback_a = false, fallback_b = false;
+        if (cell[a].real) L = face_value<Order>(st, cell[a].W, ga, ra, dt, fallback_a);
+        if (cell[b].real) R = face_value<Order>(st, cell[b].W, gb, rb, dt, fallback_b);
+        if (!cell[a].real) L = st.ghost_face(R, cell[b].W, true);
+        if (!cell[b].real) R = st.ghost_face(L, cell[a].W, false);
+        State Lbar{}, Rbar{};
+        Riemann::flux_adjoint(L, R, Vec<1>{1.0}, Vec<1>{0.0}, st.gas, Fbar, Lbar, Rbar);
+        // The ghosts in reverse order: R from L, then L from R.
+        if (!cell[b].real) {
+            const State back = st.walls.right == Wall::reflective ? Stencil::mirror(Rbar) : st.ghost_tangent(Rbar, false);
+            for (int v = 0; v < V; ++v) (st.walls.right == Wall::reflective ? Lbar[v] : Wbar[a][v]) += back[v];
+        }
+        if (!cell[a].real) {
+            const State back = st.walls.left == Wall::reflective ? Stencil::mirror(Lbar) : st.ghost_tangent(Lbar, true);
+            for (int v = 0; v < V; ++v) (st.walls.left == Wall::reflective ? Rbar[v] : Wbar[b][v]) += back[v];
+        }
+        State gabar{}, gbbar{};
+        if (cell[a].real) face_value_adjoint<Order>(st, cell[a].W, ga, ra, dt, fallback_a, Lbar, Wbar[a], gabar);
+        if (cell[b].real) face_value_adjoint<Order>(st, cell[b].W, gb, rb, dt, fallback_b, Rbar, Wbar[b], gbbar);
+        if constexpr (Order == 1) {
+            if (cell[a].real)
+                for (int v = 0; v < V; ++v) st.gradient_adjoint(cell + a, gap[a - 1], gap[a], v, gabar[v], Wbar[a - 1][v], Wbar[a][v], Wbar[a + 1][v]);
+            if (cell[b].real)
+                for (int v = 0; v < V; ++v) st.gradient_adjoint(cell + b, gap[b - 1], gap[b], v, gbbar[v], Wbar[b - 1][v], Wbar[b][v], Wbar[b + 1][v]);
+        }
+    }
+    // The tangents of load<2>(s)'s W from the tangent dq of Q (ghosts through the ghost map). Used by: step_tangent().
+    KOKKOS_INLINE_FUNCTION static void load_tangent(const Stencil& st, const Cells& dq, int s, State (&dW)[5]) {
+        int slot[5];
+        for (int k = 0; k < 5; ++k) {
+            slot[k] = st.line.slot(s, k - 2);
+            dW[k] = State{};
+            if (slot[k] < 0) continue;
+            const int i = st.line.order(slot[k]);
+            const double inv = 1.0 / st.line.volume(slot[k]);
+            dW[k] = primitive_tangent(State{st.q(i, 0) * inv, st.q(i, 1) * inv, st.q(i, 2) * inv},
+                                      State{dq(i, 0) * inv, dq(i, 1) * inv, dq(i, 2) * inv}, st.gas);
+        }
+        for (int k = 0; k < 5; ++k) {
+            if (slot[k] >= 0) continue;
+            const int end = k < 2 ? k + 1 : k - 1;
+            if (slot[end] >= 0) dW[k] = st.ghost_tangent(dW[end], k < 2);
+        }
+    }
+
+    // Forward mode: step() of a static line (order 0 or 1, its walls) and the tangent dq -> J dq in the same kernel (dq: a tangent of Q,
+    // extensive, as state()). dt is fixed. The forward is Kernel::body()'s operations (the flux from flux_tangent()'s own intermediates).
+    void step_tangent(double dt, const Cells& dq) {
+        if (motion_ != Motion::static_mesh) throw std::logic_error("hydro::FiniteVolume<1>::step_tangent: a static mesh");
+        if (d_next_.extent(0) < next_.extent(0)) d_next_ = Cells(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_dq_next")), next_.extent(0));
+        const Stencil st = stencil();
+        const auto next = next_, dnext = d_next_;
+        const bool second = order_ == 1;
+        Kokkos::parallel_for(
+            "hydro1::step_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int s) {
+                Cell1 cell[5];
+                double gap[4];
+                st.template load<2>(s, cell, gap);
+                State dW[5];
+                load_tangent(st, dq, s, dW);
+                State F0, F1, dF0, dF1;
+                if (second) {
+                    dF0 = face_tangent<1>(st, cell, gap, dW, 1, dt, F0);
+                    dF1 = face_tangent<1>(st, cell, gap, dW, 2, dt, F1);
+                } else {
+                    dF0 = face_tangent<0>(st, cell, gap, dW, 1, dt, F0);
+                    dF1 = face_tangent<0>(st, cell, gap, dW, 2, dt, F1);
+                }
+                const int i = st.line.order(s);
+                for (int v = 0; v < V; ++v) {
+                    next(i, v) = st.q(i, v) - dt * (F1[v] - F0[v]);
+                    dnext(i, v) = dq(i, v) - dt * (dF1[v] - dF0[v]);
+                }
+            });
+        std::swap(q_, next_);
+        Kokkos::deep_copy(exec_, Kokkos::subview(dq, std::make_pair(0, n_), Kokkos::ALL), Kokkos::subview(d_next_, std::make_pair(0, n_), Kokkos::ALL));
+    }
+
+    // Reverse mode: qbar = Q bar after the step on entry, before it on return (J^T qbar); Q stays the state at the start of the step.
+    // Per slot j: the adjoints of the faces whose fluxes read W_j (the left faces of j - 1 .. j + 2, and the right wall's face), each
+    // recomputed from its own stencil, then the primitive adjoint. No atomics; the result is written beside qbar, then copied.
+    void step_adjoint(double dt, const Cells& qbar) {
+        if (motion_ != Motion::static_mesh) throw std::logic_error("hydro::FiniteVolume<1>::step_adjoint: a static mesh");
+        if (d_next_.extent(0) < next_.extent(0)) d_next_ = Cells(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_dq_next")), next_.extent(0));
+        const Stencil st = stencil();
+        const auto out = d_next_;
+        const bool second = order_ == 1;
+        const int n = n_;
+        Kokkos::parallel_for(
+            "hydro1::step_adjoint", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int j) {
+                const Line& line = st.line;
+                State Wj_bar{};
+                // Face `a` of slot s's stencil; Fbar from the update of the slots on either side of it.
+                auto face = [&](int s, int a) {
+                    Cell1 cell[5];
+                    double gap[4];
+                    st.template load<2>(s, cell, gap);
+                    const int left = line.slot(s, a - 2), right = line.slot(s, a - 1);
+                    const State Fbar = make_state<1>([&](int v) {
+                        return (right >= 0 ? dt * qbar(line.order(right), v) : 0.0) - (left >= 0 ? dt * qbar(line.order(left), v) : 0.0);
+                    });
+                    State Wbar[5] = {};
+                    if (second)
+                        face_adjoint<1>(st, cell, gap, a, dt, Fbar, Wbar);
+                    else
+                        face_adjoint<0>(st, cell, gap, a, dt, Fbar, Wbar);
+                    for (int k = 0; k < 5; ++k) {
+                        const int t = line.slot(s, k - 2);
+                        if (t == j) {
+                            for (int v = 0; v < V; ++v) Wj_bar[v] += Wbar[k][v];
+                        } else if (t < 0) {
+                            const int end = k < 2 ? k + 1 : k - 1;
+                            if (line.slot(s, end - 2) == j) {
+                                const State back = st.ghost_tangent(Wbar[k], k < 2);
+                                for (int v = 0; v < V; ++v) Wj_bar[v] += back[v];
+                            }
+                        }
+                    }
+                };
+                for (int d = -1; d <= 2; ++d) {
+                    const int s = line.slot(j, d);
+                    if (s >= 0) face(s, 1);
+                }
+                if (!line.periodic && j >= n - 2) face(n - 1, 2);  // the right wall's face
+                const int i = line.order(j);
+                const double inv = 1.0 / line.volume(j);
+                const State Ubar = primitive_adjoint(State{st.q(i, 0) * inv, st.q(i, 1) * inv, st.q(i, 2) * inv}, Wj_bar, st.gas);
+                for (int v = 0; v < V; ++v) out(i, v) = qbar(i, v) + Ubar[v] * inv;
+            });
+        Kokkos::deep_copy(exec_, Kokkos::subview(qbar, std::make_pair(0, n_), Kokkos::ALL), Kokkos::subview(d_next_, std::make_pair(0, n_), Kokkos::ALL));
+    }
+
 private:
     // The line's grid, for the kernels' snap of the moved points. Used by: run(), run_fused().
     sorted_mesh::Grid grid() const {
@@ -669,6 +988,7 @@ private:
     bool regularise_;
     int n_, capacity_;
     Cells q_, next_;
+    Cells d_next_;  // the derivatives' output rows (step_tangent, step_adjoint), allocated by their first call
     Points x_, x_next_;
     MeshStats mesh_stats_;
     // Cells from the walls: what the last time_step() saw at the ends, and a request at each wall at most.
