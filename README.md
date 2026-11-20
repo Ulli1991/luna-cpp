@@ -207,6 +207,12 @@ Density in three of the new stages at t = 0.1 (top) and t = 4 (bottom), at N = 4
 
 ![Super-hard tube v2: the true vacuum](docs/figures/super_tube_v2_V.png)
 
+### Stage L alone
+
+![Stage L alone: L1 against resolution](docs/figures/stage_l_convergence.png)
+
+The tube v2's 10⁶ density jump on its own, with density ratios of 10³, 10⁶ and 10⁹: one Riemann problem on a line wide enough that no wave reaches its open walls, so it has an exact solution up to t = 4 (`stage-l-3`, `-6`, `-9` in `problems_1d.hpp`). Shown is the density error against the exact solution at t = 0.1 and 4, for N = 1024 to 32768. LUNA with its floors on and our static mesh agree to the digits shown, and all converge at first order. The moving mesh reaches t = 4 at 10³ and 10⁶, and is 1.2 to 1.7 times better than static at 10⁶. At 10⁹ it stops: at N = 1024 the near-vacuum gas at the open wall blows up by t = 0.015, and from 2048 on that gas reaches the wall at t ≈ 3.7 ([#14](https://github.com/Ulli1991/luna-cpp/issues/14)). On its own the stage does not pile up its points. The tube's stall ([#30](https://github.com/Ulli1991/luna-cpp/issues/30)) needs the 10⁻⁶ slab squeezed between two shocks, which a reduced case holds (CTest `hydro1d_issue30`, disabled until #30 is fixed). Setup, data and the diagnosis are in research_notes/stage_l_2026-11-19.md.
+
 ### All 30 tests against resolution
 
 ![1D ladder](docs/figures/ladder_1d.png)

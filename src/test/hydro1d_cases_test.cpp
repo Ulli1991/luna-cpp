@@ -272,6 +272,18 @@ int main(int argc, char* argv[]) {
     Check check;
     const char* names[3] = {"rho", "v", "P"};
 
+    // luna-cpp #30, the reproducer (CTest `hydro1d_issue30`, disabled until #30 is fixed): stage L's window of the tube v2, the high state,
+    // the 1e-6 slab 1 wide, then the ambient gas, 256 cells (the tube's spacing at N = 4096), moving, to t = 0.35. Once the slab is
+    // squeezed between L's shock and the ambient's (t = 0.137), its ~100 generators pile into a layer about 1e-6 wide: measured
+    // 8.9 million steps to t = 0.35 (research_notes/stage_l_2026-11-19.md). The gate: t = 0.35 within 100000 steps, smallest cell > 1e-3 h.
+    if (argc > 1 && std::string(argv[1]) == "issue30") {
+        const double h = pr::super_tube_v2_length / 4096;
+        const Run r = simulate("super-v2-l", 256, Motion::moving, Limiter::face_centroid, 0, 0.35, true, 100000);
+        check.expect(r.reached && r.smallest > 1e-3 * h, "super-v2-l N=256 moving to t = 0.35 (#30): t = " + sci(r.t) + " after " + std::to_string(r.steps) +
+                                                             " steps, smallest cell " + sci(r.smallest / h) + " h (> 1e-3 h)");
+        return check.failed() != 0;
+    }
+
     // L1 against LUNA, per limiter, and moving; the orders.
     std::map<std::pair<std::string, int>, std::vector<double>> ladder;  // (problem + series, variable): L1 over the N of the gates
     std::map<std::string, std::vector<double>> sizes;
@@ -476,6 +488,14 @@ int main(int argc, char* argv[]) {
         const Run r = simulate("noh", 256, Motion::moving);
         const Three l1 = l1_of("noh", r.cells);
         check.expect(r.reached && r.steps > 1000 && l1[0] < 1.3 * 4.912e-3, "noh N=256 moving, AREPO's rule: " + std::to_string(r.steps) + " steps (> 1000), L1 rho " + sci(l1[0]) + " (< 1.3 x 4.91e-3)");
+    }
+    // Stage L of the tube v2 alone (density 1e6, pressure 1e12, one Riemann problem to t = 4), moving at N = 1024: reaches t = 4 with
+    // L1 rho 3.016e-3 against the exact solution (scripts/stage_l.py, 11163 steps); its slab is compressed by one shock only, no pile-up.
+    {
+        const Run r = simulate("stage-l-6", 1024, Motion::moving);
+        const Three l1 = l1_of("stage-l-6", r.cells);
+        check.expect(r.reached && l1[0] < 1.3 * 3.016e-3, "stage-l-6 N=1024 moving to t = 4: " + std::to_string(r.steps) + " steps, L1 rho " + sci(l1[0]) +
+                                                              " (< 1.3 x 3.02e-3)");
     }
     // Teeth: a run stopped at 0.9 t misses the bound (LUNA's test_bound_catches_a_short_run).
     {
