@@ -416,7 +416,8 @@ public:
         KOKKOS_INLINE_FUNCTION void entry(Cell&, const A&...) const {}
         template <class... A>
         KOKKOS_INLINE_FUNCTION void solve(Cell&, const A&...) const {}
-        KOKKOS_INLINE_FUNCTION void clip(Cell&, const Vec&) const {}
+        KOKKOS_INLINE_FUNCTION void clip(Cell&, int, const Vec&) const {}
+        KOKKOS_INLINE_FUNCTION void clipped(Cell&, int, bool, bool, int) const {}
         KOKKOS_INLINE_FUNCTION void finish(Cell&, int) const {}
     };
     // The sweep of time_step(), one thread per cell: the point velocity (moving), then the limited least-squares gradients (order 1).
@@ -522,15 +523,18 @@ public:
                     const int f = geo.face_at(k);
                     if (any_tiny && magnitude_of(f) < tiny) continue;
                     const Vec offset = geo.face_offset(f, i);
-                    hook.clip(cell, offset);
+                    hook.clip(cell, f, offset);
                     const hydro::Vec<D, G> rg = cast<G>(offset);
                     for (int v = 0; v < V; ++v) {
                         const G dp = dot(grad[v], rg);
                         if constexpr (exact) {
-                            if (dp > 0 && Wi[v] + dp > hi[v])
+                            if (dp > 0 && Wi[v] + dp > hi[v]) {
                                 grad[v] = grad[v] * (hi[v] > Wi[v] ? (hi[v] - Wi[v]) / dp : 0.0);
-                            else if (dp < 0 && Wi[v] + dp < lo[v])
+                                hook.clipped(cell, v, true, !(hi[v] > Wi[v]), f);
+                            } else if (dp < 0 && Wi[v] + dp < lo[v]) {
                                 grad[v] = grad[v] * (lo[v] < Wi[v] ? (lo[v] - Wi[v]) / dp : 0.0);
+                                hook.clipped(cell, v, false, !(lo[v] < Wi[v]), f);
+                            }
                         } else {
                             if (dp > 0 && dp > hi[v])
                                 grad[v] = grad[v] * (hi[v] > 0 ? hi[v] / dp : G(0));
@@ -1424,12 +1428,13 @@ public:
         Rows dprim, dg;  // Tangent
         Prims prim;
         Geometry geo;
-        Rows fit;                                                // not Tangent
-        Kokkos::View<int**, Kokkos::LayoutRight, Memory> flags;  // not Tangent
+        Rows fit{};                                                // not Tangent
+        Kokkos::View<int**, Kokkos::LayoutRight, Memory> flags{};  // not Tangent
         static constexpr int U = fit_size;
         static constexpr bool exact = std::is_same_v<G, double>;
         static constexpr int UM = exact ? 1 : U, VM = exact ? 1 : V;  // the own fit, only for a reduced policy
         static constexpr int VT = Tangent ? V : 1;
+        static constexpr int VG = exact ? 1 : V;  // the clip's working gradient: a double policy takes the forward's clips (clipped())
         struct Cell {
             State Wi, dWi;
             double db[VT][U];
@@ -1437,9 +1442,10 @@ public:
             double lo[V], hi[V], dlo[V], dhi[V];
             int lo_f[V], hi_f[V];
             double Lc[U][U], M0[U];
-            Gradient<D> grad, g0, dg0;
+            Gradient<D> g0, dg0;
+            Vec grad[VG];
             bool clipped[V], upper[V], zero[V];
-            Vec offset[V];
+            int clip_f[V];  // the face of the last clip (its offset recomputed in finish())
         };
         KOKKOS_INLINE_FUNCTION Cell begin(int i, const State& Wi) const {
             Cell c;
@@ -1520,20 +1526,26 @@ public:
                 solve_factored(c.Lc, rhs, xs);
                 for (int v = 0; v < V; ++v) c.dg0[v] = make_vec<D>([&](int a) { return xs[v][1 + a]; });
             }
-            for (int v = 0; v < V; ++v) c.grad[v] = c.g0[v];
+            for (int v = 0; v < VG; ++v) c.grad[v] = c.g0[v];
         }
-        // A face of the limiter walk: the clip of limited_core(), on the double gradient.
-        KOKKOS_INLINE_FUNCTION void clip(Cell& c, const Vec& offset) const {
-            for (int v = 0; v < V; ++v) {
-                const double dp = dot(c.grad[v], offset);
-                if (dp > 0 && c.Wi[v] + dp > c.hi[v]) {
-                    c.grad[v] = c.grad[v] * (c.hi[v] > c.Wi[v] ? (c.hi[v] - c.Wi[v]) / dp : 0.0);
-                    c.clipped[v] = true, c.upper[v] = true, c.zero[v] = !(c.hi[v] > c.Wi[v]), c.offset[v] = offset;
-                } else if (dp < 0 && c.Wi[v] + dp < c.lo[v]) {
-                    c.grad[v] = c.grad[v] * (c.lo[v] < c.Wi[v] ? (c.lo[v] - c.Wi[v]) / dp : 0.0);
-                    c.clipped[v] = true, c.upper[v] = false, c.zero[v] = !(c.lo[v] < c.Wi[v]), c.offset[v] = offset;
+        // A face (f) of the limiter walk. A reduced policy: the clip of limited_core() on its own double gradient. A double policy takes
+        // the forward's clips instead (clipped(): the same decisions, no copy of the gradient).
+        KOKKOS_INLINE_FUNCTION void clip(Cell& c, int f, const Vec& offset) const {
+            if constexpr (!exact) {
+                for (int v = 0; v < V; ++v) {
+                    const double dp = dot(c.grad[v], offset);
+                    if (dp > 0 && c.Wi[v] + dp > c.hi[v]) {
+                        c.grad[v] = c.grad[v] * (c.hi[v] > c.Wi[v] ? (c.hi[v] - c.Wi[v]) / dp : 0.0);
+                        c.clipped[v] = true, c.upper[v] = true, c.zero[v] = !(c.hi[v] > c.Wi[v]), c.clip_f[v] = f;
+                    } else if (dp < 0 && c.Wi[v] + dp < c.lo[v]) {
+                        c.grad[v] = c.grad[v] * (c.lo[v] < c.Wi[v] ? (c.lo[v] - c.Wi[v]) / dp : 0.0);
+                        c.clipped[v] = true, c.upper[v] = false, c.zero[v] = !(c.lo[v] < c.Wi[v]), c.clip_f[v] = f;
+                    }
                 }
             }
+        }
+        KOKKOS_INLINE_FUNCTION void clipped(Cell& c, int v, bool upper, bool zero, int f) const {
+            if constexpr (exact) c.clipped[v] = true, c.upper[v] = upper, c.zero[v] = zero, c.clip_f[v] = f;
         }
         // Tangent: the limited gradient's tangent at the clip pattern, as limited_gradient_tangent(), into dg.
         // Not: the stored fit (FitRow layout) and flags (clipped | upper << 1 | zero << 2, then the bound's face).
@@ -1544,7 +1556,7 @@ public:
                     if (c.clipped[v] && c.zero[v]) {
                         dgv = Vec{};
                     } else if (c.clipped[v]) {
-                        const Vec o = c.offset[v];
+                        const Vec o = geo.face_offset(c.clip_f[v], i);
                         const double bound = c.upper[v] ? c.hi[v] : c.lo[v], dbound = c.upper[v] ? c.dhi[v] : c.dlo[v];
                         const double den = dot(c.g0[v], o);
                         const double s = (bound - c.Wi[v]) / den, ds = (dbound - c.dWi[v] - s * dot(c.dg0[v], o)) / den;
@@ -1557,9 +1569,10 @@ public:
                     for (int s = 0; s <= p; ++s) fit(i, FitRow::factor + p * U + s) = c.Lc[p][s];
                 for (int p = 0; p < U; ++p) fit(i, FitRow::row0 + p) = c.M0[p];
                 for (int v = 0; v < V; ++v) {
+                    const Vec offset = c.clipped[v] ? geo.face_offset(c.clip_f[v], i) : Vec{};
                     for (int a = 0; a < D; ++a) {
                         fit(i, FitRow::g0 + D * v + a) = c.g0[v][a];
-                        fit(i, FitRow::offset + D * v + a) = c.offset[v][a];
+                        fit(i, FitRow::offset + D * v + a) = offset[a];
                     }
                     fit(i, FitRow::bound + v) = c.upper[v] ? c.hi[v] : c.lo[v];
                     flags(i, v) = (c.clipped[v] ? 1 : 0) | (c.upper[v] ? 2 : 0) | (c.zero[v] ? 4 : 0);

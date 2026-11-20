@@ -14,7 +14,7 @@ repo="${NEW:?NEW: the worktree with the new pin}"
 p="${OUT:-$repo/build-pin-proof}"; mkdir -p "$p"
 cd $repo && git log --oneline -1 && git -C extern/voronoi-cpp log --oneline -1 | cut -c1-60
 for san in OFF ON; do
-    b=$repo/build-ci-$san
+    b=${BUILD_ROOT:-$repo}/build-ci-$san
     cmake -S . -B $b -DCMAKE_BUILD_TYPE=Release -DKokkos_DIR=/u/uli/kokkos-gcc15/lib64/cmake/Kokkos -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DVORONOI_SANITIZERS=$san > $p/ci-$san.cfg.log 2>&1
     cmake --build $b --parallel 18 > $p/ci-$san.build.log 2>&1; echo "build $san exit $?"; grep -E "warning|error" $p/ci-$san.build.log | grep -v "extern/" | head -5
     if [[ $san == OFF ]]; then (module load clang/18; bash scripts/lint_cpp.sh $b > $p/ci-$san.lint.log 2>&1; echo "lint exit $?"; grep -E "warning:|error:" $p/ci-$san.lint.log | grep -v "non-user" | head -10); fi
