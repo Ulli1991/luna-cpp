@@ -1,0 +1,19 @@
+case 1d-hll
+dim 1
+shape 64
+lengths 1.0
+gamma 1.4
+cfl 0.8
+limiter 1
+riemann hll
+boundary 1
+floors 0
+smallr 0.0001
+smallc 0.001
+allow_first_order 0
+steps 10
+kernel pallas
+luna_commit 60cf8410f67ddb7c4ca4c28050665094b982dd66
+jax 0.10.1
+device NVIDIA A100-SXM4-40GB
+nan_cells 0

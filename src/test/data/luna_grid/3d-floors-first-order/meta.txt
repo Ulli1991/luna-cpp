@@ -1,0 +1,19 @@
+case 3d-floors-first-order
+dim 3
+shape 8 8 12
+lengths 1.0 0.75 1.3
+gamma 1.4
+cfl 0.8
+limiter 1
+riemann hllc
+boundary 1
+floors 1
+smallr 0.0001
+smallc 0.001
+allow_first_order 1
+steps 10
+kernel pallas
+luna_commit 60cf8410f67ddb7c4ca4c28050665094b982dd66
+jax 0.10.1
+device NVIDIA A100-SXM4-40GB
+nan_cells 0

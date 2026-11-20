@@ -404,8 +404,61 @@ KOKKOS_INLINE_FUNCTION State<D> to_lab_adjoint(const State<D>& Fbar, Vec<D> w) {
 
 }  // namespace detail
 
+// NaN-propagating minimum and maximum, as jnp.minimum and jnp.maximum (Kokkos::fmin drops a NaN).
+// Used by: HLL::axis_core, HLLC::axis_core, the grid's limiters and diode ghosts (grid.hpp).
+template <class T>
+KOKKOS_INLINE_FUNCTION T nan_min(T a, T b) {
+    return a != a ? a : b != b ? b : a < b ? a : b;
+}
+template <class T>
+KOKKOS_INLINE_FUNCTION T nan_max(T a, T b) {
+    return a != a ? a : b != b ? b : a > b ? a : b;
+}
+
+// One side of a grid face in the face's normal frame: density, normal velocity, pressure and the two transverse velocities (0 where
+// the dimension has none), as LUNA's fluxes.rotate_primitive_pair. Used by: HLL::axis_core, HLLC::axis_core, grid::face_flux.
+template <class T>
+struct AxisSide {
+    T rho, vn, P, vt1, vt2;
+};
+// The flux in that frame: mass, normal momentum, the two transverse momenta, energy. Used by: the same.
+template <class T>
+using AxisFlux = Kokkos::Array<T, 5>;
+
 // HLL, LUNA's _hll_core. Used by: FaceFlux::solve() / 1D Kernel as the Riemann parameter.
 struct HLL {
+    // LUNA's fluxes._hll_core operation for operation (its products, sums and their order, one reciprocal of S_R - S_L): the flux
+    // across a grid face from the two sides in the face's normal frame. Used by: grid::face_flux (grid.hpp).
+    template <class T>
+    KOKKOS_INLINE_FUNCTION static AxisFlux<T> axis_core(const AxisSide<T>& L, const AxisSide<T>& R, double gamma) {
+        const T inv_gm1 = T(1.0 / (gamma - 1.0));
+        const T c2L = T(gamma) * L.P * (T(1) / L.rho), c2R = T(gamma) * R.P * (T(1) / R.rho);
+        const T cL = c2L > 0 ? Kokkos::sqrt(c2L) : T(0), cR = c2R > 0 ? Kokkos::sqrt(c2R) : T(0);
+        const T SL = nan_min(L.vn - cL, R.vn - cR), SR = nan_max(L.vn + cL, R.vn + cR);
+        // The flux and conserved state of one side.
+        auto side = [&](const AxisSide<T>& s, AxisFlux<T>& F, AxisFlux<T>& U) {
+            const T ke = T(0.5) * (s.vn * s.vn + s.vt1 * s.vt1 + s.vt2 * s.vt2);
+            const T E = s.P * inv_gm1 + s.rho * ke, m = s.rho * s.vn;
+            F = {m, m * s.vn + s.P, m * s.vt1, m * s.vt2, (E + s.P) * s.vn};
+            U = {s.rho, s.rho * s.vn, s.rho * s.vt1, s.rho * s.vt2, E};
+        };
+        AxisFlux<T> FL, UL, FR, UR;
+        if (SL >= T(0)) {
+            side(L, FL, UL);
+            return FL;
+        }
+        if (SR <= T(0)) {
+            side(R, FR, UR);
+            return FR;
+        }
+        side(L, FL, UL);
+        side(R, FR, UR);
+        const T inv_dS = T(1) / (SR - SL);
+        AxisFlux<T> F;
+        for (int v = 0; v < 5; ++v) F[v] = (SR * FL[v] - SL * FR[v] + SL * SR * (UR[v] - UL[v])) * inv_dS;
+        return F;
+    }
+
     template <int D, class T>
     KOKKOS_INLINE_FUNCTION static StateT<D, T> flux(const StateT<D, T>& L, const StateT<D, T>& R, Vec<D, T> n,
                                                     Vec<D, T> w, const Gas& gas) {
@@ -507,6 +560,39 @@ struct HLLC {
         constexpr T eps = T(1e-20);
         return Kokkos::fabs(d) < eps ? (d < 0 ? -eps : eps) : d;
     }
+
+    // LUNA's fluxes._hllc_core operation for operation: its reciprocals, 1e-20 guards, branch order F_L, F*_L, F*_R, F_R (c^2 < 0 on
+    // either side takes F_R) and star state rho* (1, S_M, v_t1, v_t2, E*). flux() with n = e_d, w = 0 differs from it by rounding
+    // only: its star momentum is rho* (vn + (S_M - vn)) and its kinetic energy sums x, y, z. Used by: grid::face_flux (grid.hpp).
+    template <class T>
+    KOKKOS_INLINE_FUNCTION static AxisFlux<T> axis_core(const AxisSide<T>& L, const AxisSide<T>& R, double gamma) {
+        const T inv_gm1 = T(1.0 / (gamma - 1.0));
+        const T inv_rhoL = T(1) / L.rho, inv_rhoR = T(1) / R.rho;
+        const T c2L = T(gamma) * L.P * inv_rhoL, c2R = T(gamma) * R.P * inv_rhoR;
+        const bool ok = c2L >= 0 && c2R >= 0;
+        const T cL = c2L > 0 ? Kokkos::sqrt(c2L) : T(0), cR = c2R > 0 ? Kokkos::sqrt(c2R) : T(0);
+        const T SL = nan_min(L.vn - cL, R.vn - cR), SR = nan_max(L.vn + cL, R.vn + cR);
+        const T denomL = L.rho * (SL - L.vn), denomR = R.rho * (SR - R.vn);
+        const T SM = (R.P - L.P + denomL * L.vn - denomR * R.vn) / nonzero(denomL - denomR);
+        // 0 F_L, 1 F*_L, 2 F*_R, 3 F_R, as LUNA's nested where (a NaN fails every test and takes F_R).
+        const int branch = !ok ? 3 : SL >= 0 ? 0 : SM >= 0 ? 1 : SR > 0 ? 2 : 3;
+        const bool left = branch < 2, star = branch == 1 || branch == 2;
+        // The upwind side copied member by member (a reference to one of the two sides would put both in local memory).
+        const T rho = left ? L.rho : R.rho, vn = left ? L.vn : R.vn, P = left ? L.P : R.P;
+        const T vt1 = left ? L.vt1 : R.vt1, vt2 = left ? L.vt2 : R.vt2, inv_rho = left ? inv_rhoL : inv_rhoR;
+        const T ke = T(0.5) * (vn * vn + vt1 * vt1 + vt2 * vt2);
+        const T E = P * inv_gm1 + rho * ke, m = rho * vn;
+        AxisFlux<T> F = {m, m * vn + P, m * vt1, m * vt2, (E + P) * vn};
+        if (!star) return F;
+        const T S = left ? SL : SR, denom = left ? denomL : denomR;
+        const T rho_star = denom / nonzero(S - SM);
+        const T E_star = E * inv_rho + (SM - vn) * (SM + P * (T(1) / nonzero(denom)));
+        const AxisFlux<T> U = {rho, rho * vn, rho * vt1, rho * vt2, E};
+        const AxisFlux<T> U_star = {rho_star, rho_star * SM, rho_star * vt1, rho_star * vt2, rho_star * E_star};
+        for (int v = 0; v < 5; ++v) F[v] = F[v] + S * (U_star[v] - U[v]);
+        return F;
+    }
+
     template <int D, class T>
     KOKKOS_INLINE_FUNCTION static StateT<D, T> flux(const StateT<D, T>& L, const StateT<D, T>& R, Vec<D, T> n,
                                                     Vec<D, T> w, const Gas& gas) {

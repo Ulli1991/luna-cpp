@@ -7,6 +7,15 @@ Owner decisions so far (2026-11-19):
 - phase 1 builds the first kernel in both CUDA and Kokkos, and that measurement decides how the rest is written;
 - no Pallas-style translation: we take LUNA's numerics, not its XLA/Pallas structure.
 
+Owner decisions of 2026-11-20 (the open questions at the end):
+- FMA contraction on by default, and a bit-exact build (`LUNA_BIT_EXACT`) for the tests against LUNA;
+- the per-axis HLLC and HLL cores in euler.hpp, beside `flux()`;
+- the Kokkos form stays after phase 1 regardless, as the CI and MI300 path;
+- a `--grid` flag in the existing benches;
+- LUNA's references are stored in phase 0, in luna-reference-solutions `luna/`.
+
+Phase 0 is done (section 8); phase 1 is in progress (section 9).
+
 ## 1. Purpose, and what of LUNA is needed
 
 **Uses**
@@ -71,8 +80,8 @@ It also multiplies by the zero components of n and w, which the compiler must ke
 - There are no ghost arrays. Boundaries are an index map in the load.
 
 **Kernel K1: the whole step in one launch.**
-This is LUNA's fused organisation, without the steps outside the kernel that cost LUNA 22 % (its `pad` and `add` fusions, CODE_NOTES 2026-11-04). For one cell, in this order:
-1. Load the stencil: every cell within L1 distance 2 (25 points in 3D). Each load converts U to floored W on the fly, and the boundary index map supplies the ghosts.
+This is LUNA's fused organisation, without the steps outside the kernel that cost LUNA 22 % (its `pad` and `add` fusions, CODE_NOTES 2026-11-04). As built (phase 0), the step reads W (the primitives) and U, and writes `U_next` and its primitives `W_next`, so the next step's W costs no kernel of its own. That is 160 B/cell of traffic instead of 80, still far from the bandwidth limit, and cheaper than converting U to W 25 times per cell. For one cell, in this order:
+1. Load the stencil of W: every cell within L1 distance 2 (25 points in 3D). The boundary index map supplies the ghosts.
 2. Compute the slopes, the predictor for the cell itself, and the predictors for its six neighbours.
 3. Compute the six faces (HLLC), with the face guard.
 4. Compute `U_next = U + dt * sum_d (F_minus - F_plus) * inv_dx_d`, summed x, then y, then z, as LUNA does.
@@ -215,10 +224,79 @@ Effort is in working days of one agent, with GPU queue time on top.
   - **#9 (local time steps):** out of scope here.
 - **docs/ideas.md** gets one new row, "fixed grid mode (this note)", status next, when the owner approves.
 
-## Open questions for the owner
+## Open questions for the owner (answered 2026-11-20, see the top)
 
 1. **FP64 bits.** Bitwise LUNA (`-fmad=false`, about 2–6 % slower) by default, or FMA by default with a bitwise build for tests?
 2. **HLLC.** An axis-specialised HLLC core in euler.hpp (bitwise LUNA, cheaper), beside the existing `HLLC::flux`, rather than reusing `HLLC::flux` with `n = e_d` (rounding-level only)?
 3. **Keep the Kokkos form** after phase 1 as the CI and MI300 path even if CUDA wins, or drop it?
 4. **Where the grid sits in the drivers.** A `--grid` flag in the existing benches (`hydro_sedov`, `hydro_kh2d`, `hydro_wave3d`, `hydro_1d`), or a separate bench per problem?
 5. **The first LUNA reference runs** (Sedov 3D, 3D sound wave and the bits npz): store them in `luna-reference-solutions/luna/` now, in phase 0?
+
+## 8. Phase 0: what was built and what it showed (2026-11-20)
+
+**Code** (branch `fixed-grid`):
+- `src/hydro/grid.hpp`: the per-cell numerics, ported from LUNA operation for operation:
+  - limiters minmod, MC, van Leer;
+  - LUNA's 1D, 2D and 3D Jacobian rows;
+  - the predictor;
+  - the face rule and floors;
+  - the face flux;
+  - primitives;
+  - the time step;
+  - the ghost index map for boundaries 0, 1, 2 and 4;
+  - `cell_step()`.
+- `euler.hpp`: `HLLC::axis_core` and `HLL::axis_core`, plus NaN-propagating `nan_min` / `nan_max` (as `jnp.minimum` / `jnp.maximum`).
+- `src/hydro/grid_finite_volume.hpp`: `GridFiniteVolume<D, Riemann>` with `refresh()`, `time_step()` and `step(dt)`, and the Kokkos kernel (a `TeamPolicy`, one team per tile).
+- `src/hydro/grid_cuda.hpp`: the CUDA kernel. It uses the same `cell_step()` and numbering; its block minimum is a shared-memory tree and an `atomicMin` on an order key.
+- `hydro_sedov <side> grid --grid`: LUNA's Sedov run.
+- `src/test/grid_test.cpp`, with 25 LUNA cases in `src/test/data/luna_grid`:
+  - dimensions: 1D 64, 2D 16×24, 3D 8×8×12;
+  - limiters minmod, MC and van Leer;
+  - HLLC and HLL;
+  - boundaries 0, 1 and 2 (and 4 in 3D);
+  - floors, with and without first order;
+  - 10 steps each.
+- `scripts/luna_grid_bits.py`, `luna_grid_refs.py`, `grid_build.sh`, `grid_ctest_a100.sh`, `grid_phase1_a100.sh`.
+
+**Bits against LUNA.** Without FMA contraction luna-cpp's step is LUNA's step bit for bit:
+- every one of the 25 cases;
+- on the CPU (OpenMP build, gcc 15) and on the A100 (`LUNA_BIT_EXACT`);
+- the Kokkos and CUDA kernels alike;
+- every time step and the state after 10 steps.
+
+The larger cases are in luna-reference-solutions `luna/grid_bits` (1D 4096, 2D 128×192, 3D 32×48×64 with MC and minmod, 1, 10 and 100 steps): job 32645116, below. Two things had to be learnt from LUNA's compiled HLO, because XLA rewrites LUNA's Python:
+- **Division by a constant.** XLA turns a division by a compile-time constant into a product with its reciprocal. `prim_to_cons` computes `P * (1 / (gamma - 1))`, and the dt function computes `(|v| + c) * (1 / dx)`.
+- **Folded constants in the time step.** XLA folds `gamma * ((gamma - 1) * e)` into `e * (gamma (gamma - 1))`.
+
+The Pallas (Triton) kernels and `U + dt dU` were not rewritten: their bits came out right on the first try. `grid.hpp` mirrors both rewrites, `to_conserved` and `cell_dt`. Before that, the states matched while 1 to 5 of 10 time steps were 1 ulp off.
+
+**With FMA contraction** (the default build), the grid agrees with LUNA to rounding: at most 8.6e-16 of max |U| after 10 steps. The CUDA and Kokkos kernels then differ from each other in the last bits (266,658 values of 32×32×64×5 after 10 steps), because nvcc contracts the same source differently in the two kernels. `grid_test` asks for bits only where nothing contracts.
+
+**References in luna-reference-solutions** (branch `fixed-grid`, `luna/`):
+- `grid_bits`;
+- `sedov3d/sedov3d_128.npz`: LUNA's Sedov run to 1e4 yr, 1075 steps, 1.09 G cell updates/s on ravg1196 for the whole jitted run;
+- `sound3d`: luna-cpp's sound wave, amplitudes 1e-3 and 1e-6, nx 64, 128 and 256.
+
+All are from SLURM 32610243, LUNA 60cf841. The 3D 128³ bits case (81 MB) stays in `/ptmp/uli/luna-cpp-fixed-grid/luna_refs/grid_bits`, out of luna-reference-solutions, because of the /raven/u quota.
+
+**First speed, K1** (job 32610551, ravg1132, Sedov 128³, minmod, 30 steps, median after warm-up):
+- the CUDA kernel 0.41 G cell updates/s (2.46 ns/cell);
+- the Kokkos kernel 0.44 G (2.27 ns/cell);
+- LUNA's Pallas step on this problem about 1.1 G.
+
+K1 with 7 predictors and 6 faces per cell is about 2.5 times slower than LUNA: phase 1 profiles why (section 9).
+
+## 9. Phase 1: CUDA against Kokkos against LUNA
+
+(Filled as the measurements run: `scripts/grid_phase1_a100.sh`, one job, one node, clock logged.)
+
+## 10. Speed LUNA leaves unused
+
+LUNA's own profile, CODE_NOTES 2026-11-04 (Sedov 256³, FP64, minmod, HLLC, split Pallas path, at ncu's base clock of 1095 MHz), and what each item would be worth:
+- **The padding and update kernels.** `loop_pad_fusion_1` (cons_to_prim and the ghost pad, 152 B/cell, 86 % of DRAM peak) is 12 % of the step. `loop_add_fusion_1` (`U + dt dU`, 119 B/cell) is 9 %. Both are pure bandwidth: 22 % of the step and about 270 of its 515 B/cell. K1 needs neither: the ghosts are an index map, and the update and next W are written by the step kernel.
+- **Repeated predictors and faces.** The split path computes each predictor once, but each face twice, once from each side: 6 faces per cell. Its faces kernel is 65 % of the step at 78 % of the FP64 pipe. The fused path also computes 7 predictors per cell. Computing each face once would halve the faces' arithmetic. LUNA's own CUDA attempt at this did not pay (0.95–1.00×).
+- **Spills.** LUNA's fused FP64 Pallas kernel: 255 registers and 10.5 M spill requests. Its split faces kernel: 128–132 registers, 18.5–25 % of warps active, no spills.
+- **No FMA.** Triton-Pallas contracts nothing: ncu counts 0 fused FMAs, and estimates up to +39 % (FP64) and +50 % (FP32) from contraction. LUNA's inline-PTX prototype measured +2–6 % on top of its reciprocals.
+- **Node-to-node spread.** The same LUNA code runs at 833 M cell/s on ravg1175 and 428–562 on ravg1002 at 128³, with the cause not found. Every phase 1 job logs the node name and the SM clock every second, so the spread can be probed in our kernels and LUNA's on the same node.
+
+Each item gets its measured number here as phase 1 runs.

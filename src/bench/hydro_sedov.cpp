@@ -4,10 +4,13 @@
 
 #include "pin_notice.hpp"
 #include "finite_volume.hpp"
+#include "grid_finite_volume.hpp"
 #include "snapshot.hpp"
 #include "support.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -406,6 +409,112 @@ void run(const Options& o, Points points) {
               << std::dec << "\n";
 }
 
+// Writes the grid's state (5, n, n, n) as a float64 .npy file. Used by: run_grid (--out=file.npy).
+void write_state_npy(const std::string& path, const std::vector<double>& U, int n) {
+    char header[128];
+    int length = std::snprintf(header, sizeof header, "{'descr': '<f8', 'fortran_order': False, 'shape': (5, %d, %d, %d), }", n, n, n);
+    while ((10 + length + 1) % 64 != 0) header[length++] = ' ';
+    header[length++] = '\n';
+    std::ofstream file(path, std::ios::binary);
+    file.write("\x93NUMPY\x01\x00", 8);
+    const unsigned short size = static_cast<unsigned short>(length);
+    file.write(reinterpret_cast<const char*>(&size), 2);
+    file.write(header, length);
+    file.write(reinterpret_cast<const char*>(U.data()), static_cast<std::streamsize>(U.size() * sizeof(double)));
+}
+
+// --grid: LUNA's fixed-grid Sedov (sedov3d_run.py: units on, 1e51 erg in the central 2 x 2 x 2 cells, BOUNDARY 1, CFL 0.8, MUSCL-Hancock,
+// --limiter=minmod|mc|vanleer, minmod by default as LUNA's run) with hydro::grid::GridFiniteVolume (research_notes/fixed_grid_2026-11-19.md).
+// --kernel=kokkos|cuda, --tile=x,y,z, --cfl. Each step's wall time includes the time step (one fence a step). Used by: main.
+template <class R>
+void run_grid(const Options& o, int argc, char** argv) {
+    namespace g = hydro::grid;
+    const Sedov sedov;
+    const int n = o.side;
+    const Exec exec;
+    g::Options go;
+    const std::string limiter = flag(argc, argv, "--limiter", "minmod");
+    go.limiter = limiter == "mc" ? g::Limiter::mc : limiter == "vanleer" ? g::Limiter::van_leer : g::Limiter::minmod;
+    go.boundary = g::Boundary::outflow;
+    go.cfl = std::stod(flag(argc, argv, "--cfl", "0.8"));
+    const std::string kernel = flag(argc, argv, "--kernel", "cuda");
+    go.kernel = kernel == "kokkos" ? g::Kernel::kokkos : g::Kernel::cuda;
+    if (const std::string t = flag(argc, argv, "--tile", ""); !t.empty()) std::sscanf(t.c_str(), "%d,%d,%d", &go.tile[0], &go.tile[1], &go.tile[2]);
+    Kokkos::Timer timer;
+    g::GridFiniteVolume<3, R> fv(exec, {n, n, n}, {o.box.side[0], o.box.side[1], o.box.side[2]}, sedov.gamma, go);
+    const g::Params& p = fv.params();
+    {  // sedov3d.sedov_blast_3d with units: background at rest, p_inject = (gamma - 1) E / (8 dx dy dz) on top in the central cells
+        const double V = 8 * p.dx[0] * p.dx[1] * p.dx[2], p_inject = (sedov.gamma - 1.0) * (sedov.energy() / V);
+        auto U = Kokkos::create_mirror_view(fv.state());
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+                for (int k = 0; k < n; ++k) {
+                    const bool inject = i >= n / 2 - 1 && i <= n / 2 && j >= n / 2 - 1 && j <= n / 2 && k >= n / 2 - 1 && k <= n / 2;
+                    const hydro::State<3> W{sedov.rho(), 0, 0, 0, inject ? p_inject + sedov.pressure() : sedov.pressure()};
+                    const hydro::State<3> u = g::to_conserved<3>(W, p);
+                    for (int v = 0; v < 5; ++v) U(v, (static_cast<long>(i) * n + j) * n + k) = u[v];
+                }
+        Kokkos::deep_copy(fv.state(), U);
+        fv.refresh();
+    }
+    const double dV = p.dx[0] * p.dx[1] * p.dx[2];
+    auto sums = [&] {
+        const auto U = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), fv.state());
+        std::array<double, 5> s{};
+        for (int v = 0; v < 5; ++v)
+            for (long c = 0; c < fv.cells(); ++c) s[v] += U(v, c) * dV;
+        return s;
+    };
+    const std::array<double, 5> before = sums();
+    std::cout << "grid: n=" << n << "^3 kernel=" << kernel << " tile=" << fv.tile()[0] << "," << fv.tile()[1] << "," << fv.tile()[2]
+              << " limiter=" << limiter << " riemann=" << o.riemann << " cfl=" << go.cfl << " t_end=" << sedov.t_end()
+              << " setup_s=" << timer.seconds() << "\n";
+    std::vector<double> wall_ms;
+    double t = 0;
+    long long steps = 0;
+    Kokkos::Timer wall;
+    double dt = fv.time_step();
+    while (t < sedov.t_end() && (o.max_steps == 0 || steps < o.max_steps)) {
+        Kokkos::Timer step_timer;
+        if (t + dt > sedov.t_end()) dt = sedov.t_end() - t;
+        fv.step(dt);
+        t += dt;
+        dt = fv.time_step();  // fences: the step is done
+        wall_ms.push_back(step_timer.seconds() * 1e3);
+        ++steps;
+        if (!(dt > 0)) {
+            std::cout << "grid: stopped at step " << steps << ", t=" << t << ": dt=" << dt << "\n";
+            break;
+        }
+    }
+    const double wall_s = wall.seconds();
+    const std::array<double, 5> after = sums();
+    // The median after 3 warm-up steps.
+    const std::vector<double> warm(wall_ms.begin() + static_cast<long>(std::min<std::size_t>(wall_ms.size() - 1, 3)), wall_ms.end());
+    const double ms = median(warm);
+    const double cells = static_cast<double>(fv.cells());
+    std::cout << "run: grid=1 kernel=" << kernel << " steps=" << steps << " t=" << t << " wall_s=" << wall_s << " step_wall_ms_median=" << ms
+              << " G_cell_updates_per_s=" << cells / (ms * 1e-3) / 1e9 << " ns_per_cell=" << ms * 1e6 / cells << "\n";
+    std::cout << "conservation: mass=" << (after[0] - before[0]) / before[0] << " energy=" << (after[4] - before[4]) / before[4]
+              << " momentum=(" << after[1] - before[1] << "," << after[2] - before[2] << "," << after[3] - before[3] << ")\n";
+    const auto Uh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), fv.state());
+    const std::vector<double> U(Uh.data(), Uh.data() + Uh.size());
+    std::uint64_t h = 1469598103934665603ULL;
+    for (double x : U) {
+        std::uint64_t u = 0;
+        std::memcpy(&u, &x, sizeof(u));
+        for (int b = 0; b < 8; ++b) {
+            h ^= (u >> (8 * b)) & 0xff;
+            h *= 1099511628211ULL;
+        }
+    }
+    std::cout << "checksum: steps=" << steps << " U=" << std::hex << h << std::dec << "\n";
+    if (!o.out.empty()) {
+        write_state_npy(o.out, U, n);
+        std::cout << "grid: wrote " << o.out << "\n";
+    }
+}
+
 // The precision policies of --precision, as <name>: geometry / gradient weights / gradients / face fluxes / Riemann.
 // default: the hydro's default; double: double throughout, what older logs call `default`. R: the Riemann solver from --riemann.
 // Used by: main (picks R); calls run<P, R>.
@@ -440,7 +549,9 @@ int main(int argc, char** argv) {
                      " [--riemann=hllc|hll] [--precision=default|double|grad32|grad16|riemann32|single|mixed|low]"
                      " [--moving] [--bulk=km/s] [--no-blast] [--box=fx,fy,fz] [--out=dir]"
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]"
-                     " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces] [--phases] [--keep-mesh]\n";
+                     " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces] [--phases] [--keep-mesh]\n"
+                     "       hydro_sedov <side> grid --grid [--kernel=cuda|kokkos] [--limiter=minmod|mc|vanleer] [--riemann=hllc|hll] [--cfl=0.8]"
+                     " [--tile=x,y,z] [--steps=max] [--out=file.npy]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
@@ -482,6 +593,13 @@ int main(int argc, char** argv) {
     double f[3] = {1, 1, 1};
     std::sscanf(shape_arg.c_str(), "%lf,%lf,%lf", &f[0], &f[1], &f[2]);
     o.box = Box(sedov.box * f[0], sedov.box * f[1], sedov.box * f[2]);
+    if (flag(argc, argv, "--grid", "") == "1") {  // the fixed grid: no mesh, no points (`kind` is ignored)
+        if (o.riemann == "hll")
+            run_grid<hydro::HLL>(o, argc, argv);
+        else
+            run_grid<hydro::HLLC>(o, argc, argv);
+        return 0;
+    }
     const Points points = scaled(make_points_off_grid(o.kind, o.side * o.side * o.side, shape(o.box)), o.box);
     if (o.riemann == "hll")
         run_precision<hydro::HLL>(o, points);

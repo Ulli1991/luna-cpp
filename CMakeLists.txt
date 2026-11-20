@@ -14,6 +14,17 @@ find_package(Kokkos CONFIG REQUIRED)
 find_package(HDF5 COMPONENTS C)
 include(CTest)
 
+# A build without FMA contraction (device -fmad=false, host -ffp-contract=off): the fixed grid then gives LUNA's bits (grid_test).
+# Off: nvcc contracts, the faster default; the grid agrees with LUNA to rounding.
+option(LUNA_BIT_EXACT "Build without FMA contraction, for bit-for-bit tests against LUNA" OFF)
+if(LUNA_BIT_EXACT)
+    add_compile_definitions(LUNA_BIT_EXACT)
+    add_compile_options(-ffp-contract=off)
+    if("CUDA" IN_LIST Kokkos_DEVICES)
+        add_compile_options(-fmad=false)
+    endif()
+endif()
+
 if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/extern/voronoi-cpp/CMakeLists.txt)
     message(FATAL_ERROR "extern/voronoi-cpp is empty: git submodule update --init --recursive")
 endif()
@@ -67,11 +78,13 @@ if(BUILD_TESTING)
     if(VORONOI_SANITIZERS)
         set(hydro_test_timeout 3000)  # about 11x slower: `hydro` and `hydro_wave` passed 600 s on CI's 2 cores with the moving step on both meshes
     endif()
-    foreach(test hydro hydro1d hydro1d_cases hydro_wave hydro2d)
+    foreach(test hydro hydro1d hydro1d_cases hydro_wave hydro2d grid)
         hydro_program(${test}_test ${test}_test src/test/${test}_test.cpp)
         add_test(NAME ${test} COMMAND ${test}_test)
         set_tests_properties(${test} PROPERTIES TIMEOUT ${hydro_test_timeout})
     endforeach()
+    # LUNA's fixed-grid steps (scripts/luna_grid_bits.py ci).
+    target_compile_definitions(grid_test PRIVATE LUNA_GRID_DATA="${CMAKE_CURRENT_SOURCE_DIR}/src/test/data/luna_grid")
 endif()
 
 # The hand-written tangents and adjoints (hydro_derivatives_test): opt-in while they are new; off, the build is as before.

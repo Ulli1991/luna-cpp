@@ -59,6 +59,7 @@ Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the backend y
 - `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (always on in `CMakeLists.txt`) writes the database clang-tidy needs: `bash scripts/lint_cpp.sh build-omp` (Raven: `module load clang/20`).
 - `-DVORONOI_SANITIZERS=ON` adds address and undefined-behaviour sanitizers to a host build.
 - `-DLUNA_DERIVATIVE_TESTS=ON` adds `hydro_derivatives_test` (off by default while the derivatives are new).
+- `-DLUNA_BIT_EXACT=ON` turns off FMA contraction (`-fmad=false` on the device, `-ffp-contract=off` on the host). The fixed grid then gives LUNA's bits, and `grid_test` checks them bit for bit. Off by default, because contraction is faster; the grid then agrees with LUNA to rounding.
 
 
 ## Running
@@ -71,6 +72,8 @@ hydro_sedov <side> <jittered|uniform> [--moving] [--order=0|1] [--riemann=hllc|h
 hydro_kh2d <N> [--moving] [--out-times=t,...] [--stop-after=<s>] [--resume] ...
 hydro_1d <problem> <N> [--moving] [--limiter=face|none|minmod|vanleer] [--dt=luna|arepo|fixed] [--courant=c] ...
 hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--precision=...]
+hydro_sedov <side> grid --grid [--kernel=cuda|kokkos] [--limiter=minmod|mc|vanleer] [--riemann=hllc|hll] [--cfl=0.8]
+            [--tile=x,y,z] [--steps=max] [--out=file.npy]
 sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 ```
 
@@ -84,6 +87,14 @@ sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 - **Timing.** `hydro_sedov --phases` fences and times each phase of a step (the `phases_ms_median` and `throughput_M_per_s` lines); by default a step runs with no fences inside it and is timed whole (`step_wall_ms_median` and `G_cell_updates_per_s` in the `run` line; `gpu_s` sums those).
 - **Precision.** 3D runs `grad16` by default: gradients and limiting in float with the gradient rows stored as FP16, everything else in double, except what the hydro only reads as offsets or step terms: on a moving mesh the face centroids are stored as float relative to the owner, and each point's move as int32 grid steps. Against `grad32` the moving step is 5.6 % (128³) and 5.8 % (256³) faster, with the field errors unchanged to three or four digits and a sound wave of amplitude 1e-6 kept (docs/measurements.md, "Precision levers of 2026-11-19"). 2D runs `grad32` (float gradients; the same errors as double on KH 2D and 6 to 12 % faster; an FP16 row of 8 values would pad to the same 32 B as a float row, so FP16 saves no bytes there and measured 0.4 to 0.6 % slower). 1D runs in double: its solver computes the gradients in registers inside one fused kernel and stores none, so there is nothing for a narrower type to save.
 - **Bit-reproducible.** Every cell sums its faces in a fixed order, so an A100 run gives the same bits every time.
+- **Fixed grid (`hydro_sedov --grid`, in development).** LUNA's own fixed-grid step inside luna-cpp, with no mesh: `hydro::grid::GridFiniteVolume<D>` (`src/hydro/grid_finite_volume.hpp`). The numerics follow LUNA operation for operation (`grid.hpp`):
+  - MUSCL-Hancock with LUNA's limiters (minmod, MC, van Leer);
+  - per-axis HLLC and HLL cores (`HLLC::axis_core`, `HLL::axis_core` in `euler.hpp`);
+  - LUNA's face rule and floors;
+  - boundaries periodic, zero-gradient, reflective and diode, with two ghost cells;
+  - LUNA's CFL time step.
+
+  One kernel runs the whole step and also leaves the next time step. It comes as a hand-written CUDA kernel (`grid_cuda.hpp`) and as a Kokkos kernel with the same numbering; the Kokkos kernel also runs on the CPU. Without FMA contraction (`-DLUNA_BIT_EXACT=ON`) a step gives LUNA's bits. The design and plan are in `research_notes/fixed_grid_2026-11-19.md`.
 - **Stuck mesh steps.** When the mesh's device repair leaves stuck entries, voronoi-cpp's default `Fallback::cheapest` clips the cells around them again on the device and stitches them in (local repair) up to n / 64 stuck entries, and rebuilds the mesh past that or when the local repair does not finish. Before abd3d39 a few stuck entries went to a host finish and more to a rebuild. `hydro_sedov` prints `stuck_steps`, `local_repairs`, `local_cells` and `rebuilds` in its `mesh_updates` line. Moving Sedov to 1e4 yr, two runs per pin: nothing stuck at 128³; at 256³ (919 steps) one run on abd3d39 had one step with 6 stuck entries, repaired locally (49 cells, no rebuild), and ended with the same bits as the runs that did not stick. Which step sticks follows the order of the device flips' atomics, so it changes from run to run.
 - **Static meshes keep only what a step reads.** After its set-up the hydro holds the mesh arrays a static step reads (face sides, face geometry, cell lists, cell volumes and centroids, positions) and scratch of its own (`FiniteVolume::release_mesh`), and `hydro_sedov` destroys the mesh with its tetrahedra, circumcentres, repair state, rings and face numbering: 1135 instead of 2366 B/cell during the steps, the same bits and speed; `--keep-mesh` keeps the whole mesh. The peak of the run is still the mesh build and set-up, 2172 B/cell (2106 before voronoi-cpp 1741a1a).
 - **Mesh memory layout** (voronoi-cpp's `voronoi::Layout`, [#34](https://github.com/Ulli1991/voronoi-cpp/issues/34)). In 3D the cells' face lists carry the owner bit, so the hydro reads a face's side from the list; a static mesh also numbers its faces by owner (+135 B/cell). A moving mesh does not, because renumbering every step costs the mesh more than it saves the hydro ([#53](https://github.com/Ulli1991/voronoi-cpp/issues/53)). Same bits as without; `--plain-faces` turns both off. `--every=k` re-sorts the cells along `--curve` every k steps; the hydro carries its cell arrays across (`FiniteVolume::follow_resort`), and the run's bits change with the order. Re-sorting is off unless asked for (`FiniteVolume::no_resort`), although voronoi-cpp's own default is every 25 updates: in whole Sedov runs a re-sort makes the hydro 6 to 8 % faster but itself costs about one step, and at 256³ moving it runs out of memory (research note `moving_structure_2026-11-18.md`, branch `moving-structure`).
@@ -320,6 +331,7 @@ Run times are in [TESTING.md](TESTING.md). The mesh's own tests are in voronoi-c
 | `hydro2d` | 2D hydro, static and moving: uniform states, conservation, sound-wave order, Sod, Noh, a Galilean blast |
 | `hydro1d_cases` | every 1D test of LUNA's suite plus two it lacks, 30 in all, against LUNA and the exact solutions, static and moving |
 | `hydro1d` | 1D hydro: conservation, inflow, cells from a wall with the budget through it, Sod against the exact solution; LUNA's final states of Sod, Shu-Osher and Woodward-Colella at N = 16 to 1e-12 |
+| `grid` | the fixed grid: LUNA's per-axis HLLC and HLL cores against `flux()`, uniform states on every boundary, conservation, the CUDA kernel against the Kokkos kernel bit for bit, and LUNA's own steps (25 cases in `src/test/data/luna_grid`, from `scripts/luna_grid_bits.py` on an A100) bit for bit without FMA contraction, to 1e-12 with it |
 | `hydro_derivatives` (opt-in) | the hand-written tangents and adjoints of the 3D hydro (primitive, half step, HLL, HLLC, the limited gradient, a whole static step): tangent against central differences away from switches, adjoint against tangent by the dot test |
 
 ```sh
@@ -354,7 +366,7 @@ More ideas, each with a first test: [docs/ideas.md](docs/ideas.md).
 
 ## Repository layout
 
-- `src/hydro/`: the solver, header-only: `precision.hpp`, `euler.hpp` (gas and fluxes), `finite_volume.hpp` (2D and 3D), `finite_volume_1d.hpp`, and the initial conditions and snapshots.
+- `src/hydro/`: the solver, header-only: `precision.hpp`, `euler.hpp` (gas and fluxes), `finite_volume.hpp` (2D and 3D), `finite_volume_1d.hpp`, the fixed grid (`grid.hpp`, `grid_finite_volume.hpp`, `grid_cuda.hpp`), and the initial conditions and snapshots.
 - `src/bench/`: the programs `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`.
 - `src/test/`: the tests.
 - `extern/voronoi-cpp/`: the mesh library, a pinned submodule with its full source.

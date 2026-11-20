@@ -31,6 +31,7 @@ Status: **done**, **next**, **open**, **research**, as in voronoi-cpp's file.
 | #10 | A CPU path for few active cells | speed with local steps | after #9 | research |
 | R14 | Face geometry from the mesh's rings in the hydro's kernels, so face rows are not stored (voronoi-cpp `step-v1-r14`, `face_geometry()`) | -394 B/cell; the same bits as the stored rows | measured (docs/measurements.md, "Faces once by the owner, R14 and cheaper fluxes"): moving hydro 19.0 -> 41.2 ms at 128³, the sweep 7.5 -> 26 ms (a ring walk per list entry in each loop), a flux pass 2.8 -> 4.6 ms and more DRAM bytes, update_cells +5 ms, the mesh -1.8 ms | refuted for time; keeps its memory case (a run that does not fit otherwise) |
 | R15 | Memory order of cells by Morton, Hilbert or the graph, on a long run | locality in the sweep and fluxes | with voronoi-cpp's #34 | next |
+| — | A fixed grid mode: LUNA's step inside luna-cpp (`hydro_sedov --grid`; research_notes/fixed_grid_2026-11-19.md) | LUNA parity in one code; a reference for the moving mesh; speed at or above LUNA's | phase 0: LUNA's bits on 25 cases and 3D 128³ x 100 steps (`grid_test`); phase 1: CUDA against Kokkos against LUNA | in progress (branch `fixed-grid`) |
 
 ## Accuracy and checks
 
