@@ -907,6 +907,168 @@ void tests_1d(Check& check, int samples) {
 #undef LUNA_CASE
 }
 
+// ---- 2D (FiniteVolume<2>: the same templates as 3D): whole static steps on a jittered 2D mesh, double and grad32 (the 2D default).
+using FV2 = hydro::FiniteVolume<2, Exec, hydro::HLLC, hydro::Precision<>>;
+using FV2HLL = hydro::FiniteVolume<2, Exec, hydro::HLL, hydro::Precision<>>;
+using FV2_32 = hydro::FiniteVolume<2, Exec, hydro::HLLC, hydro::Grad32>;
+using State2 = hydro::State<2>;
+using HostCells2 = Kokkos::View<double* [4], Kokkos::LayoutRight, Kokkos::HostSpace>;
+
+// The checks of step_test() on an nx x nx jittered (0.3) periodic 2D mesh. Returns the tangent; reference: the double policy's.
+template <class F>
+HostCells2 step_test_2d(Check& check, const std::string& name, int nx, int steps, double noise = 0.01, const HostCells2* reference = nullptr) {
+    const hydro::Gas gas{5.0 / 3.0};
+    const exact_predicates::BoxN<2> box(1.0);
+    const int n = nx * nx;
+    Kokkos::View<double* [2], Exec::memory_space> x("x", n);
+    auto hx = Kokkos::create_mirror_view(x);
+    std::mt19937_64 rng(7);
+    std::uniform_real_distribution<double> jit(-0.15, 0.15), unit(-1, 1), small(-noise, noise);
+    for (int i = 0; i < nx; ++i)
+        for (int j = 0; j < nx; ++j) {
+            hx(i * nx + j, 0) = (i + 0.5 + jit(rng)) / nx;
+            hx(i * nx + j, 1) = (j + 0.5 + jit(rng)) / nx;
+        }
+    Kokkos::deep_copy(x, hx);
+    typename F::Mesh mesh(Exec{}, box);
+    mesh.update(x);
+    mesh.update_cells();
+    F fv(Exec{}, mesh, gas, 1, hydro::Update::per_face);
+    const auto V = to_host(mesh.volume());
+    const auto pos = to_host(mesh.positions());
+    const auto cen = to_host(mesh.centroid());
+    HostCells2 q0("q0", n), dq0("dq0", n), wbar("wbar", n);
+    const double k = 2 * M_PI;
+    for (int i = 0; i < n; ++i) {
+        const double px = pos(i, 0) + cen(i, 0), py = pos(i, 1) + cen(i, 1);
+        const State2 W{1 + 0.2 * std::sin(k * px) + small(rng), 0.3 * std::sin(k * py) + small(rng), 0.2 * std::cos(k * px) + small(rng),
+                       1 + 0.2 * std::cos(k * (px + py)) + small(rng)};
+        const State2 U = hydro::conserved(W, gas);
+        for (int v = 0; v < 4; ++v) q0(i, v) = U[v] * V(i);
+    }
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 4; ++v) {
+            dq0(i, v) = unit(rng) * std::abs(q0(i, v)) + 0.1 * unit(rng) * V(i);
+            wbar(i, v) = unit(rng);
+        }
+    auto write2 = [&](const HostCells2& h) { Kokkos::deep_copy(fv.state(), h); };
+    auto read2 = [&]() {
+        HostCells2 h("read", n);
+        Kokkos::deep_copy(h, fv.state());
+        return h;
+    };
+    write2(q0);
+    std::vector<double> dts;
+    std::vector<HostCells2> checkpoints{q0};
+    for (int s = 0; s < steps; ++s) {
+        dts.push_back(fv.time_step(0.3));
+        fv.step(dts.back());
+        checkpoints.push_back(read2());
+    }
+    auto run = [&](const HostCells2& start) {
+        write2(start);
+        for (int s = 0; s < steps; ++s) fv.step(dts[s]);
+        return read2();
+    };
+    auto combine2 = [&](const HostCells2& a, double s, const HostCells2& b) {
+        HostCells2 c("c", n);
+        for (int i = 0; i < n; ++i)
+            for (int v = 0; v < 4; ++v) c(i, v) = a(i, v) + s * b(i, v);
+        return c;
+    };
+    write2(q0);
+    typename F::Cells dq("dq", n);
+    Kokkos::deep_copy(dq, dq0);
+    std::vector<HostCells2> path;
+    for (int s = 0; s < steps; ++s) {
+        path.push_back(read2());
+        fv.time_step_tangent(0.3, dq);
+        fv.step_tangent(dts[s], dq);
+    }
+    const HostCells2 forward = read2();
+    HostCells2 tangent("tangent", n);
+    Kokkos::deep_copy(tangent, dq);
+    double bits = 0;
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 4; ++v)
+            bits = std::max(bits, std::abs(forward(i, v) - checkpoints.back()(i, v)) / std::max(std::abs(checkpoints.back()(i, v)), 1e-300));
+    constexpr bool exact = std::is_same_v<typename F::G, double>;
+    check.expect(bits < (exact ? 1e-11 : 1e-5), name + ": step_tangent's Q equals step()'s over " + std::to_string(steps) + " steps (" + sci(bits) + ")");
+    const double h = 1e-7;  // the jittered mesh puts clips within 1e-6 of a switch; their spread over 3 steps reaches ~60 cells
+    const HostCells2 plus = run(combine2(q0, h, dq0)), minus = run(combine2(q0, -h, dq0));
+    // As step_test(): central for every cell; at a cell where it differs (a switch between x - h dq and x + h dq), one of the
+    // one-sided differences must match.
+    const HostCells2& at = checkpoints.back();
+    double worst = 0, scale = 0, worst_one_sided = 0;
+    int cells_off = 0, worst_cell = 0;
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 4; ++v) scale = std::max(scale, std::abs(plus(i, v) - minus(i, v)) / (2 * h));
+    for (int i = 0; i < n; ++i) {
+        double cell_diff = 0, cell_scale = 1e-6 * scale, plus_diff = 0, minus_diff = 0;
+        for (int v = 0; v < 4; ++v) {
+            const double fd = (plus(i, v) - minus(i, v)) / (2 * h);
+            cell_diff = std::max(cell_diff, std::abs(tangent(i, v) - fd));
+            cell_scale = std::max(cell_scale, std::abs(fd));
+            plus_diff = std::max(plus_diff, std::abs(tangent(i, v) - (plus(i, v) - at(i, v)) / h));
+            minus_diff = std::max(minus_diff, std::abs(tangent(i, v) - (at(i, v) - minus(i, v)) / h));
+        }
+        if (cell_diff > worst) worst_cell = i;
+        worst = std::max(worst, cell_diff);
+        if (cell_diff > 1e-6 * cell_scale) {
+            ++cells_off;
+            worst_one_sided = std::max(worst_one_sided, std::min(plus_diff, minus_diff) / cell_scale);
+        }
+    }
+    if (cells_off > 0)
+        for (int v = 0; v < 4; ++v)
+            std::printf("  worst cell %d v %d: tangent %.10e  central %.10e  one-sided +h %.10e  -h %.10e\n", worst_cell, v, tangent(worst_cell, v),
+                        (plus(worst_cell, v) - minus(worst_cell, v)) / (2 * h), (plus(worst_cell, v) - at(worst_cell, v)) / h,
+                        (at(worst_cell, v) - minus(worst_cell, v)) / h);
+    if (exact)
+        check.expect(worst_one_sided < 1e-4,
+                     name + ": J dq equals central differences (h = 1e-7) over " + std::to_string(steps) + " steps (" + sci(worst / scale) +
+                         " of the largest; " + std::to_string(cells_off) + " of " + std::to_string(n) +
+                         " cells at a switch, where it equals a one-sided difference to " + sci(worst_one_sided) + ")");
+    double to_reference = 0;
+    if (reference) {
+        double largest = 0;
+        for (int i = 0; i < n; ++i)
+            for (int v = 0; v < 4; ++v) {
+                to_reference = std::max(to_reference, std::abs(tangent(i, v) - (*reference)(i, v)));
+                largest = std::max(largest, std::abs((*reference)(i, v)));
+            }
+        to_reference /= largest;
+        check.expect(to_reference < 1e-4, name + ": J dq against the double policy's (" + sci(to_reference) + ")");
+    }
+    typename F::Cells bar("bar", n);
+    Kokkos::deep_copy(bar, wbar);
+    for (int s = steps - 1; s >= 0; --s) {
+        write2(path[s]);
+        fv.step_adjoint(dts[s], bar);
+    }
+    HostCells2 adjoint("adjoint", n);
+    Kokkos::deep_copy(adjoint, bar);
+    double lhs = 0, rhs = 0, size = 0;
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 4; ++v) {
+            lhs += wbar(i, v) * tangent(i, v);
+            rhs += adjoint(i, v) * dq0(i, v);
+            size += std::abs(wbar(i, v) * tangent(i, v)) + std::abs(adjoint(i, v) * dq0(i, v));
+        }
+    const double dot = std::abs(lhs - rhs) / size;
+    check.expect(dot < 1e-13, name + ": <w, J dq> = <J^T w, dq> over " + std::to_string(steps) + " steps (" + sci(dot) + ")");
+    std::printf("step2d %-14s n %d steps %d: forward %.2e, tangent-FD %.2e, dot %.2e, against double %.2e\n", name.c_str(), n, steps, bits,
+                worst / scale, dot, to_reference);
+    return tangent;
+}
+
+// The 2D tests. Used by: main.
+void tests_2d(Check& check) {
+    const HostCells2 reference = step_test_2d<FV2>(check, "2D HLLC", 32, 3);
+    step_test_2d<FV2HLL>(check, "2D HLL", 32, 3);
+    step_test_2d<FV2_32>(check, "2D HLLC grad32", 32, 3, 0.01, &reference);
+}
+
 // One warm-up of each, then time_step + step, time_step + step_tangent, step_adjoint once each: the kernels ncu measures.
 template <class F>
 void profile(int n) {
@@ -972,5 +1134,6 @@ int main(int argc, char** argv) {
     step_test<FV16>(check, "HLLC grad16", 1000, 3, 0.01, 1e-6, &reference);
     step_test<FV32>(check, "HLLC grad32", 1000, 3, 0.01, 1e-6, &reference);
     tests_1d(check, samples);
+    tests_2d(check);
     return check.failed() != 0;
 }
