@@ -7,6 +7,7 @@
 #include "finite_volume_1d.hpp"
 #include "luna_derivative_values.hpp"
 #include "problems_1d.hpp"
+#include "reference_geometry_2d.hpp"
 #include "support.hpp"
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -242,6 +244,56 @@ struct FluxPiece {
             return static_cast<int>((pattern >> 2) & 3);
         }
     }
+};
+
+// MovingFace: (L, R, A, w) -> |A| flux(L, R, A / |A|, w), every input free (the moving step's face). Category as FluxPiece.
+template <class Riemann>
+struct MovingFacePiece {
+    static constexpr int inputs = 2 * V + 2 * D, outputs = V;
+    using Face = hydro::MovingFace<Riemann, D>;
+    struct Sample {
+        double x[2 * V + 2 * D];
+    };
+    hydro::Gas gas;
+    KOKKOS_INLINE_FUNCTION static Vec vec_at(const double* x) { return hydro::make_vec<D>([&](int a) { return x[a]; }); }
+    KOKKOS_INLINE_FUNCTION Sample make(std::uint64_t& seed) const {
+        Sample s;
+        put(random_W(seed), s.x);
+        put(random_W(seed), s.x + V);
+        const Vec A = unit_vector(seed) * uniform(seed, 0.2, 2);
+        for (int a = 0; a < D; ++a) {
+            s.x[2 * V + a] = A[a];
+            s.x[2 * V + D + a] = uniform(seed, -1, 1);
+        }
+        return s;
+    }
+    KOKKOS_INLINE_FUNCTION int used_inputs(const Sample&) const { return inputs; }
+    KOKKOS_INLINE_FUNCTION long long f(const Sample&, const double* x, double* y) const {
+        const Vec A = vec_at(x + 2 * V), w = vec_at(x + 2 * V + D);
+        const double s = Kokkos::sqrt(dot(A, A));
+        const Vec n = A * (1.0 / s);
+        State F = Riemann::flux(state_at(x), state_at(x + V), n, w, gas);
+        for (int v = 0; v < V; ++v) F[v] *= s;
+        put(F, y);
+        return Riemann::branches(state_at(x), state_at(x + V), n, w, gas);
+    }
+    KOKKOS_INLINE_FUNCTION void tangent(const Sample&, const double* x, const double* dx, double* dy) const {
+        put(Face::tangent(state_at(x), state_at(x + V), vec_at(x + 2 * V), vec_at(x + 2 * V + D), state_at(dx), state_at(dx + V),
+                          vec_at(dx + 2 * V), vec_at(dx + 2 * V + D), gas),
+            dy);
+    }
+    KOKKOS_INLINE_FUNCTION void adjoint(const Sample&, const double* x, const double* ybar, double* xbar) const {
+        State Lbar{}, Rbar{};
+        Vec Abar{}, wbar{};
+        Face::adjoint(state_at(x), state_at(x + V), vec_at(x + 2 * V), vec_at(x + 2 * V + D), gas, state_at(ybar), Lbar, Rbar, Abar, wbar);
+        add(Lbar, xbar);
+        add(Rbar, xbar + V);
+        for (int a = 0; a < D; ++a) {
+            xbar[2 * V + a] += Abar[a];
+            xbar[2 * V + D + a] += wbar[a];
+        }
+    }
+    KOKKOS_INLINE_FUNCTION int category(long long pattern) const { return FluxPiece<Riemann>{gas}.category(pattern); }
 };
 
 // The limited gradient of one cell with up to 16 neighbours: (W_i, W_j) -> g, the stencil's geometry fixed.
@@ -1063,7 +1115,378 @@ HostCells2 step_test_2d(Check& check, const std::string& name, int nx, int steps
 }
 
 // The 2D tests. Used by: main.
+// The 2D reference geometry derivative (reference_geometry_2d.hpp) on an nx x nx jittered periodic mesh with the points on the
+// mesh's grid: its forward values against the mesh's, the tangent against central differences of the mesh's own geometry (the
+// points moved by whole grid steps, so the differences are exact up to rounding), the identities, the dot test.
+void geometry_test_2d(Check& check, int nx) {
+    using Mesh = FV2::Mesh;
+    using GD = hydro::GeometryDerivative<2, Exec::memory_space>;
+    const exact_predicates::BoxN<2> box(1.0);
+    const int n = nx * nx;
+    Kokkos::View<double* [2], Exec::memory_space> x("x", n);
+    auto hx = Kokkos::create_mirror_view(x);
+    std::mt19937_64 rng(11);
+    std::uniform_real_distribution<double> jit(-0.15, 0.15), unit(-1, 1);
+    for (int i = 0; i < nx; ++i)
+        for (int j = 0; j < nx; ++j) {
+            hx(i * nx + j, 0) = std::floor((i + 0.5 + jit(rng)) / nx / box.step) * box.step;
+            hx(i * nx + j, 1) = std::floor((j + 0.5 + jit(rng)) / nx / box.step) * box.step;
+        }
+    Kokkos::deep_copy(x, hx);
+    Mesh mesh(Exec{}, box);
+    mesh.update(x);
+    mesh.update_cells();
+    const reference::Geometry2D<Mesh, Exec::memory_space> ref(mesh);
+    const int faces = mesh.faces();
+    struct Values {
+        Kokkos::View<double*, Kokkos::HostSpace> V;
+        Kokkos::View<double* [2], Kokkos::LayoutRight, Kokkos::HostSpace> c, A, xf;
+        std::vector<std::pair<int, int>> sides;
+    };
+    auto read = [&]() {
+        Values v;
+        v.V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
+        v.c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
+        v.A = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.area());
+        v.xf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.face_centroid());
+        const auto o = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.owner());
+        const auto j = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.neighbour());
+        for (int f = 0; f < mesh.faces(); ++f) v.sides.emplace_back(o(f), j(f));
+        return v;
+    };
+    const Values base = read();
+    // Forward: the reference's values against the mesh's (relative to a cell's size).
+    double forward = 0;
+    for (int i = 0; i < n; ++i) {
+        forward = std::max(forward, std::abs(ref.volume(i) - base.V(i)) * n);
+        for (int a = 0; a < 2; ++a) forward = std::max(forward, std::abs(ref.centroid(i)[a] - base.c(i, a)) * nx);
+    }
+    for (int f = 0; f < faces; ++f)
+        for (int a = 0; a < 2; ++a)
+            forward = std::max({forward, std::abs(ref.area(f)[a] - base.A(f, a)) * nx, std::abs(ref.face_centroid(f)[a] - base.xf(f, a)) * nx});
+    check.expect(forward < 1e-10, "2D geometry: the reference's V, c, A, x_f equal the mesh's (" + sci(forward) + " of a cell)");
+    // A direction in whole grid steps (up to 1e4: 1e-5 of the box, 3e-4 of a cell).
+    typename GD::Points dx("dx", n), dc("dc", n), dA("dA", faces), dxf("dxf", faces);
+    typename GD::Scalars dV("dV", n);
+    auto hdx = Kokkos::create_mirror_view(dx);
+    for (int i = 0; i < n; ++i)
+        for (int a = 0; a < 2; ++a) hdx(i, a) = std::round(1e3 * unit(rng)) * box.step;
+    Kokkos::deep_copy(dx, hdx);
+    ref.tangent(dx, dV, dc, dA, dxf);
+    const auto tV = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, dV);
+    const auto tc = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, dc);
+    const auto tA = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, dA);
+    const auto txf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, dxf);
+    auto moved = [&](double s) {
+        Kokkos::View<double* [2], Exec::memory_space> y("y", n);
+        auto h = Kokkos::create_mirror_view(y);
+        for (int i = 0; i < n; ++i)
+            for (int a = 0; a < 2; ++a) {
+                const double v = hx(i, a) + s * hdx(i, a);
+                h(i, a) = v - std::floor(v);
+            }
+        Kokkos::deep_copy(y, h);
+        mesh.update(y);
+        mesh.update_cells();
+        return read();
+    };
+    const Values plus = moved(1), minus = moved(-1);
+    mesh.update(x);
+    mesh.update_cells();
+    // The same faces (by their two cells; an update may number them differently): each moved face's number in base's order.
+    auto renumbered = [&](const Values& v, std::vector<int>& to) {
+        if (v.sides.size() != base.sides.size()) return false;
+        std::map<std::pair<int, int>, int> at;
+        for (std::size_t f = 0; f < v.sides.size(); ++f) at[v.sides[f]] = static_cast<int>(f);
+        to.assign(base.sides.size(), -1);
+        for (std::size_t f = 0; f < base.sides.size(); ++f) {
+            const auto it = at.find(base.sides[f]);
+            if (it == at.end()) return false;
+            to[f] = it->second;
+        }
+        return true;
+    };
+    std::vector<int> fp, fm;
+    const bool same = renumbered(plus, fp) && renumbered(minus, fm);
+    check.expect(same, "2D geometry: x +- dx keeps the topology (the same pairs of cells share a face)");
+    std::printf("geometry2d: faces renumbered by the updates: %s\n", plus.sides == base.sides && minus.sides == base.sides ? "no" : "yes");
+    if (same) {
+        double worst[4] = {}, scale[4] = {};
+        auto compare = [&](int k, double t, double p, double m) {
+            const double fd = (p - m) / 2;
+            worst[k] = std::max(worst[k], std::abs(t - fd));
+            scale[k] = std::max(scale[k], std::abs(fd));
+        };
+        for (int i = 0; i < n; ++i) {
+            compare(0, tV(i), plus.V(i), minus.V(i));
+            for (int a = 0; a < 2; ++a) compare(1, tc(i, a), plus.c(i, a), minus.c(i, a));
+        }
+        for (int f = 0; f < faces; ++f)
+            for (int a = 0; a < 2; ++a) {
+                compare(2, tA(f, a), plus.A(fp[f], a), minus.A(fm[f], a));
+                compare(3, txf(f, a), plus.xf(fp[f], a), minus.xf(fm[f], a));
+            }
+        const char* names[4] = {"V", "c", "A", "x_f"};
+        for (int k = 0; k < 4; ++k)
+            check.expect(worst[k] < 1e-5 * scale[k], std::string("2D geometry: d") + names[k] + " equals central differences (" +
+                                                         sci(worst[k] / scale[k]) + " of the largest)");
+    }
+    // Identities: sum dV = 0 (the box stays filled); a translation changes nothing (all relative to the generators).
+    double sum = 0, size = 0;
+    for (int i = 0; i < n; ++i) {
+        sum += tV(i);
+        size += std::abs(tV(i));
+    }
+    check.expect(std::abs(sum) < 1e-12 * size, "2D geometry: sum dV = 0 (" + sci(std::abs(sum) / size) + ")");
+    {
+        auto h = Kokkos::create_mirror_view(dx);
+        for (int i = 0; i < n; ++i) {
+            h(i, 0) = 0.3;
+            h(i, 1) = -0.7;
+        }
+        Kokkos::deep_copy(dx, h);
+        ref.tangent(dx, dV, dc, dA, dxf);
+        const auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, dc);
+        const auto A = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, dA);
+        const auto xf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, dxf);
+        const auto Vh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, dV);
+        double moved_any = 0;
+        for (int i = 0; i < n; ++i) {
+            moved_any = std::max(moved_any, std::abs(Vh(i)) * n);
+            for (int a = 0; a < 2; ++a) moved_any = std::max(moved_any, std::abs(c(i, a)) * nx);
+        }
+        for (int f = 0; f < faces; ++f)
+            for (int a = 0; a < 2; ++a) moved_any = std::max({moved_any, std::abs(A(f, a)) * nx, std::abs(xf(f, a)) * nx});
+        check.expect(moved_any < 1e-10, "2D geometry: a translation leaves V, c, A, x_f as they are (" + sci(moved_any) + ")");
+        Kokkos::deep_copy(dx, hdx);
+    }
+    // The dot test: <bars, J dx> = <J^T bars, dx>.
+    typename GD::Points cbar("cbar", n), Abar("Abar", faces), xfbar("xfbar", faces), xbar("xbar", n);
+    typename GD::Scalars Vbar("Vbar", n);
+    auto hVb = Kokkos::create_mirror_view(Vbar);
+    auto hcb = Kokkos::create_mirror_view(cbar);
+    auto hAb = Kokkos::create_mirror_view(Abar);
+    auto hfb = Kokkos::create_mirror_view(xfbar);
+    double lhs = 0, magnitude = 0;
+    for (int i = 0; i < n; ++i) {
+        hVb(i) = unit(rng);
+        lhs += hVb(i) * tV(i);
+        magnitude += std::abs(hVb(i) * tV(i));
+        for (int a = 0; a < 2; ++a) {
+            hcb(i, a) = unit(rng);
+            lhs += hcb(i, a) * tc(i, a);
+            magnitude += std::abs(hcb(i, a) * tc(i, a));
+        }
+    }
+    for (int f = 0; f < faces; ++f)
+        for (int a = 0; a < 2; ++a) {
+            hAb(f, a) = unit(rng);
+            hfb(f, a) = unit(rng);
+            lhs += hAb(f, a) * tA(f, a) + hfb(f, a) * txf(f, a);
+            magnitude += std::abs(hAb(f, a) * tA(f, a)) + std::abs(hfb(f, a) * txf(f, a));
+        }
+    Kokkos::deep_copy(Vbar, hVb);
+    Kokkos::deep_copy(cbar, hcb);
+    Kokkos::deep_copy(Abar, hAb);
+    Kokkos::deep_copy(xfbar, hfb);
+    ref.adjoint(Vbar, cbar, Abar, xfbar, xbar);
+    const auto hxb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, xbar);
+    double rhs = 0;
+    for (int i = 0; i < n; ++i)
+        for (int a = 0; a < 2; ++a) {
+            rhs += hxb(i, a) * hdx(i, a);
+            magnitude += std::abs(hxb(i, a) * hdx(i, a));
+        }
+    const double dot = std::abs(lhs - rhs) / magnitude;
+    check.expect(dot < 1e-13, "2D geometry: <bars, J dx> = <J^T bars, dx> (" + sci(dot) + ")");
+    std::printf("geometry2d n %d faces %d: forward %.2e, dot %.2e\n", n, faces, forward, dot);
+}
+
+// Whole moving steps at order 0 on an nx x nx jittered periodic 2D mesh, the state (Q, x): step_moving_tangent against central
+// differences (x moved by whole grid steps, so the first step's geometry is exact; later steps read x' quantised to the grid,
+// one grid step in 1e4), one-sided at a switch; step_moving_adjoint against the tangent (the dot test). The geometry's derivative:
+// the tests' reference (reference_geometry_2d.hpp).
+template <class F>
+void moving_test_2d(Check& check, const std::string& name, int nx, int steps, double gate, double scale = 1, double noise = 0.01) {
+    using Mesh = typename F::Mesh;
+    using Points2 = typename F::Points;
+    using HostPoints = Kokkos::View<double* [2], Kokkos::LayoutRight, Kokkos::HostSpace>;
+    const hydro::Gas gas{5.0 / 3.0};
+    const exact_predicates::BoxN<2> box(1.0);
+    const int n = nx * nx;
+    HostPoints x0("x0", n), dx0("dx0", n);
+    std::mt19937_64 rng(5);
+    std::uniform_real_distribution<double> jit(-0.15, 0.15), unit(-1, 1), small(-noise, noise);
+    for (int i = 0; i < nx; ++i)
+        for (int j = 0; j < nx; ++j) {
+            x0(i * nx + j, 0) = std::floor((i + 0.5 + jit(rng)) / nx / box.step) * box.step;
+            x0(i * nx + j, 1) = std::floor((j + 0.5 + jit(rng)) / nx / box.step) * box.step;
+        }
+    Points2 xd("x", n);
+    Kokkos::deep_copy(xd, x0);
+    Mesh mesh(Exec{}, box);
+    mesh.update(xd);
+    mesh.update_cells();
+    F fv(Exec{}, mesh, gas, 0, hydro::Update::per_face, hydro::Limiter::face_centroid, hydro::Motion::moving);
+    const auto V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
+    const auto cen = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
+    HostCells2 q0("q0", n), dq0("dq0", n), wbar("wbar", n);
+    HostPoints xbar0("xbar0", n);
+    const double k = 2 * M_PI;
+    for (int i = 0; i < n; ++i) {
+        const double px = x0(i, 0) + cen(i, 0), py = x0(i, 1) + cen(i, 1);
+        const State2 W{1 + 0.2 * std::sin(k * px) + small(rng), 0.3 * std::sin(k * py) + small(rng), 0.2 * std::cos(k * px) + small(rng),
+                       1 + 0.2 * std::cos(k * (px + py)) + small(rng)};
+        const State2 U = hydro::conserved(W, gas);
+        for (int v = 0; v < 4; ++v) q0(i, v) = U[v] * V(i);
+    }
+    // The direction: Q by 1e-5 of each entry, x by up to 1e4 whole grid steps (1e-5 of the box).
+    for (int i = 0; i < n; ++i) {
+        for (int v = 0; v < 4; ++v) {
+            dq0(i, v) = scale * 1e-5 * (unit(rng) * std::abs(q0(i, v)) + 0.1 * unit(rng) * V(i));
+            wbar(i, v) = unit(rng);
+        }
+        for (int a = 0; a < 2; ++a) {
+            dx0(i, a) = std::round(scale * 1e4 * unit(rng)) * box.step;
+            xbar0(i, a) = unit(rng) * 1e3;
+        }
+    }
+    // Puts (q, x) into fv and the mesh.
+    auto load = [&](const HostCells2& q, const HostPoints& x) {
+        Kokkos::deep_copy(fv.positions(), x);
+        mesh.update(fv.positions());
+        mesh.update_cells();
+        Kokkos::deep_copy(fv.state(), q);
+    };
+    auto read_q = [&]() {
+        HostCells2 h("q", n);
+        Kokkos::deep_copy(h, fv.state());
+        return h;
+    };
+    auto read_x = [&]() {
+        HostPoints h("x", n);
+        Kokkos::deep_copy(h, fv.positions());
+        return h;
+    };
+    load(q0, x0);
+    std::vector<double> dts;
+    std::vector<HostCells2> qs{q0};
+    std::vector<HostPoints> xs{x0};
+    for (int s = 0; s < steps; ++s) {
+        dts.push_back(fv.time_step(0.3));
+        fv.step(dts.back());
+        qs.push_back(read_q());
+        xs.push_back(read_x());
+    }
+    auto run = [&](double sign, HostCells2& q_out, HostPoints& x_out) {
+        HostCells2 q("q", n);
+        HostPoints x("x", n);
+        for (int i = 0; i < n; ++i) {
+            for (int v = 0; v < 4; ++v) q(i, v) = q0(i, v) + sign * dq0(i, v);
+            for (int a = 0; a < 2; ++a) {
+                const double y = x0(i, a) + sign * dx0(i, a);
+                x(i, a) = y - std::floor(y);
+            }
+        }
+        load(q, x);
+        for (int s = 0; s < steps; ++s) fv.step(dts[s]);
+        q_out = read_q();
+        x_out = read_x();
+    };
+    // The tangent along the forward path.
+    load(q0, x0);
+    typename F::Cells dq("dq", n);
+    Points2 dx("dx", n);
+    Kokkos::deep_copy(dq, dq0);
+    Kokkos::deep_copy(dx, dx0);
+    for (int s = 0; s < steps; ++s) {
+        const reference::Geometry2D<Mesh, Exec::memory_space> ref(mesh);
+        fv.step_moving_tangent(dts[s], dq, dx, ref);
+    }
+    const HostCells2 q_end = read_q();
+    const HostPoints x_end = read_x();
+    double bits = 0;
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < 4; ++v) bits = std::max(bits, std::abs(q_end(i, v) - qs.back()(i, v)));
+    check.expect(bits == 0, name + ": the forward of step_moving_tangent is step()'s (" + sci(bits) + ")");
+    HostCells2 tq("tq", n);
+    HostPoints tx("tx", n);
+    Kokkos::deep_copy(tq, dq);
+    Kokkos::deep_copy(tx, dx);
+    HostCells2 qp, qm;
+    HostPoints xp, xm;
+    run(1, qp, xp);
+    run(-1, qm, xm);
+    auto wrapped = [](double d) { return d - std::nearbyint(d); };
+    // Per cell: central difference of (Q, x), or where it differs (a switch within +- the direction), a one-sided one.
+    double worst = 0, scale_q = 0, scale_x = 0, worst_one_sided = 0;
+    int cells_off = 0;
+    for (int i = 0; i < n; ++i) {
+        for (int v = 0; v < 4; ++v) scale_q = std::max(scale_q, std::abs(qp(i, v) - qm(i, v)) / 2);
+        for (int a = 0; a < 2; ++a) scale_x = std::max(scale_x, std::abs(wrapped(xp(i, a) - xm(i, a))) / 2);
+    }
+    for (int i = 0; i < n; ++i) {
+        double central = 0, plus = 0, minus = 0;
+        for (int v = 0; v < 4; ++v) {
+            central = std::max(central, std::abs(tq(i, v) - (qp(i, v) - qm(i, v)) / 2) / scale_q);
+            plus = std::max(plus, std::abs(tq(i, v) - (qp(i, v) - q_end(i, v))) / scale_q);
+            minus = std::max(minus, std::abs(tq(i, v) - (q_end(i, v) - qm(i, v))) / scale_q);
+        }
+        for (int a = 0; a < 2; ++a) {
+            central = std::max(central, std::abs(tx(i, a) - wrapped(xp(i, a) - xm(i, a)) / 2) / scale_x);
+            plus = std::max(plus, std::abs(tx(i, a) - wrapped(xp(i, a) - x_end(i, a))) / scale_x);
+            minus = std::max(minus, std::abs(tx(i, a) - wrapped(x_end(i, a) - xm(i, a))) / scale_x);
+        }
+        worst = std::max(worst, central);
+        if (central > 1e-5) {
+            ++cells_off;
+            worst_one_sided = std::max(worst_one_sided, std::min(plus, minus));
+        }
+    }
+    // gate < 0: reported only (several HLLC steps: the contact switch at S* = 0, where a mesh moving with the flow sits, is crossed
+    // within the direction, and the positions after a step are quantised to the grid, 1 step in 1e4).
+    if (gate > 0)
+        check.expect(worst < gate, name + ": J (dq, dx) equals central differences over " + std::to_string(steps) + " steps (" + sci(worst) +
+                                       " of the largest; direction x" + sci(scale) + ")");
+    // The adjoint, backwards along the forward path.
+    typename F::Cells qbar("qbar", n);
+    Points2 xbar("xbar", n);
+    Kokkos::deep_copy(qbar, wbar);
+    Kokkos::deep_copy(xbar, xbar0);
+    for (int s = steps - 1; s >= 0; --s) {
+        load(qs[s], xs[s]);
+        const reference::Geometry2D<Mesh, Exec::memory_space> ref(mesh);
+        fv.step_moving_adjoint(dts[s], qbar, xbar, ref);
+    }
+    HostCells2 aq("aq", n);
+    HostPoints ax("ax", n);
+    Kokkos::deep_copy(aq, qbar);
+    Kokkos::deep_copy(ax, xbar);
+    double lhs = 0, rhs = 0, size = 0;
+    for (int i = 0; i < n; ++i) {
+        for (int v = 0; v < 4; ++v) {
+            lhs += wbar(i, v) * tq(i, v);
+            rhs += aq(i, v) * dq0(i, v);
+            size += std::abs(wbar(i, v) * tq(i, v)) + std::abs(aq(i, v) * dq0(i, v));
+        }
+        for (int a = 0; a < 2; ++a) {
+            lhs += xbar0(i, a) * tx(i, a);
+            rhs += ax(i, a) * dx0(i, a);
+            size += std::abs(xbar0(i, a) * tx(i, a)) + std::abs(ax(i, a) * dx0(i, a));
+        }
+    }
+    const double dot = std::abs(lhs - rhs) / size;
+    check.expect(dot < 1e-13, name + ": <w, J v> = <J^T w, v> in (Q, x) over " + std::to_string(steps) + " steps (" + sci(dot) + ")");
+    std::printf("moving2d %-12s n %d steps %d: forward %.2e, tangent-FD %.2e (cells off %d, one-sided %.2e), dot %.2e\n", name.c_str(), n,
+                steps, bits, worst, cells_off, worst_one_sided, dot);
+}
+
 void tests_2d(Check& check) {
+    geometry_test_2d(check, 32);
+    moving_test_2d<FV2>(check, "2D moving HLLC", 32, 1, 1e-8, 0.01);  // x0.01: no switch crossed (the scan: --scan)
+    moving_test_2d<FV2HLL>(check, "2D moving HLL", 32, 1, 1e-8, 0.01);
+    moving_test_2d<FV2HLL>(check, "2D moving HLL", 32, 3, 1e-3);  // quantised positions after the first step: 1 grid step in 1e4
+    moving_test_2d<FV2>(check, "2D moving HLLC", 32, 3, -1);
     const HostCells2 reference = step_test_2d<FV2>(check, "2D HLLC", 32, 3);
     step_test_2d<FV2HLL>(check, "2D HLL", 32, 3);
     step_test_2d<FV2_32>(check, "2D HLLC grad32", 32, 3, 0.01, &reference);
@@ -1116,6 +1539,10 @@ int main(int argc, char** argv) {
                 step_test<FV>(check, "HLLC rough h " + sci(h), 1000, 1, 0.3, h);
                 step_test<FVHLL>(check, "HLL rough h " + sci(h), 1000, 1, 0.3, h);
             }
+            for (const double s : {1.0, 0.1, 0.01}) {
+                moving_test_2d<FV2>(check, "2D moving HLLC x" + sci(s), 32, 1, -1, s);
+                moving_test_2d<FV2HLL>(check, "2D moving HLL x" + sci(s), 32, 1, -1, s);
+            }
             return 0;
         }
     const hydro::Gas gas{5.0 / 3.0};
@@ -1125,6 +1552,8 @@ int main(int argc, char** argv) {
     piece_test(check, "HLL", FluxPiece<hydro::HLL>{gas}, samples, "star/F_L/F_R/-:");
     piece_test(check, "HLLC", FluxPiece<hydro::HLLC>{gas}, samples, "F_L/F*_L/F*_R/F_R:");
     piece_test(check, "limited gradient", GradientPiece{}, samples, "unclipped/clipped/zero/both:");
+    piece_test(check, "moving face HLL", MovingFacePiece<hydro::HLL>{gas}, samples, "star/F_L/F_R/-:");
+    piece_test(check, "moving face HLLC", MovingFacePiece<hydro::HLLC>{gas}, samples, "F_L/F*_L/F*_R/F_R:");
     step_test<FV>(check, "HLLC", 1000, 1);
     const HostCells reference = step_test<FV>(check, "HLLC", 1000, 3);
     step_test<FVHLL>(check, "HLL", 1000, 1);

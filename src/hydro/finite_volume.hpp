@@ -1,6 +1,7 @@
 #pragma once
 
 #include "euler.hpp"
+#include "geometry_derivative.hpp"
 #include "precision.hpp"
 #include "voronoi_mesh.hpp"
 
@@ -1891,6 +1892,337 @@ public:
         phase_end(timings, &Timings::sweep);
         Kokkos::parallel_for("hydro::update_adjoint", cells, AdjointGather{q_, qbar, bar_w_, bar_b_, bar_bound_, bound_face_, geometry_, gas_});
         phase_end(timings, &Timings::update);
+    }
+
+    // ---- The moving step at fixed topology, order 0 (advance<0, true>() + move()). The state is (Q, x): the geometry depends on the
+    // positions, and the positions move with the point velocities, which depend on W. The geometry's derivative in the positions
+    // comes from a GeometryDerivative (the mesh library's, or the tests' reference). Correctness first: plain kernels, per-call
+    // arrays. The forward is step() itself. Quantisation of the positions to the mesh grid is taken as the identity.
+
+    // d face_angle / d |A|. Used by: Regularised.
+    KOKKOS_INLINE_FUNCTION static double face_angle_slope(double area) {
+        if constexpr (D == 3)
+            return area > 0 ? 0.5 / (M_PI * Kokkos::sqrt(area / M_PI)) : 0.0;
+        else
+            return 0.5;
+    }
+
+    // Sweep<true, ...>'s point velocity of cell i: v + c (fraction c_s / |c|), fraction from the largest face angle (face fmax).
+    // Its tangent and adjoint. Used by: step_moving_tangent(), step_moving_adjoint().
+    struct Regularised {
+        Vec w{}, c{};
+        double cs = 0, cd = 0, amax = 0, fraction = 0, slope = 0;
+        int fmax = -1, other = -1;
+        bool active = false;
+        KOKKOS_INLINE_FUNCTION Regularised(const Geometry& geo, int i, const State& W, double sound) : cs(sound) {
+            for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
+                const int f = geo.face_at(k), j = geo.other_at(k, f, i);
+                const Vec d = geo.separation(i, j), a = geo.area_of(f);
+                const double angle = face_angle(Kokkos::sqrt(dot(a, a))) / (0.5 * Kokkos::sqrt(dot(d, d)));
+                if (angle > amax) {
+                    amax = angle;
+                    fmax = f;
+                    other = j;
+                }
+            }
+            constexpr double F = cell_max_angle_factor;
+            if (amax > 0.75 * F) {
+                fraction = amax > F ? cell_shaping_speed : cell_shaping_speed * (amax - 0.75 * F) / (0.25 * F);
+                slope = amax > F ? 0.0 : cell_shaping_speed / (0.25 * F);
+            }
+            w = velocity(W);
+            c = geo.row(geo.centroid, i);
+            cd = Kokkos::sqrt(dot(c, c));
+            active = cd > 0 && fraction > 0;
+            if (active) w = w + c * (fraction * cs / cd);
+        }
+        // d amax from the tangents of fmax's area vector and of the separation to the other cell.
+        KOKKOS_INLINE_FUNCTION double angle_tangent(const Geometry& geo, int i, Vec dA, Vec dd) const {
+            const Vec d = geo.separation(i, other), a = geo.area_of(fmax);
+            const double mag = Kokkos::sqrt(dot(a, a)), dist = Kokkos::sqrt(dot(d, d));
+            return face_angle_slope(mag) * dot(a, dA) / mag / (0.5 * dist) - amax * dot(d, dd) / (dist * dist);
+        }
+        KOKKOS_INLINE_FUNCTION Vec tangent(const Geometry& geo, int i, const State& dW, double dcs, Vec dc, Vec dA, Vec dd) const {
+            Vec dw = velocity(dW);
+            if (!active) return dw;
+            const double dfraction = slope != 0 ? slope * angle_tangent(geo, i, dA, dd) : 0.0;
+            const double k = fraction * cs / cd, dcd = dot(c, dc) / cd;
+            const double dk = (dfraction * cs + fraction * dcs) / cd - k * dcd / cd;
+            return dw + dc * k + c * dk;
+        }
+        // From wbar: adds to Wbar (velocity), csbar, cbar; the bars of fmax's area vector and of the separation to `other`.
+        KOKKOS_INLINE_FUNCTION void adjoint(const Geometry& geo, int i, Vec wbar, State& Wbar, double& csbar, Vec& cbar, Vec& Abar, Vec& dbar) const {
+            for (int a = 0; a < D; ++a) Wbar[1 + a] += wbar[a];
+            if (!active) return;
+            const double k = fraction * cs / cd;
+            cbar = cbar + wbar * k;
+            const double kbar = dot(wbar, c);
+            const double fractionbar = kbar * cs / cd;
+            csbar += kbar * fraction / cd;
+            const double cdbar = -kbar * k / cd;
+            cbar = cbar + c * (cdbar / cd);
+            if (slope == 0) return;
+            const double abar = slope * fractionbar;
+            const Vec d = geo.separation(i, other), a = geo.area_of(fmax);
+            const double mag = Kokkos::sqrt(dot(a, a)), dist = Kokkos::sqrt(dot(d, d));
+            Abar = Abar + a * (abar * face_angle_slope(mag) / mag / (0.5 * dist));
+            dbar = dbar - d * (abar * amax / (dist * dist));
+        }
+    };
+
+    // FaceFlux::face_velocity() as a function of d (owner to neighbour), x_f (relative to the owner), w_L, w_R; tangent; adjoint.
+    // Used by: step_moving_tangent(), step_moving_adjoint().
+    struct FaceVelocity {
+        // The same operations as FaceFlux::face_velocity().
+        KOKKOS_INLINE_FUNCTION static Vec value(Vec d, Vec xf, Vec wL, Vec wR) {
+            const double dist = Kokkos::sqrt(dot(d, d));
+            const Vec c = xf - d * 0.5;
+            const double inv_dist = 1.0 / dist;
+            double facv = dot(c, wL - wR) * inv_dist;
+            const double cc = Kokkos::sqrt(dot(c, c));
+            if (cc > 0.9 * dist) facv *= 0.9 * dist / cc;
+            return (wL + wR) * 0.5 + d * (facv * inv_dist);
+        }
+        KOKKOS_INLINE_FUNCTION static Vec tangent(Vec d, Vec xf, Vec wL, Vec wR, Vec dd, Vec dxf, Vec dwL, Vec dwR) {
+            const double dist = Kokkos::sqrt(dot(d, d)), ddist = dot(d, dd) / dist;
+            const Vec c = xf - d * 0.5, dc = dxf - dd * 0.5, u = wL - wR, du = dwL - dwR;
+            const double f0 = dot(c, u) / dist, df0 = (dot(dc, u) + dot(c, du)) / dist - f0 * ddist / dist;
+            const double cc = Kokkos::sqrt(dot(c, c));
+            double facv = f0, dfacv = df0;
+            if (cc > 0.9 * dist) {
+                const double s = 0.9 * dist / cc, ds = 0.9 * ddist / cc - s * dot(c, dc) / (cc * cc);
+                facv = f0 * s;
+                dfacv = df0 * s + f0 * ds;
+            }
+            return (dwL + dwR) * 0.5 + dd * (facv / dist) + d * (dfacv / dist - facv * ddist / (dist * dist));
+        }
+        KOKKOS_INLINE_FUNCTION static void adjoint(Vec d, Vec xf, Vec wL, Vec wR, Vec wfbar, Vec& dbar, Vec& xfbar, Vec& wLbar, Vec& wRbar) {
+            const double dist = Kokkos::sqrt(dot(d, d));
+            const Vec c = xf - d * 0.5, u = wL - wR;
+            const double f0 = dot(c, u) / dist, cc = Kokkos::sqrt(dot(c, c));
+            const bool clipped = cc > 0.9 * dist;
+            const double s = clipped ? 0.9 * dist / cc : 1.0, facv = f0 * s;
+            wLbar = wLbar + wfbar * 0.5;
+            wRbar = wRbar + wfbar * 0.5;
+            // d (facv / dist)
+            dbar = dbar + wfbar * (facv / dist);
+            const double qbar = dot(wfbar, d);
+            const double facvbar = qbar / dist;
+            double distbar = -qbar * facv / (dist * dist);
+            Vec cbar{};
+            const double f0bar = facvbar * s;
+            if (clipped) {  // s = 0.9 dist / cc
+                const double sbar = facvbar * f0;
+                distbar += sbar * 0.9 / cc;
+                cbar = cbar + c * (-sbar * s / (cc * cc));
+            }
+            // f0 = c.u / dist
+            cbar = cbar + u * (f0bar / dist);
+            const Vec ubar = c * (f0bar / dist);
+            distbar -= f0bar * f0 / dist;
+            wLbar = wLbar + ubar;
+            wRbar = wRbar - ubar;
+            // c = x_f - d / 2, dist = |d|
+            xfbar = xfbar + cbar;
+            dbar = dbar - cbar * 0.5 + d * (distbar / dist);
+        }
+    };
+
+    using Scalars = Kokkos::View<double*, Memory>;
+    using Derivative = GeometryDerivative<D, Memory>;
+    KOKKOS_INLINE_FUNCTION static State row_state(const Rows& r, int i) { return make_state<D>([&](int v) { return r(i, v); }); }
+    void require_moving_derivatives(const char* what) const {
+        static_assert(std::is_same_v<FluxStore, double> && std::is_same_v<typename P::riemann, double> && !Mesh::float_rows,
+                      "derivatives of a step: double flux rows, Riemann solve and geometry");
+        if (motion_ != Motion::moving || order_ != 0)
+            throw std::logic_error(std::string("hydro::FiniteVolume::") + what + ": a moving mesh at order 0");
+    }
+
+    // W, c_s of every cell and, with dq and dV given, their tangents (cell rows: W in [0, V), c_s in V). Used by: the moving derivatives.
+    void moving_primitives(const Rows& W, const Rows& dW, const Cells& dq, const Scalars& dV) {
+        const Geometry geo = geometry_;
+        const auto q = q_;
+        const Gas gas = gas_;
+        const bool tangent = dW.extent(0) > 0;
+        Kokkos::parallel_for(
+            "hydro::moving_primitives", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                const State U = geo.per_volume(q, i);
+                const State Wi = primitive(U, gas);
+                const double cs = sound_speed(Wi, gas);
+                for (int v = 0; v < V; ++v) W(i, v) = Wi[v];
+                W(i, V) = cs;
+                if (!tangent) return;
+                const double inv = 1.0 / geo.volume(i);
+                const State dU = make_state<D>([&](int v) { return (dq(i, v) - U[v] * dV(i)) * inv; });
+                const State dWi = primitive_tangent(U, dU, gas);
+                for (int v = 0; v < V; ++v) dW(i, v) = dWi[v];
+                dW(i, V) = cs > 0 ? 0.5 * gas.gamma * (dWi[D + 1] / Wi[0] - Wi[D + 1] * dWi[0] / (Wi[0] * Wi[0])) / cs : 0.0;
+            });
+    }
+
+    // One moving step at order 0 and its tangent at fixed topology: dq, dx (of Q, x before) -> (of Q, x after), in place.
+    // geometry: the derivative of the current mesh's geometry. The forward is step(dt) (the same bits as without the tangent).
+    void step_moving_tangent(double dt, const Cells& dq, const Points& dx, const Derivative& geometry) {
+        require_moving_derivatives("step_moving_tangent");
+        refresh();
+        const Geometry geo = geometry_;
+        const Gas gas = gas_;
+        Scalars dV("hydro_dV", n_);
+        Points dc("hydro_dc", n_), dA("hydro_dA", faces_), dxf("hydro_dxf", faces_), dw("hydro_dw", n_), w("hydro_w_tangent", n_);
+        geometry.tangent(dx, dV, dc, dA, dxf);
+        Rows W("hydro_moving_W", n_, V + 1), dW("hydro_moving_dW", n_, V + 1), dG("hydro_moving_dG", faces_, V);
+        moving_primitives(W, dW, dq, dV);
+        Kokkos::parallel_for(
+            "hydro::moving_velocity_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                const Regularised r(geo, i, row_state(W, i), W(i, V));
+                Vec dAf{}, ddf{};
+                if (r.fmax >= 0) {
+                    dAf = geo.row(dA, r.fmax);
+                    ddf = geo.row(dx, r.other) - geo.row(dx, i);
+                }
+                const Vec t = r.tangent(geo, i, row_state(dW, i), dW(i, V), geo.row(dc, i), dAf, ddf);
+                for (int a = 0; a < D; ++a) {
+                    dw(i, a) = t[a];
+                    w(i, a) = r.w[a];
+                }
+            });
+        Kokkos::parallel_for(
+            "hydro::moving_faces_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
+                const int o = geo.owner_of(f), j = geo.neighbour_of(f);
+                const Vec a = geo.area_of(f);
+                if (dot(a, a) == 0) {
+                    for (int v = 0; v < V; ++v) dG(f, v) = 0;
+                    return;
+                }
+                const Vec d = geo.separation(o, j), xf = geo.face_centroid_of(f), wL = geo.row(w, o), wR = geo.row(w, j);
+                const Vec dd = geo.row(dx, j) - geo.row(dx, o);
+                const Vec wf = FaceVelocity::value(d, xf, wL, wR);
+                const Vec dwf = FaceVelocity::tangent(d, xf, wL, wR, dd, geo.row(dxf, f), geo.row(dw, o), geo.row(dw, j));
+                const State dGf = MovingFace<Riemann, D>::tangent(row_state(W, o), row_state(W, j), a, wf, row_state(dW, o), row_state(dW, j),
+                                                                  geo.row(dA, f), dwf, gas);
+                for (int v = 0; v < V; ++v) dG(f, v) = dGf[v];
+            });
+        Kokkos::parallel_for(
+            "hydro::moving_update_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                State sum{};
+                for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
+                    const int f = geo.face_at(k);
+                    const double sign = geo.owned_at(k, f, i) ? 1.0 : -1.0;
+                    for (int v = 0; v < V; ++v) sum[v] += sign * dG(f, v);
+                }
+                for (int v = 0; v < V; ++v) dq(i, v) -= dt * sum[v];
+                for (int a = 0; a < D; ++a) dx(i, a) += dt * dw(i, a);
+            });
+        step(dt);
+    }
+
+    // Reverse mode of step_moving_tangent(): qbar, xbar (of Q, x after the step) on entry, of Q, x before on return. Q and the
+    // positions are the state at the start of the step (the caller restores them and updates the mesh); nothing steps.
+    void step_moving_adjoint(double dt, const Cells& qbar, const Points& xbar, const Derivative& geometry) {
+        require_moving_derivatives("step_moving_adjoint");
+        refresh();
+        const Geometry geo = geometry_;
+        const Gas gas = gas_;
+        const auto q = q_;
+        Rows W("hydro_moving_W", n_, V + 1), face_bar("hydro_moving_face_bar", faces_, 2 * V + 4 * D);
+        moving_primitives(W, Rows(), Cells(), Scalars());
+        Points w("hydro_w_adjoint", n_), Abar("hydro_Abar", faces_), xfbar("hydro_xfbar", faces_), cbar("hydro_cbar", n_);
+        Points angle_Abar("hydro_angle_Abar", n_), angle_dbar("hydro_angle_dbar", n_);
+        Scalars Vbar("hydro_Vbar", n_);
+        Kokkos::View<int*, Memory> fmax("hydro_fmax", n_);
+        Kokkos::parallel_for(
+            "hydro::moving_velocity", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                const Regularised r(geo, i, row_state(W, i), W(i, V));
+                for (int a = 0; a < D; ++a) w(i, a) = r.w[a];
+            });
+        // Per face: G's bar from both cells' Q bars, then the bars of W_L, W_R, A, w_f, and through w_f of d, x_f, w_L, w_R.
+        // face_bar row: W_L bar, W_R bar, w_L bar, w_R bar, d bar, A bar (the separation's bar is gathered by the cells).
+        Kokkos::parallel_for(
+            "hydro::moving_faces_adjoint", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
+                for (int s = 0; s < 2 * V + 4 * D; ++s) face_bar(f, s) = 0;
+                for (int a = 0; a < D; ++a) xfbar(f, a) = 0;
+                const int o = geo.owner_of(f), j = geo.neighbour_of(f);
+                const Vec a = geo.area_of(f);
+                if (dot(a, a) == 0) return;
+                const Vec d = geo.separation(o, j), xf = geo.face_centroid_of(f), wL = geo.row(w, o), wR = geo.row(w, j);
+                const Vec wf = FaceVelocity::value(d, xf, wL, wR);
+                const State Gbar = make_state<D>([&](int v) { return -dt * (qbar(o, v) - qbar(j, v)); });
+                State Lbar{}, Rbar{};
+                Vec Ab{}, wfbar{}, db{}, xfb{}, wLb{}, wRb{};
+                MovingFace<Riemann, D>::adjoint(row_state(W, o), row_state(W, j), a, wf, gas, Gbar, Lbar, Rbar, Ab, wfbar);
+                FaceVelocity::adjoint(d, xf, wL, wR, wfbar, db, xfb, wLb, wRb);
+                for (int v = 0; v < V; ++v) {
+                    face_bar(f, v) = Lbar[v];
+                    face_bar(f, V + v) = Rbar[v];
+                }
+                for (int c = 0; c < D; ++c) {
+                    face_bar(f, 2 * V + c) = wLb[c];
+                    face_bar(f, 2 * V + D + c) = wRb[c];
+                    face_bar(f, 2 * V + 2 * D + c) = db[c];
+                    face_bar(f, 2 * V + 3 * D + c) = Ab[c];
+                    xfbar(f, c) = xfb[c];
+                }
+            });
+        // Per cell: w's bar (dt xbar and the faces'), through the point velocity to W, c_s, c and the angle face; W's bar from the
+        // faces; Q's bar and V's bar through the primitives.
+        Kokkos::parallel_for(
+            "hydro::moving_cells_adjoint", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                Vec wbar = geo.row(xbar, i) * dt;
+                State Wbar{};
+                for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
+                    const int f = geo.face_at(k);
+                    const bool owned = geo.owned_at(k, f, i);
+                    for (int v = 0; v < V; ++v) Wbar[v] += face_bar(f, (owned ? 0 : V) + v);
+                    for (int a = 0; a < D; ++a) wbar[a] += face_bar(f, 2 * V + (owned ? 0 : D) + a);
+                }
+                const Regularised r(geo, i, row_state(W, i), W(i, V));
+                double csbar = 0;
+                Vec cb{}, Ab{}, db{};
+                r.adjoint(geo, i, wbar, Wbar, csbar, cb, Ab, db);
+                fmax(i) = r.fmax;
+                for (int a = 0; a < D; ++a) {
+                    cbar(i, a) = cb[a];
+                    angle_Abar(i, a) = Ab[a];
+                    angle_dbar(i, a) = db[a];
+                }
+                // c_s = sqrt(gamma P / rho)
+                const State Wi = row_state(W, i);
+                if (W(i, V) > 0) {
+                    const double c2bar = csbar / (2 * W(i, V));
+                    Wbar[D + 1] += c2bar * gas.gamma / Wi[0];
+                    Wbar[0] -= c2bar * gas.gamma * Wi[D + 1] / (Wi[0] * Wi[0]);
+                }
+                // W = primitive(Q / V)
+                const State U = geo.per_volume(q, i);
+                const State Ubar = primitive_adjoint(U, Wbar, gas);
+                const double inv = 1.0 / geo.volume(i);
+                double vb = 0;
+                for (int v = 0; v < V; ++v) {
+                    qbar(i, v) += Ubar[v] * inv;
+                    vb -= Ubar[v] * U[v] * inv;
+                }
+                Vbar(i) = vb;
+            });
+        // Per face: A's bar with the angle faces of its two cells. Per cell: the separations' bars (the faces' and the angle face's).
+        Kokkos::parallel_for(
+            "hydro::moving_area_bar", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
+                const int o = geo.owner_of(f), j = geo.neighbour_of(f);
+                for (int a = 0; a < D; ++a)
+                    Abar(f, a) = face_bar(f, 2 * V + 3 * D + a) + (fmax(o) == f ? angle_Abar(o, a) : 0.0) + (fmax(j) == f ? angle_Abar(j, a) : 0.0);
+            });
+        Kokkos::parallel_for(
+            "hydro::moving_separation_bar", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
+                Vec sum = geo.row(angle_dbar, i) * -1.0;  // d = x_other - x_i of i's own angle face
+                for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
+                    const int f = geo.face_at(k), j = geo.other_at(k, f, i);
+                    const bool owned = geo.owned_at(k, f, i);
+                    const Vec db = make_vec<D>([&](int a) { return face_bar(f, 2 * V + 2 * D + a); });  // d = x_j - x_o
+                    sum = owned ? sum - db : sum + db;
+                    if (fmax(j) == f) sum = sum + geo.row(angle_dbar, j);  // j's angle face: d = x_i - x_j
+                }
+                for (int a = 0; a < D; ++a) xbar(i, a) += sum[a];
+            });
+        geometry.adjoint(Vbar, cbar, Abar, xfbar, xbar);
     }
 
 private:

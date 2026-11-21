@@ -737,4 +737,87 @@ struct HLLC {
     }
 };
 
+// The flux through a moving face, G = |A| Riemann::flux(L, R, A / |A|, w) (FaceFlux: the flux times the area), and its
+// derivatives in every input: the sides L, R, the area vector A and the face velocity w. Riemann: HLL or HLLC.
+// n and w enter through the solver's two invariances, so flux_tangent()/flux_adjoint() (dL, dR at fixed n, w) are reused:
+//  - Galilean: flux() solves in the frame of w and returns to_lab(F_rel, w); moving w by dw moves the sides' velocities by -dw
+//    and adds to_lab's own derivative in w;
+//  - rotation: F(Q L, Q R, Q n, Q w) = Q F(L, R, n, w) for a rotation Q of the velocities and the momentum flux. For n unit and
+//    dn ⟂ n, Q = I + Ω with Ω = dn nᵀ - n dnᵀ takes n to n + dn, so dF = Ω F + J (-Ω L, -Ω R, -Ω w).
+// Used by: the moving step's tangent and adjoint, the derivative tests.
+template <class Riemann, int D>
+struct MovingFace {
+    using S = State<D>;
+    using V = Vec<D>;
+    // Ω b = dn (n·b) - n (dn·b): the rotation's tangent applied to b.
+    KOKKOS_INLINE_FUNCTION static V turn(V n, V dn, V b) { return dn * dot(n, b) - n * dot(dn, b); }
+    // The n-bar of <a, Ω b> = dn·(a (n·b) - b (n·a)).
+    KOKKOS_INLINE_FUNCTION static V turn_bar(V n, V a, V b) { return a * dot(n, b) - b * dot(n, a); }
+    KOKKOS_INLINE_FUNCTION static V vec(const S& s) { return velocity(s); }
+    KOKKOS_INLINE_FUNCTION static S add_vec(S s, V v) {
+        for (int k = 0; k < D; ++k) s[1 + k] += v[k];
+        return s;
+    }
+
+    // dG for (dL, dR, dA, dw); value: if given, G.
+    KOKKOS_INLINE_FUNCTION static S tangent(const S& L, const S& R, V A, V w, const S& dL, const S& dR, V dA, V dw, const Gas& gas,
+                                            S* value = nullptr) {
+        const double s = Kokkos::sqrt(dot(A, A));
+        const V n = A * (1.0 / s);
+        const V dn = (dA - n * dot(n, dA)) * (1.0 / s);
+        const V shift = dw - turn(n, dn, w);  // the face velocity's change in the rotated frame
+        const S dLr = add_vec(dL, (turn(n, dn, vec(L)) + shift) * -1.0), dRr = add_vec(dR, (turn(n, dn, vec(R)) + shift) * -1.0);
+        S F;
+        S dF = Riemann::flux_tangent(L, R, dLr, dRr, n, w, gas, &F);
+        const S Fr = detail::to_lab(F, w * -1.0);  // the flux in the face's frame
+        // to_lab's derivative in w: momentum += dw F_0, energy += dw·F_rel,mom + (w·dw) F_0
+        for (int k = 0; k < D; ++k) {
+            dF[1 + k] += shift[k] * Fr[0];
+            dF[D + 1] += shift[k] * (Fr[1 + k] + w[k] * Fr[0]);
+        }
+        const V turned = turn(n, dn, vec(F));
+        const double ds = dot(n, dA);
+        S dG;
+        for (int v = 0; v < D + 2; ++v) dG[v] = s * dF[v] + ds * F[v];
+        for (int k = 0; k < D; ++k) dG[1 + k] += s * turned[k];
+        if (value)
+            for (int v = 0; v < D + 2; ++v) (*value)[v] = s * F[v];
+        return dG;
+    }
+
+    // The transpose: adds J^T Gbar to Lbar, Rbar, Abar and wbar.
+    KOKKOS_INLINE_FUNCTION static void adjoint(const S& L, const S& R, V A, V w, const Gas& gas, const S& Gbar, S& Lbar, S& Rbar, V& Abar,
+                                               V& wbar) {
+        const double s = Kokkos::sqrt(dot(A, A));
+        const V n = A * (1.0 / s);
+        S F;
+        Riemann::flux_tangent(L, R, S{}, S{}, n, w, gas, &F);
+        const S Fr = detail::to_lab(F, w * -1.0);
+        // G = s F: s's bar, then F's bar X = s Gbar
+        double sbar = 0;
+        S X;
+        for (int v = 0; v < D + 2; ++v) {
+            sbar += Gbar[v] * F[v];
+            X[v] = s * Gbar[v];
+        }
+        V nbar = turn_bar(n, vec(X), vec(F));  // Ω F
+        V shiftbar{};
+        for (int k = 0; k < D; ++k) shiftbar[k] += X[1 + k] * Fr[0] + X[D + 1] * (Fr[1 + k] + w[k] * Fr[0]);
+        S Lr{}, Rr{};
+        Riemann::flux_adjoint(L, R, n, w, gas, X, Lr, Rr);
+        for (int v = 0; v < D + 2; ++v) {
+            Lbar[v] += Lr[v];
+            Rbar[v] += Rr[v];
+        }
+        // dLr = dL - Ω L - shift, the same for R
+        shiftbar = shiftbar - vec(Lr) - vec(Rr);
+        nbar = nbar - turn_bar(n, vec(Lr), vec(L)) - turn_bar(n, vec(Rr), vec(R));
+        // shift = dw - Ω w
+        wbar = wbar + shiftbar;
+        nbar = nbar - turn_bar(n, shiftbar, w);
+        // dn = (dA - n (n·dA)) / s, ds = n·dA
+        Abar = Abar + (nbar - n * dot(n, nbar)) * (1.0 / s) + n * sbar;
+    }
+};
+
 }  // namespace hydro
