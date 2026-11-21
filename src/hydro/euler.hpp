@@ -271,6 +271,42 @@ KOKKOS_INLINE_FUNCTION void half_step_adjoint(const Kokkos::Array<double, N>& W,
     Wbar[P] += gas.gamma * rho_c2bar;
 }
 
+// Flux-formulation levers of branch flux-latency, chosen at compile time (-DLUNA_FLUX_LEVER=n, measurement only):
+// 1 wave speeds in float (sound speeds, their roots, S_M's division), 2 double divisions and roots as a float estimate plus
+// one Newton step, 3 the cells' sound speeds for the wave speeds. 0: the code of main.
+#ifndef LUNA_FLUX_LEVER
+#define LUNA_FLUX_LEVER 0
+#endif
+namespace fast {
+// Whether x is inside float's normal range, where a float estimate is finite and accurate to 2^-22. Tiny faces of a
+// jittered mesh have |A|^2 below 1.2e-38: there the estimate is infinite and the flux NaN (Sedov 128^3, first step).
+KOKKOS_INLINE_FUNCTION bool float_normal(double x) {
+    const double a = Kokkos::fabs(x);
+    return a >= 1.2e-38 && a <= 3.4e38;
+}
+// 1 / x: the float reciprocal, then one Newton step in double (relative error about 1e-14 instead of 1e-16); the exact
+// division outside float's normal range. Used by: lever 2.
+KOKKOS_INLINE_FUNCTION double rcp(double x) {
+    if (!float_normal(x)) return 1.0 / x;
+#if defined(__CUDA_ARCH__)
+    const double y = static_cast<double>(__frcp_rn(static_cast<float>(x)));
+#else
+    const double y = static_cast<double>(1.0f / static_cast<float>(x));
+#endif
+    return y * (2.0 - x * y);
+}
+// 1 / sqrt(x): the float estimate, then one Newton step in double; exact outside float's normal range. Used by: lever 2.
+KOKKOS_INLINE_FUNCTION double rsqrt(double x) {
+    if (!float_normal(x)) return 1.0 / Kokkos::sqrt(x);
+#if defined(__CUDA_ARCH__)
+    const double y = static_cast<double>(rsqrtf(static_cast<float>(x)));
+#else
+    const double y = static_cast<double>(1.0f / Kokkos::sqrt(static_cast<float>(x)));
+#endif
+    return y * (1.5 - 0.5 * x * y * y);
+}
+}  // namespace fast
+
 // Riemann solvers (Riemann parameter of FiniteVolume<D>): flux(L, R, n, w, gas) along unit normal n of a face moving with w.
 // States are taken relative to w, the lab-frame flux is per area, L to R. Vectors stay in box axes, not LUNA's (normal, tangents) rotation; equal up to rounding (docs/design.md).
 namespace detail {
@@ -507,9 +543,68 @@ struct HLLC {
         constexpr T eps = T(1e-20);
         return Kokkos::fabs(d) < eps ? (d < 0 ? -eps : eps) : d;
     }
+    // flux() with the levers of LUNA_FLUX_LEVER (double only). cL_cell, cR_cell: lever 3's sound speeds of the two cells
+    // (from their primitive rows), used for the wave-speed bounds instead of the face states'. Used by: flux(), MovingFlux.
+    template <int D>
+    KOKKOS_INLINE_FUNCTION static State<D> flux_lever(const State<D>& L, const State<D>& R, Vec<D> n, Vec<D> w, const Gas& gas,
+                                                      double cL_cell = 0, double cR_cell = 0) {
+        constexpr int P = D + 1;
+        const double vnL = dot(velocity(L) - w, n), vnR = dot(velocity(R) - w, n);
+        double cL = cL_cell, cR = cR_cell;
+        bool ok = true;
+        if constexpr (LUNA_FLUX_LEVER == 1) {  // sound speeds and their roots in float
+            const float c2L = static_cast<float>(gas.gamma) * static_cast<float>(L[P]) / static_cast<float>(L[0]);
+            const float c2R = static_cast<float>(gas.gamma) * static_cast<float>(R[P]) / static_cast<float>(R[0]);
+            ok = c2L >= 0 && c2R >= 0;
+            cL = c2L > 0 ? static_cast<double>(Kokkos::sqrt(c2L)) : 0.0;
+            cR = c2R > 0 ? static_cast<double>(Kokkos::sqrt(c2R)) : 0.0;
+        } else if constexpr (LUNA_FLUX_LEVER == 2) {  // estimate plus a Newton step
+            const double c2L = gas.gamma * L[P] * fast::rcp(L[0]), c2R = gas.gamma * R[P] * fast::rcp(R[0]);
+            ok = c2L >= 0 && c2R >= 0;
+            cL = c2L > 0 ? c2L * fast::rsqrt(c2L) : 0.0;
+            cR = c2R > 0 ? c2R * fast::rsqrt(c2R) : 0.0;
+        }
+        const double SL = Kokkos::fmin(vnL - cL, vnR - cR);
+        const double SR = Kokkos::fmax(vnL + cL, vnR + cR);
+        const double denomL = L[0] * (SL - vnL), denomR = R[0] * (SR - vnR);
+        // S_M's numerator and divisor in double (differences of nearly equal pressures), the division per lever.
+        const double num = R[P] - L[P] + denomL * vnL - denomR * vnR, den = nonzero(denomL - denomR);
+        double SM;
+        if constexpr (LUNA_FLUX_LEVER == 1)
+            SM = static_cast<double>(static_cast<float>(num) / static_cast<float>(den));
+        else if constexpr (LUNA_FLUX_LEVER == 2)
+            SM = num * fast::rcp(den);
+        else
+            SM = num / den;
+        const bool left = ok && (SL >= 0 || SM >= 0);
+        const bool star = ok && SL < 0 && (SM >= 0 || SR > 0);
+        const State<D> W = make_state<D>([&](int v) { return left ? L[v] : R[v]; });
+        const detail::Side<D, double> s = detail::side_with(W, n, w, gas, left ? vnL : vnR);
+        if (!star) return detail::to_lab(s.F, w);
+        const double S = left ? SL : SR, denom = left ? denomL : denomR;
+        double rho_star, inv_rho, inv_denom;
+        if constexpr (LUNA_FLUX_LEVER == 2) {
+            rho_star = denom * fast::rcp(nonzero(S - SM));
+            inv_rho = fast::rcp(W[0]);
+            inv_denom = fast::rcp(nonzero(denom));
+        } else {
+            rho_star = denom / nonzero(S - SM);
+            inv_rho = 1.0 / W[0];
+            inv_denom = 1.0 / nonzero(denom);
+        }
+        const double E_star = s.E * inv_rho + (SM - s.vn) * (SM + W[P] * inv_denom);
+        const Vec<D> v_star = s.v + n * (SM - s.vn);
+        const State<D> U_star = make_state<D>(
+            [&](int k) { return k == 0 ? rho_star : k == P ? rho_star * E_star : rho_star * v_star[k - 1]; });
+        State<D> F;
+        for (int v = 0; v < D + 2; ++v) F[v] = s.F[v] + S * (U_star[v] - s.U[v]);
+        return detail::to_lab(F, w);
+    }
+
     template <int D, class T>
     KOKKOS_INLINE_FUNCTION static StateT<D, T> flux(const StateT<D, T>& L, const StateT<D, T>& R, Vec<D, T> n,
                                                     Vec<D, T> w, const Gas& gas) {
+        if constexpr (std::is_same_v<T, double> && (LUNA_FLUX_LEVER == 1 || LUNA_FLUX_LEVER == 2)) return flux_lever<D>(L, R, n, w, gas);
         constexpr int P = D + 1;
         // Wave speeds and the contact speed from the normal velocities and sound speeds alone; the flux is then built for one side only.
         const T vnL = dot(velocity(L) - w, n), vnR = dot(velocity(R) - w, n);

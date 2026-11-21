@@ -1044,9 +1044,16 @@ public:
         // wL, wR: the point velocities of owner and neighbour (FaceFlux: the rows of w; MovingFlux: from the grid steps).
         KOKKOS_INLINE_FUNCTION Vec face_velocity(int f, int o, int j, Vec wL, Vec wR) const {
             const Vec d = geo.separation(o, j);
-            const double dist = Kokkos::sqrt(dot(d, d));
+            double dist, inv_dist;
+            if constexpr (LUNA_FLUX_LEVER == 2) {  // |d| and 1 / |d| from one estimate and a Newton step
+                const double d2 = dot(d, d);
+                inv_dist = fast::rsqrt(d2);
+                dist = d2 * inv_dist;
+            } else {
+                dist = Kokkos::sqrt(dot(d, d));
+                inv_dist = 1.0 / dist;
+            }
             const Vec c = geo.face_centroid_of(f) - d * 0.5;
-            const double inv_dist = 1.0 / dist;
             double facv = dot(c, wL - wR) * inv_dist;
             // |c| only where the limit applies: the squares compared, one double square root a face fewer.
             const double limit = 0.9 * dist, c2 = dot(c, c);
@@ -1124,12 +1131,25 @@ public:
         KOKKOS_INLINE_FUNCTION State operator()(int f, int& fallbacks_o, int& fallbacks_j) const {
             const int o = this->geo.owner_of(f), j = this->geo.neighbour_of(f);
             const Vec a = this->geo.area_of(f);
-            const double magnitude = Kokkos::sqrt(dot(a, a));
-            if (magnitude == 0) return State{};
+            double magnitude, inv_magnitude;
+            if constexpr (LUNA_FLUX_LEVER == 2) {  // |A| and 1 / |A| from one estimate and a Newton step
+                const double a2 = dot(a, a);
+                if (a2 == 0) return State{};
+                inv_magnitude = fast::rsqrt(a2);
+                magnitude = a2 * inv_magnitude;
+            } else {
+                magnitude = Kokkos::sqrt(dot(a, a));
+                if (magnitude == 0) return State{};
+                inv_magnitude = 1.0 / magnitude;
+            }
             const Vec wf = this->face_velocity(f, o, j, velocity(o), velocity(j));
             const State L = pass_side(o, this->geo.face_offset(f, o), fallbacks_o);
             const State R = pass_side(j, this->geo.face_offset(f, j), fallbacks_j);
-            State F = this->solve(L, R, a * (1.0 / magnitude), wf, this->gas);
+            State F;
+            if constexpr (LUNA_FLUX_LEVER == 3 && std::is_same_v<Riemann, HLLC> && std::is_same_v<typename P::riemann, double>)
+                F = HLLC::flux_lever<D>(L, R, a * inv_magnitude, wf, this->gas, this->prim(o, V), this->prim(j, V));
+            else
+                F = this->solve(L, R, a * inv_magnitude, wf, this->gas);
             for (int v = 0; v < V; ++v) F[v] *= magnitude;
             return F;
         }
