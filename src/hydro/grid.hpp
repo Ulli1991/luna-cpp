@@ -6,6 +6,14 @@
 
 #include <cstdint>
 
+// Unrolls the loop below it on the device, where an array indexed by a loop counter would otherwise live in local memory
+// (-DLUNA_GRID_NO_UNROLL: not, as before 2026-11-20, for comparisons).
+#if defined(__CUDA_ARCH__) && !defined(LUNA_GRID_NO_UNROLL)
+#define LUNA_GRID_UNROLL _Pragma("unroll")
+#else
+#define LUNA_GRID_UNROLL
+#endif
+
 // The fixed-grid MUSCL-Hancock step of LUNA (research_notes/fixed_grid_2026-11-19.md), per cell: LUNA's numerics operation for
 // operation, so a build without FMA contraction gives LUNA's bits. The kernels that call cell_step() are in grid_finite_volume.hpp
 // (Kokkos) and grid_cuda.hpp (CUDA). Names follow LUNA's: slopes.py, jacobian.py, fluxes.py, conversions.py, integrators.py.
@@ -85,6 +93,7 @@ KOKKOS_INLINE_FUNCTION State<D> to_primitive(const State<D>& U, const Params& p)
     const double rho = p.floors ? nan_max(U[0], p.smallr) : U[0];
     const double inv_rho = 1.0 / rho;
     double sum = 0;
+    LUNA_GRID_UNROLL
     for (int a = 0; a < D; ++a) {
         W[1 + a] = U[1 + a] * inv_rho;
         sum = a == 0 ? W[1] * W[1] : sum + W[1 + a] * W[1 + a];
@@ -102,6 +111,7 @@ KOKKOS_INLINE_FUNCTION State<D> to_conserved(const State<D>& W, const Params& p)
     constexpr int P = D + 1;
     State<D> U;
     double sum = 0;
+    LUNA_GRID_UNROLL
     for (int a = 0; a < D; ++a) {
         U[1 + a] = W[0] * W[1 + a];
         sum = a == 0 ? W[1] * W[1] : sum + W[1 + a] * W[1 + a];
@@ -120,6 +130,7 @@ KOKKOS_INLINE_FUNCTION double cell_dt(const State<D>& U, const Params& p) {
     const double rho = p.floors ? nan_max(U[0], p.smallr) : U[0];
     const double inv_rho = 1.0 / rho;
     double v[3] = {0, 0, 0}, sq = 0;
+    LUNA_GRID_UNROLL
     for (int a = 0; a < D; ++a) {
         v[a] = U[1 + a] * inv_rho;
         sq = a == 0 ? v[0] * v[0] : sq + v[a] * v[a];
@@ -128,6 +139,7 @@ KOKKOS_INLINE_FUNCTION double cell_dt(const State<D>& U, const Params& p) {
     const double e = p.floors ? nan_max(U[P] - ke, p.smalle * rho) : U[P] - ke;
     const double c = Kokkos::sqrt(e * p.gamma_gm1 / rho);
     double sum = 0;
+    LUNA_GRID_UNROLL
     for (int a = 0; a < D; ++a) {
         const double term = (Kokkos::fabs(v[a]) + c) * p.inv[a];
         sum = a == 0 ? term : sum + term;
@@ -155,12 +167,15 @@ KOKKOS_INLINE_FUNCTION State<D> rate(const State<D>& W, const State<D> (&g)[D], 
         A[3] = (rho * c2 * gx[1] + vx * gx[3]) + (rho * c2 * gy[2] + vy * gy[3]);
     } else {
         const double rho = W[0], P = W[4], rho_c2 = gamma * P, inv_rho = 1.0 / rho;
+        LUNA_GRID_UNROLL
         for (int d = 0; d < 3; ++d) {
             const double vn = W[1 + d];
             State<3> r;
             r[0] = vn * g[d][0] + rho * g[d][1 + d];
+            LUNA_GRID_UNROLL
             for (int k = 0; k < 3; ++k) r[1 + k] = k == d ? vn * g[d][1 + k] + inv_rho * g[d][4] : vn * g[d][1 + k];
             r[4] = rho_c2 * g[d][1 + d] + vn * g[d][4];
+            LUNA_GRID_UNROLL
             for (int v = 0; v < 5; ++v) A[v] = d == 0 ? r[v] : A[v] + r[v];
         }
     }
@@ -171,10 +186,13 @@ KOKKOS_INLINE_FUNCTION State<D> rate(const State<D>& W, const State<D> (&g)[D], 
 template <int D>
 KOKKOS_INLINE_FUNCTION State<D> predict(const State<D>& W, const State<D> (&slope)[D], const Params& p, double h) {
     State<D> g[D];
+    LUNA_GRID_UNROLL
     for (int d = 0; d < D; ++d)
+        LUNA_GRID_UNROLL
         for (int v = 0; v < D + 2; ++v) g[d][v] = slope[d][v] * p.inv[d];
     const State<D> A = rate<D>(W, g, p.gamma);
     State<D> half;
+    LUNA_GRID_UNROLL
     for (int v = 0; v < D + 2; ++v) half[v] = W[v] - h * A[v];
     return half;
 }
@@ -186,6 +204,7 @@ KOKKOS_INLINE_FUNCTION State<D> face_rule(State<D> W, const State<D>& Wc, const 
     constexpr int P = D + 1;
     const bool bad = W[0] <= 0.0 || W[P] <= 0.0;
     if (!(p.floors && !p.allow_first_order) && bad)
+        LUNA_GRID_UNROLL
         for (int v = 0; v < D + 2; ++v) W[v] = p.allow_first_order ? Wc[v] : Kokkos::Experimental::quiet_NaN_v<double>;
     if (!p.floors) return W;
     double rho = W[0] < p.smallr ? Wc[0] : W[0];
@@ -204,6 +223,7 @@ KOKKOS_INLINE_FUNCTION State<D> face_flux(const State<D>& halfL, const State<D>&
                                           const State<D>& slopeR, const State<D>& centreR, int d, const Params& p) {
     constexpr int P = D + 1;
     State<D> L, R;
+    LUNA_GRID_UNROLL
     for (int v = 0; v < D + 2; ++v) {
         L[v] = halfL[v] + 0.5 * slopeL[v];
         R[v] = halfR[v] - 0.5 * slopeR[v];
@@ -257,10 +277,13 @@ struct Field {
         int fix[3] = {0, 0, 0};
         const int c[3] = {i, j, k};
         int m[3] = {0, 0, 0};
+        LUNA_GRID_UNROLL
         for (int a = 0; a < D; ++a) m[a] = ghost(c[a], n[a], boundary, fix[a]);
         const long at = (static_cast<long>(m[0]) * n[1] + m[1]) * n[2] + m[2];
         State<D> w;
+        LUNA_GRID_UNROLL
         for (int v = 0; v < D + 2; ++v) w[v] = W[v * cells + at];
+        LUNA_GRID_UNROLL
         for (int a = 0; a < D; ++a) {
             double& u = w[1 + a];
             if (fix[a] == 1) u = -u;
@@ -284,28 +307,36 @@ KOKKOS_INLINE_FUNCTION State<D> divergence(const Field<D>& W, int i, int j, int 
     };
     const State<D> W0 = W(i, j, k);
     State<D> near[D][2];  // o - e_d, o + e_d
+    LUNA_GRID_UNROLL
     for (int d = 0; d < D; ++d) {
         near[d][0] = at(d, -1);
         near[d][1] = at(d, 1);
     }
     State<D> slope0[D];
+    LUNA_GRID_UNROLL
     for (int d = 0; d < D; ++d)
+        LUNA_GRID_UNROLL
         for (int v = 0; v < D + 2; ++v) slope0[d][v] = limit(W0[v] - near[d][0][v], near[d][1][v] - W0[v], p.limiter);
     const State<D> half0 = predict<D>(W0, slope0, p, h);
     State<D> dU;
+    LUNA_GRID_UNROLL
     for (int d = 0; d < D; ++d) {
         State<D> F[2];
+        LUNA_GRID_UNROLL
         for (int s = 0; s < 2; ++s) {
             const int step = 2 * s - 1;
             const State<D>& Wq = near[d][s];
             State<D> slope[D];
+            LUNA_GRID_UNROLL
             for (int e = 0; e < D; ++e) {
                 if (e == d) {
                     const State<D> far = at(d, 2 * step);
+                    LUNA_GRID_UNROLL
                     for (int v = 0; v < D + 2; ++v)
                         slope[e][v] = s == 0 ? limit(Wq[v] - far[v], W0[v] - Wq[v], p.limiter) : limit(Wq[v] - W0[v], far[v] - Wq[v], p.limiter);
                 } else {
                     const State<D> lo = at(d, step, e, -1), hi = at(d, step, e, 1);
+                    LUNA_GRID_UNROLL
                     for (int v = 0; v < D + 2; ++v) slope[e][v] = limit(Wq[v] - lo[v], hi[v] - Wq[v], p.limiter);
                 }
             }
@@ -313,6 +344,7 @@ KOKKOS_INLINE_FUNCTION State<D> divergence(const Field<D>& W, int i, int j, int 
             F[s] = s == 0 ? face_flux<D, Riemann>(half, slope[d], Wq, half0, slope0[d], W0, d, p)
                           : face_flux<D, Riemann>(half0, slope0[d], W0, half, slope[d], Wq, d, p);
         }
+        LUNA_GRID_UNROLL
         for (int v = 0; v < D + 2; ++v) {
             const double contribution = (F[0][v] - F[1][v]) * p.inv[d];
             dU[v] = d == 0 ? contribution : dU[v] + contribution;
@@ -335,11 +367,13 @@ KOKKOS_INLINE_FUNCTION double cell_step(const Field<D>& W, const Arrays& a, int 
     const long at = (static_cast<long>(i) * W.n[1] + j) * W.n[2] + k;
     const State<D> dU = divergence<D, Riemann>(W, i, j, k, p, 0.5 * dt);
     State<D> U;
+    LUNA_GRID_UNROLL
     for (int v = 0; v < D + 2; ++v) {
         U[v] = a.U[v * W.cells + at] + dt * dU[v];
         a.U_next[v * W.cells + at] = U[v];
     }
     const State<D> Wn = to_primitive<D>(U, p);
+    LUNA_GRID_UNROLL
     for (int v = 0; v < D + 2; ++v) a.W_next[v * W.cells + at] = Wn[v];
     return cell_dt<D>(U, p);
 }

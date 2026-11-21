@@ -24,6 +24,11 @@ cuda | cuda-exact)
     echo "kind: host, cuda or cuda-exact" >&2
     exit 2 ;;
 esac
+# A variant for a head-to-head: GRID_DEFINES="-DNAME ..." builds into <dir>-<GRID_VARIANT> with those definitions.
+if [[ -n "${GRID_VARIANT:-}" ]]; then
+    dir="$dir-$GRID_VARIANT"
+    cfg+=("-DCMAKE_CXX_FLAGS=${GRID_DEFINES:-}")
+fi
 mkdir -p "$dir"
 cmake -S "$root" -B "$dir" "${cfg[@]}" >"$dir/configure.log" 2>&1 || { tail -30 "$dir/configure.log"; exit 1; }
 cmake --build "$dir" --parallel "${SLURM_CPUS_PER_TASK:-4}" --target "${targets[@]}" 2>&1 | grep -E "error|warning|Error" | grep -v "^make" | head -60 || true

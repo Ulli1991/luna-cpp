@@ -288,7 +288,84 @@ K1 with 7 predictors and 6 faces per cell is about 2.5 times slower than LUNA: p
 
 ## 9. Phase 1: CUDA against Kokkos against LUNA
 
-(Filled as the measurements run: `scripts/grid_phase1_a100.sh`, one job, one node, clock logged.)
+Jobs 32719012 (128³), 32719016 (256³), 32719019 (384³) and 32719021 (ncu, 256³), 2026-11-21, `scripts/grid_compare_a100.sh`. All four ran on ravg1002, one A100-SXM4-40GB, with the SM clock at 1305 MHz throughout the timed runs (logged every second). Two builds of luna-cpp are compared:
+- **nounroll**: K1 as committed in phase 0 (`-DLUNA_GRID_NO_UNROLL`);
+- **unroll**: the loops of `grid.hpp` unrolled on the device (`LUNA_GRID_UNROLL`), the first lever.
+
+Each build comes in both forms (CUDA and Kokkos).
+
+**What is matched / what is not** (every table below):
+
+| Matched | Not matched |
+|---|---|
+| LUNA's Sedov 3D with units, the same initial bits (`--ic` from LUNA's own state), N, limiter, HLLC, FP64, no floors, BOUNDARY 1, CFL 0.8 | the kernels (the point of the comparison) |
+| 100 steps, each with its own CFL dt; median step after 10 warm-up steps; three alternating rounds | LUNA's step is two jitted calls (dt function, step); ours is one kernel that also leaves the next dt. Both have one host sync a step |
+| The timed region: the whole step with its time step, one host sync, no output, no allocation | Python dispatch in LUNA's loop. It matters only at 128³: LUNA's rounds there spread 0.69–0.88 G |
+| Node, GPU, job, clock | |
+| CUDA and Kokkos: the same `cell_step()`, tile 1×4×64, 256 threads, tile numbering, nvcc flags and translation unit | Kokkos launches 32768 blocks of two tiles each at 256³ and 384³ (its grid cap); CUDA launches one block per tile. At 128³ the shapes are equal |
+
+**Speed, G cell updates/s** (median of three rounds):
+
+| N | limiter | LUNA (Pallas) | CUDA nounroll | Kokkos nounroll | CUDA unroll | Kokkos unroll |
+|---|---|---|---|---|---|---|
+| 128³ | minmod | 0.767 | 0.406 | 0.438 | 0.502 | 0.376 |
+| 128³ | MC | 0.873 | 0.395 | 0.419 | 0.422 | 0.345 |
+| 256³ | minmod | 1.092 | 0.386 | 0.427 | 0.505 | 0.365 |
+| 256³ | MC | 0.979 | 0.378 | 0.410 | 0.425 | 0.334 |
+| 384³ | minmod | 1.139 | 0.377 | 0.417 | 0.487 | 0.370 |
+| 384³ | MC | 1.028 | 0.370 | 0.401 | 0.411 | 0.339 |
+
+**Agreement, on the same runs** (128³, after 100 steps):
+- The bit-exact build (`LUNA_BIT_EXACT`, unroll) equals LUNA bit for bit, in both forms and with both limiters.
+- The FMA builds are within 2.5e-15 of max|U| of LUNA.
+- With unrolling, CUDA and Kokkos give the same bits even with FMA. Without it they did not.
+
+**Why Kokkos was ahead before unrolling.** It was not a launch or flag setting:
+- Both forms ran 256 threads per block, the same tile and numbering, the same flags and the same timed region, at 25 % theoretical and achieved occupancy.
+- Neither nvcc nor Kokkos set launch bounds or a register cap (110 and 122 registers).
+- The difference was local memory. In both kernels nvcc kept the per-thread state arrays (neighbours, slopes, fluxes), indexed by loop counters that were not unrolled, in a stack frame: 816 B a thread in CUDA, 704 B in Kokkos.
+- nvcc inlined differently in the two contexts (47 and 76 calls in the SASS), so the Kokkos form spilled about 9 % less:
+
+| Form | local B/cell | DRAM B/cell | DRAM peak | long-scoreboard stalls |
+|---|---|---|---|---|
+| CUDA | 7008 | 2438 | 61 % | 70 % |
+| Kokkos | 6384 | 2165 | 60 % | 59 % |
+
+Both were bound by that spill traffic. The FP64 pipe was only 21 % busy for 1603 and 1622 FP64 instructions per cell.
+
+**After unrolling.** The fix is shared by both forms:
+- Both stacks are gone (0 local bytes). DRAM falls to 181 B/cell (CUDA) and 307 B/cell (Kokkos).
+- CUDA becomes 1.24–1.31× faster with minmod and 1.07–1.12× with MC.
+- Kokkos becomes 0.84–0.87× slower: 242 registers against CUDA's 194, 7 % more instructions, 70 % more DRAM bytes.
+- Both now run one block of 8 warps per SM (12.5 %).
+- With matched shapes and flags, CUDA is now 1.22–1.38× faster than Kokkos. The Kokkos grid cap is not the cause: at 128³, with equal shapes, CUDA is 1.22–1.34× faster as well.
+
+**Speed of light, 256³ minmod** (ncu at 1305 MHz). The A100 limits are 4.5·10¹² FP64 instructions/s (108 SMs × 32 × 1.305 GHz) and 1.37 TB/s.
+
+| Kernel | ns/cell | FP64 inst/cell | FP64 floor ns/cell | FP64 pipe | DRAM B/cell | DRAM floor ns/cell | regs | warps active | top stalls |
+|---|---|---|---|---|---|---|---|---|---|
+| ours, CUDA unroll (whole step) | 1.98 | 1576 | 0.35 | 23 % | 181 | 0.13 | 194 | 12.5 % | wait 21 %, long scoreboard 13 % |
+| ours, Kokkos unroll | 2.75 | 1541 | 0.34 | 17 % | 307 | 0.22 | 242 | 12.5 % | long scoreboard 22 %, wait 19 % |
+| LUNA predictor (`kernel`) | 0.11 | 173 | 0.04 | 52 % | 112 | 0.08 | 78 | 35 % | long scoreboard 63 % |
+| LUNA faces (`kernel__1`) | 0.50 | 1390 | 0.31 | 78 % | 133 | 0.10 | 132 | 18.5 % | wait 29 %, math 23 % |
+| LUNA pad (cons_to_prim + ghosts) | 0.11 | 15 | — | 3 % | 153 | 0.11 | 32 | 91 % | long scoreboard 67 % |
+| LUNA add (`U + dt dU`) | 0.09 | 10 | — | 3 % | 119 | 0.09 | 26 | 86 % | long scoreboard 47 % |
+| LUNA dt and small kernels | 0.04 | 27 | — | — | 42 | 0.03 | — | — | — |
+| LUNA, all kernels | 0.86 | 1615 | 0.36 | — | 559 | 0.41 | — | — | — |
+
+LUNA's rows come from job 32645795 (the same node class, ncu at 1305 MHz).
+
+**Why K1 is 2.2–2.6× slower than LUNA.** It is not the arithmetic: both execute about 1600 FP64 instructions per cell. It is not memory either: we move 181 B/cell against LUNA's 559. It is how busy the FP64 pipe is, 23 % against 78 % in LUNA's faces kernel, for three measured reasons:
+1. **Registers and occupancy.** The fused cell (25 stencil loads, 7 predictors, 6 faces) needs 194 registers, so 8 warps fit per SM. LUNA splits the step: its faces kernel runs at 132 registers with 12 warps, its predictor at 78 registers.
+2. **Instructions besides FP64.** We issue 6935 thread instructions per cell against LUNA's about 5380, for the same FP64 work. The extra 1600 or so are mostly integer index work: the ghost map for each of the 25 loads, branches.
+3. **Branches against selects.** Our HLLC, limiters and ghost map branch (250 static branches), and the stalls are on fixed-latency dependencies (wait 21 %). LUNA's numerics are branch-free selects (`jnp.where`), which Triton schedules for parallel issue.
+
+**Levers, ranked by the ns/cell they can save** (one per commit, measured in the same job against the build before):
+1. **Split predictor and faces kernels** (LUNA's NVIDIA organisation; less register pressure per kernel). Target: LUNA's 0.11 + 0.50 ns, from 1.98.
+2. **An interior fast path.** Tiles that touch no boundary skip the ghost map: fewer integer instructions.
+3. **Branch-free selects** in HLLC, the limiters and the face rule, as LUNA's. The bits are unchanged, because a select picks the same value.
+4. **Block shape and registers** (128-thread blocks, a tile sweep). Launch bounds are measured both ways and never assumed.
+5. **Faces once** (shared memory or shuffles), after 1–4.
 
 ## 10. Speed LUNA leaves unused
 
@@ -299,4 +376,9 @@ LUNA's own profile, CODE_NOTES 2026-11-04 (Sedov 256³, FP64, minmod, HLLC, spli
 - **No FMA.** Triton-Pallas contracts nothing: ncu counts 0 fused FMAs, and estimates up to +39 % (FP64) and +50 % (FP32) from contraction. LUNA's inline-PTX prototype measured +2–6 % on top of its reciprocals.
 - **Node-to-node spread.** The same LUNA code runs at 833 M cell/s on ravg1175 and 428–562 on ravg1002 at 128³, with the cause not found. Every phase 1 job logs the node name and the SM clock every second, so the spread can be probed in our kernels and LUNA's on the same node.
 
-Each item gets its measured number here as phase 1 runs.
+**Measured in phase 1** (ncu, 256³ minmod, job 32645795; LUNA's whole step 0.86 ns/cell of kernel time, 0.88–0.92 ns/cell of wall time):
+- **Padding and update:** 0.11 + 0.09 = 0.20 ns/cell, 23 % of LUNA's kernel time, and 272 of its 559 B/cell. K1 has no such kernels.
+- **Repeated work:** LUNA's faces kernel executes 1390 FP64 instructions per cell, 86 % of the step's FP64 work. It computes each face twice and recomputes the slopes. That is the largest single block of arithmetic.
+- **Spills:** none in the split path (132 and 78 registers). Our own spills before unrolling cost us 7 KB/cell of local traffic: that, not LUNA, was the spill story of phase 1.
+- **FMA:** LUNA's FP64 instruction mix shows no contraction. Ours, with FMA on, executes 1576 FP64 instructions per cell against LUNA's 1615 for the same numerics.
+- **Node:** every phase 1 job landed on ravg1002, LUNA's "slow" node of CODE_NOTES. There LUNA ran at 1.09–1.14 G at 256³–384³ minmod (CODE_NOTES' best elsewhere: 1.19–1.29 G), and at 0.69–0.88 G at 128³, with 1305 MHz throughout. A job pinned to another node is still to run.

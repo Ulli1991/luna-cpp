@@ -454,6 +454,20 @@ void run_grid(const Options& o, int argc, char** argv) {
                     const hydro::State<3> u = g::to_conserved<3>(W, p);
                     for (int v = 0; v < 5; ++v) U(v, (static_cast<long>(i) * n + j) * n + k) = u[v];
                 }
+        // --ic=rho,E_bg,E_blast: LUNA's own values (scripts/luna_grid_time.py prints them), so both codes start from the same bits.
+        if (const std::string ic = flag(argc, argv, "--ic", ""); !ic.empty()) {
+            double rho = 0, E_bg = 0, E_blast = 0;
+            if (std::sscanf(ic.c_str(), "%lf,%lf,%lf", &rho, &E_bg, &E_blast) != 3) throw std::invalid_argument("--ic=rho,E_bg,E_blast: " + ic);
+            for (int i = 0; i < n; ++i)
+                for (int j = 0; j < n; ++j)
+                    for (int k = 0; k < n; ++k) {
+                        const bool inject = i >= n / 2 - 1 && i <= n / 2 && j >= n / 2 - 1 && j <= n / 2 && k >= n / 2 - 1 && k <= n / 2;
+                        const long c = (static_cast<long>(i) * n + j) * n + k;
+                        U(0, c) = rho;
+                        U(1, c) = U(2, c) = U(3, c) = 0;
+                        U(4, c) = inject ? E_blast : E_bg;
+                    }
+        }
         Kokkos::deep_copy(fv.state(), U);
         fv.refresh();
     }
@@ -489,8 +503,9 @@ void run_grid(const Options& o, int argc, char** argv) {
     }
     const double wall_s = wall.seconds();
     const std::array<double, 5> after = sums();
-    // The median after 3 warm-up steps.
-    const std::vector<double> warm(wall_ms.begin() + static_cast<long>(std::min<std::size_t>(wall_ms.size() - 1, 3)), wall_ms.end());
+    // The median after --warm warm-up steps (default 10, as scripts/luna_grid_time.py).
+    const std::size_t skip = std::min<std::size_t>(wall_ms.size() - 1, std::stoul(flag(argc, argv, "--warm", "10")));
+    const std::vector<double> warm(wall_ms.begin() + static_cast<long>(skip), wall_ms.end());
     const double ms = median(warm);
     const double cells = static_cast<double>(fv.cells());
     std::cout << "run: grid=1 kernel=" << kernel << " steps=" << steps << " t=" << t << " wall_s=" << wall_s << " step_wall_ms_median=" << ms
