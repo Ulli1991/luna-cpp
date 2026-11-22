@@ -353,6 +353,90 @@ KOKKOS_INLINE_FUNCTION State<D> divergence(const Field<D>& W, int i, int j, int 
     return dU;
 }
 
+// The half-step states of the split step (Pallas _predict_call): structure of arrays on the grid plus one ghost ring per axis, cell
+// (i, j, k) at index (i + 1, j + 1, k + 1) on the grid's axes. Written by: predictor_cell(). Used by: divergence_split().
+template <int D>
+struct HalfField {
+    double* H = nullptr;
+    long cells = 0;  // the padded cells
+    int m[3] = {1, 1, 1};
+
+    KOKKOS_INLINE_FUNCTION long index(int i, int j, int k) const {
+        const int c[3] = {i, j, k};
+        int q[3] = {0, 0, 0};
+        LUNA_GRID_UNROLL
+        for (int a = 0; a < D; ++a) q[a] = c[a] + 1;
+        return (static_cast<long>(q[0]) * m[1] + q[1]) * m[2] + q[2];
+    }
+    KOKKOS_INLINE_FUNCTION State<D> operator()(int i, int j, int k) const {
+        const long at = index(i, j, k);
+        State<D> h;
+        LUNA_GRID_UNROLL
+        for (int v = 0; v < D + 2; ++v) h[v] = H[v * cells + at];
+        return h;
+    }
+};
+
+// Pass A of the split step: the half-step state of cell (i, j, k), i, j, k from -1 to n on the grid's axes (the cells and one ghost
+// ring), from all of its slopes; the same predict() as divergence(). h = 0.5 dt. Used by: the split step's predictor kernels.
+template <int D>
+KOKKOS_INLINE_FUNCTION void predictor_cell(const Field<D>& W, const HalfField<D>& out, int i, int j, int k, const Params& p, double h) {
+    const int o[3] = {i, j, k};
+    const State<D> W0 = W(i, j, k);
+    State<D> slope[D];
+    LUNA_GRID_UNROLL
+    for (int d = 0; d < D; ++d) {
+        int lo[3] = {o[0], o[1], o[2]}, hi[3] = {o[0], o[1], o[2]};
+        lo[d] -= 1;
+        hi[d] += 1;
+        const State<D> Wl = W(lo[0], lo[1], lo[2]), Wh = W(hi[0], hi[1], hi[2]);
+        LUNA_GRID_UNROLL
+        for (int v = 0; v < D + 2; ++v) slope[d][v] = limit(W0[v] - Wl[v], Wh[v] - W0[v], p.limiter);
+    }
+    const State<D> half = predict<D>(W0, slope, p, h);
+    const long at = out.index(i, j, k);
+    LUNA_GRID_UNROLL
+    for (int v = 0; v < D + 2; ++v) out.H[v * out.cells + at] = half[v];
+}
+
+// Pass B of the split step (Pallas _faces_call): -div F of cell (i, j, k) from the stored half-step states and the slopes along each
+// axis, recomputed (each cell's own and its two neighbours'); the same faces, sums and order as divergence(). Used by: cell_step().
+template <int D, class Riemann>
+KOKKOS_INLINE_FUNCTION State<D> divergence_split(const Field<D>& W, const HalfField<D>& H, int i, int j, int k, const Params& p) {
+    const int o[3] = {i, j, k};
+    auto at = [&](int d, int s) {  // W at o + s e_d
+        int c[3] = {o[0], o[1], o[2]};
+        c[d] += s;
+        return W(c[0], c[1], c[2]);
+    };
+    auto half = [&](int d, int s) {  // the half-step state at o + s e_d
+        int c[3] = {o[0], o[1], o[2]};
+        c[d] += s;
+        return H(c[0], c[1], c[2]);
+    };
+    const State<D> W0 = W(i, j, k), H0 = H(i, j, k);
+    State<D> dU;
+    LUNA_GRID_UNROLL
+    for (int d = 0; d < D; ++d) {
+        const State<D> Wm = at(d, -1), Wp = at(d, 1), Wmm = at(d, -2), Wpp = at(d, 2);
+        State<D> s0, sm, sp;
+        LUNA_GRID_UNROLL
+        for (int v = 0; v < D + 2; ++v) {
+            s0[v] = limit(W0[v] - Wm[v], Wp[v] - W0[v], p.limiter);
+            sm[v] = limit(Wm[v] - Wmm[v], W0[v] - Wm[v], p.limiter);
+            sp[v] = limit(Wp[v] - W0[v], Wpp[v] - Wp[v], p.limiter);
+        }
+        const State<D> Fm = face_flux<D, Riemann>(half(d, -1), sm, Wm, H0, s0, W0, d, p);
+        const State<D> Fp = face_flux<D, Riemann>(H0, s0, W0, half(d, 1), sp, Wp, d, p);
+        LUNA_GRID_UNROLL
+        for (int v = 0; v < D + 2; ++v) {
+            const double contribution = (Fm[v] - Fp[v]) * p.inv[d];
+            dU[v] = d == 0 ? contribution : dU[v] + contribution;
+        }
+    }
+    return dU;
+}
+
 // Raw arrays of one step: W and U now, U and W next (structure of arrays, `cells` apart). Used by: cell_step(), the kernels.
 struct Arrays {
     const double* U = nullptr;
@@ -361,11 +445,17 @@ struct Arrays {
 };
 
 // One cell's whole step: U_next = U + dt (-div F) (integrators._step_inner), its primitives for the next step, and its next time step
-// (returned; -inf for NaN). Used by: GridFiniteVolume's Kokkos kernel, grid_cuda.hpp's kernel.
-template <int D, class Riemann>
-KOKKOS_INLINE_FUNCTION double cell_step(const Field<D>& W, const Arrays& a, int i, int j, int k, const Params& p, double dt) {
+// (returned; -inf for NaN). Split: -div F from the half-step states in H (divergence_split), else the fused divergence().
+// Used by: GridFiniteVolume's Kokkos kernel, grid_cuda.hpp's kernel.
+template <int D, class Riemann, bool Split = false>
+KOKKOS_INLINE_FUNCTION double cell_step(const Field<D>& W, const Arrays& a, int i, int j, int k, const Params& p, double dt,
+                                        const HalfField<D>& H = {}) {
     const long at = (static_cast<long>(i) * W.n[1] + j) * W.n[2] + k;
-    const State<D> dU = divergence<D, Riemann>(W, i, j, k, p, 0.5 * dt);
+    State<D> dU;
+    if constexpr (Split)
+        dU = divergence_split<D, Riemann>(W, H, i, j, k, p);
+    else
+        dU = divergence<D, Riemann>(W, i, j, k, p, 0.5 * dt);
     State<D> U;
     LUNA_GRID_UNROLL
     for (int v = 0; v < D + 2; ++v) {

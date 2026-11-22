@@ -29,6 +29,7 @@ struct Options {
     bool allow_first_order = false;      // allow_first_order_faces
     Kernel kernel = Kernel::kokkos;
     std::array<int, 3> tile{0, 0, 0};    // cells per block along x, y, z; 0: the default (LUNA's fused tiles on a GPU, one cell on a host)
+    bool split = true;                   // LUNA's split step: a predictor pass, then the faces pass (+(D + 2) doubles a padded cell); false: one kernel
 };
 
 template <int D, class Riemann = HLLC, class Exec = Kokkos::DefaultExecutionSpace>
@@ -66,6 +67,14 @@ public:
         U_next_ = Fields("grid_U_next", D + 2, cells_);
         W_ = Fields("grid_W", D + 2, cells_);
         W_next_ = Fields("grid_W_next", D + 2, cells_);
+        if (o.split) {
+            half_cells_ = 1;
+            for (int a = 0; a < 3; ++a) {
+                half_m_[a] = a < D ? n_[a] + 2 : 1;
+                half_cells_ *= half_m_[a];
+            }
+            H_ = Fields("grid_half", D + 2, half_cells_);
+        }
         dt_ = Kokkos::View<double, Memory>("grid_dt");
         key_ = Kokkos::View<unsigned long long, Memory>("grid_dt_key");
     }
@@ -118,16 +127,33 @@ public:
         for (int a = 0; a < 3; ++a) W.n[a] = n_[a];
         W.boundary = o_.boundary;
         const Arrays a{U_.data(), U_next_.data(), W_next_.data()};
+        HalfField<D> H;
+        H.H = H_.data();
+        H.cells = half_cells_;
+        for (int b = 0; b < 3; ++b) H.m[b] = half_m_[b];
         if (o_.kernel == Kernel::cuda) {
 #if defined(KOKKOS_ENABLE_CUDA)
             Kokkos::deep_copy(exec_, key_, ~0ULL);
-            step_cuda<D, Riemann>(exec_.cuda_stream(), W, a, p_, dt, tile_, tiles_, key_.data());
+            step_cuda<D, Riemann>(exec_.cuda_stream(), W, H, o_.split, a, p_, dt, tile_, tiles_, key_.data());
             from_key_ = true;
 #endif
         } else {
-            const StepTeam f{W, a, p_, dt, {tile_[0], tile_[1], tile_[2]}, {tiles_[0], tiles_[1], tiles_[2]}};
-            Kokkos::parallel_reduce("grid_step", Kokkos::TeamPolicy<Exec>(exec_, tiles_[0] * tiles_[1] * tiles_[2], tile_[0] * tile_[1] * tile_[2]),
-                                    f, Kokkos::Min<double, Memory>(dt_));
+            const Kokkos::TeamPolicy<Exec> teams(exec_, tiles_[0] * tiles_[1] * tiles_[2], tile_[0] * tile_[1] * tile_[2]);
+            if (o_.split) {
+                const Params p = p_;
+                const double h = 0.5 * dt;
+                Kokkos::parallel_for(
+                    "grid_predictor", Kokkos::RangePolicy<Exec>(exec_, 0, half_cells_), KOKKOS_LAMBDA(long c) {
+                        const int k = static_cast<int>(c % H.m[2]), j = static_cast<int>((c / H.m[2]) % H.m[1]);
+                        const int i = static_cast<int>(c / (static_cast<long>(H.m[2]) * H.m[1]));
+                        predictor_cell<D>(W, H, i - 1, D > 1 ? j - 1 : j, D > 2 ? k - 1 : k, p, h);
+                    });
+                const StepTeam<true> f{W, H, a, p_, dt, {tile_[0], tile_[1], tile_[2]}, {tiles_[0], tiles_[1], tiles_[2]}};
+                Kokkos::parallel_reduce("grid_faces", teams, f, Kokkos::Min<double, Memory>(dt_));
+            } else {
+                const StepTeam<false> f{W, H, a, p_, dt, {tile_[0], tile_[1], tile_[2]}, {tiles_[0], tiles_[1], tiles_[2]}};
+                Kokkos::parallel_reduce("grid_step", teams, f, Kokkos::Min<double, Memory>(dt_));
+            }
             from_key_ = false;
         }
         std::swap(U_, U_next_);
@@ -135,9 +161,11 @@ public:
     }
 
     // The Kokkos form of step_kernel (grid_cuda.hpp): one team per tile, one thread per cell, the same numbering and cell_step().
-    // Public: CUDA kernels cannot take a private type.
+    // Public: CUDA kernels cannot take a private type. Split: the faces pass of the split step.
+    template <bool Split>
     struct StepTeam {
         Field<D> W;
+        HalfField<D> H;
         Arrays a;
         Params p;
         double dt;
@@ -151,7 +179,7 @@ public:
                 Kokkos::TeamThreadRange(m, tile[0] * tile[1] * tile[2]),
                 [&](int t, double& low) {
                     const int k = tz * tile[2] + t % tile[2], j = ty * tile[1] + (t / tile[2]) % tile[1], i = tx * tile[0] + t / (tile[2] * tile[1]);
-                    const double cell = cell_step<D, Riemann>(W, a, i, j, k, p, dt);
+                    const double cell = cell_step<D, Riemann, Split>(W, a, i, j, k, p, dt, H);
                     if (cell < low) low = cell;
                 },
                 Kokkos::Min<double>(tile_low));
@@ -168,7 +196,9 @@ private:
     int n_[3] = {1, 1, 1};
     int tile_[3] = {1, 1, 1}, tiles_[3] = {1, 1, 1};
     long cells_ = 0;
-    Fields U_, U_next_, W_, W_next_;
+    Fields U_, U_next_, W_, W_next_, H_;
+    long half_cells_ = 0;
+    int half_m_[3] = {1, 1, 1};
     Kokkos::View<double, Memory> dt_;
     Kokkos::View<unsigned long long, Memory> key_;
     bool from_key_ = false;

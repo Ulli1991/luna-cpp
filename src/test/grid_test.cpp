@@ -231,7 +231,7 @@ std::map<std::string, std::string> read_meta(const std::string& path) {
 
 // One stored LUNA case: from LUNA's U_0 with LUNA's time steps; each step's dt and the saved states compared. Used by: luna_cases.
 template <int D, class Riemann>
-void luna_case(Check& check, const std::string& dir, const std::map<std::string, std::string>& meta, g::Kernel kernel) {
+void luna_case(Check& check, const std::string& dir, const std::map<std::string, std::string>& meta, g::Kernel kernel, bool split) {
     std::array<int, D> n;
     std::array<double, D> length;
     std::istringstream shape(meta.at("shape")), lengths(meta.at("lengths"));
@@ -246,6 +246,7 @@ void luna_case(Check& check, const std::string& dir, const std::map<std::string,
     o.smallc = std::stod(meta.at("smallc"));
     o.allow_first_order = meta.at("allow_first_order") == "1";
     o.kernel = kernel;
+    o.split = split;
     g::GridFiniteVolume<D, Riemann> fv(Exec(), n, length, std::stod(meta.at("gamma")), o);
     const bool floors = o.floors;
     set_state<D>(fv, [&](int i, int j, int k) { return g::to_conserved<D>(initial_primitives<D>(i, j, k, n[0], floors), fv.params()); });
@@ -280,7 +281,7 @@ void luna_case(Check& check, const std::string& dir, const std::map<std::string,
         }
     }
     ok = ok && (exact ? dt_differ == 0 : dt_worst < 1e-12);
-    const std::string form = kernel == g::Kernel::cuda ? "cuda" : "kokkos";
+    const std::string form = std::string(kernel == g::Kernel::cuda ? "cuda" : "kokkos") + (split ? " split" : " fused");
     check.expect(ok, "LUNA " + meta.at("case") + " (" + form + ", " + (exact ? "bits" : "rounding") + "): initial state " + std::to_string(ic.differ) +
                          " differ; dt " + std::to_string(dt_differ) + " of " + std::to_string(last) + " differ (largest " + sci(dt_worst) + ");" + states);
 }
@@ -303,11 +304,12 @@ void luna_cases(Check& check, const std::string& root) {
         const auto meta = read_meta(dir + "/meta.txt");
         const int dim = std::stoi(meta.at("dim"));
         const bool hll = meta.at("riemann") == "hll";
-        for (g::Kernel k : kernels) {
-            if (dim == 1) hll ? luna_case<1, hydro::HLL>(check, dir, meta, k) : luna_case<1, hydro::HLLC>(check, dir, meta, k);
-            if (dim == 2) hll ? luna_case<2, hydro::HLL>(check, dir, meta, k) : luna_case<2, hydro::HLLC>(check, dir, meta, k);
-            if (dim == 3) hll ? luna_case<3, hydro::HLL>(check, dir, meta, k) : luna_case<3, hydro::HLLC>(check, dir, meta, k);
-        }
+        for (g::Kernel k : kernels)
+            for (bool split : {true, false}) {
+                if (dim == 1) hll ? luna_case<1, hydro::HLL>(check, dir, meta, k, split) : luna_case<1, hydro::HLLC>(check, dir, meta, k, split);
+                if (dim == 2) hll ? luna_case<2, hydro::HLL>(check, dir, meta, k, split) : luna_case<2, hydro::HLLC>(check, dir, meta, k, split);
+                if (dim == 3) hll ? luna_case<3, hydro::HLL>(check, dir, meta, k, split) : luna_case<3, hydro::HLLC>(check, dir, meta, k, split);
+            }
     }
     check.expect(!dirs.empty(), "LUNA cases: " + std::to_string(dirs.size()) + " in " + root);
 }

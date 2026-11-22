@@ -88,8 +88,8 @@ if [[ -n "${NCU:-}" ]]; then
     for b in $BINS; do
         for kernel in cuda kokkos; do
             (module purge; module load gcc/14 cuda/13.0 hdf5-serial
-             timeout 900 "$NCU_BIN" --target-processes all --clock-control none --kernel-name-base demangled --kernel-name "regex:step_kernel|StepTeam" \
-                --launch-skip 2 --launch-count 3 --metrics "$M" --csv --page raw "${b#*=}/hydro_sedov" 256 grid --grid --kernel=$kernel --limiter=minmod \
+             timeout 900 "$NCU_BIN" --target-processes all --clock-control none --kernel-name-base demangled --kernel-name "regex:step_kernel|predictor_kernel|StepTeam|ParallelFor" \
+                --launch-skip 4 --launch-count 6 --metrics "$M" --csv --page raw "${b#*=}/hydro_sedov" 256 grid --grid --kernel=$kernel --limiter=minmod \
                 --steps=5 >"$OUT/ncu_${b%%=*}_$kernel-$job.csv" 2>"$OUT/ncu_${b%%=*}_$kernel-$job.err"; echo "ncu ${b%%=*} $kernel exit $?")
         done
     done

@@ -367,6 +367,28 @@ LUNA's rows come from job 32645795 (the same node class, ncu at 1305 MHz).
 4. **Block shape and registers** (128-thread blocks, a tile sweep). Launch bounds are measured both ways and never assumed.
 5. **Faces once** (shared memory or shuffles), after 1–4.
 
+**Lever 1, the split step (done, 2026-11-22).** Jobs 32814949/50/53 and ncu 32814954, ravg1002 at 1305 MHz, with the same box as above (phase 1 build against the split build against LUNA, three rounds).
+
+| N | limiter | LUNA | CUDA phase 1 | CUDA split | Kokkos phase 1 | Kokkos split |
+|---|---|---|---|---|---|---|
+| 128³ | minmod | 0.971 | 0.501 | 0.881 | 0.375 | 0.579 |
+| 128³ | MC | 0.877 | 0.422 | 0.838 | 0.344 | 0.539 |
+| 256³ | minmod | 1.135 | 0.506 | 0.885 | 0.366 | 0.547 |
+| 256³ | MC | 1.014 | 0.426 | 0.843 | 0.337 | 0.514 |
+| 384³ | minmod | 1.154 | 0.487 | 0.851 | 0.370 | 0.592 |
+| 384³ | MC | 1.027 | 0.411 | 0.814 | 0.339 | 0.556 |
+
+Bits: the bit-exact split build equals LUNA after 100 Sedov steps at 128³ (both forms, both limiters); with FMA, split and fused give the same bits.
+
+ncu at 256³ minmod:
+
+| Kernel | ns/cell | regs | warps active | FP64 pipe | FP64 inst/cell | DRAM B/cell |
+|---|---|---|---|---|---|---|
+| predictor | 0.11 | 76 | 35 % | 38 % | 124 | 81 |
+| faces | 1.03 | 156 | 12.5 % | 26 % | 928 | 310 |
+
+The predictor now matches LUNA's (0.11 ns). The faces kernel does 928 FP64 instructions per cell against LUNA's 1390, but takes 1.03 ns against LUNA's 0.50. With 156 registers in 256-thread blocks it still runs one block, 8 warps, per SM. 128-thread blocks would fit three blocks, 12 warps, as LUNA's (lever 4).
+
 ## 10. Speed LUNA leaves unused
 
 LUNA's own profile, CODE_NOTES 2026-11-04 (Sedov 256³, FP64, minmod, HLLC, split Pallas path, at ncu's base clock of 1095 MHz), and what each item would be worth:
