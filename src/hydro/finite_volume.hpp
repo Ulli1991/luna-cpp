@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -889,7 +890,68 @@ public:
         Kokkos::parallel_reduce("hydro::time_step", Kokkos::RangePolicy<ExecSpace>(exec_, 0, std::max(faces_, n_)),
                                 TimeStep<Moving>{{prims_, geometry_, courant}, {prims_, w_, courant}, faces_, n_},
                                 Kokkos::Min<double>(smallest));
+        if (dt_trace_) trace_step<Moving>(courant, smallest);
         return smallest;
+    }
+
+    // LUNA_DT_TRACE (diagnostic): the time step's limiting cell term and face term, where they are and the rows that set
+    // them, one line a step. Used by: sweep().
+    template <bool Moving>
+    void trace_step(double courant, double dt) {
+        using Loc = Kokkos::MinLoc<double, int>;
+        using Best = typename Loc::value_type;
+        Best cell_best, face_best;
+        const CellStep<Moving> cell_term{prims_, w_, courant};
+        const FaceStep face_term{prims_, geometry_, courant};
+        Kokkos::parallel_reduce(
+            "hydro::dt_trace_cells", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_),
+            KOKKOS_LAMBDA(int i, Best& best) {
+                double s = Kokkos::Experimental::infinity_v<double>;
+                cell_term(i, s);
+                if (s < best.val) {
+                    best.val = s;
+                    best.loc = i;
+                }
+            },
+            Loc(cell_best));
+        Kokkos::parallel_reduce(
+            "hydro::dt_trace_faces", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
+            KOKKOS_LAMBDA(int f, Best& best) {
+                double s = Kokkos::Experimental::infinity_v<double>;
+                face_term(f, s);
+                if (s < best.val) {
+                    best.val = s;
+                    best.loc = f;
+                }
+            },
+            Loc(face_best));
+        // The rows of the limiting cell and of the limiting face's two cells, and their distance from the box centre.
+        auto describe = [&](int i) {
+            const auto row = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, Kokkos::subview(prims_, i, Kokkos::ALL));
+            const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, Kokkos::subview(geometry_.positions, i, Kokkos::ALL));
+            Vec vel{}, wi{};
+            double r2 = 0;
+            for (int a = 0; a < D; ++a) {
+                vel[a] = row(1 + a);
+                const double d = x(a) - 0.5 * geometry_.box.side[a];
+                r2 += d * d;
+            }
+            if constexpr (Moving) {
+                const auto w = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, Kokkos::subview(w_, i, Kokkos::ALL));
+                for (int a = 0; a < D; ++a) wi[a] = w(a);
+            }
+            const Vec rel = vel - wi;
+            std::printf(" [cell %d r=%.4g rho=%.4g P=%.4g |v|=%.4g |v-w|=%.4g c=%.4g radius=%.4g]", i, std::sqrt(r2), row(0), row(D + 1),
+                        std::sqrt(dot(vel, vel)), std::sqrt(dot(rel, rel)), row(V), row(V + 1));
+        };
+        std::printf("dt_trace: step=%lld dt=%.6g cell_min=%.6g", ++traced_steps_, dt, cell_best.val);
+        describe(cell_best.loc);
+        std::printf(" face_min=%.6g face=%d", face_best.val, face_best.loc);
+        const auto o = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, Kokkos::subview(geometry_.owner, face_best.loc));
+        const auto j = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, Kokkos::subview(geometry_.neighbour, face_best.loc));
+        describe(o());
+        describe(j());
+        std::printf("\n");
     }
 
     // The points drift by dt * w and stay in the box; the mesh is updated. Used by: step(), step_moving().
@@ -1532,6 +1594,8 @@ private:
     Magnitudes magnitudes_;
     bool magnitudes_valid_ = false;
     bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr;
+    bool dt_trace_ = std::getenv("LUNA_DT_TRACE") != nullptr;  // trace_step(): the limiting terms of each time step (diagnostic)
+    long long traced_steps_ = 0;
     // Fallbacks of the two flux passes of the last step (one pass: the first), read back by fallbacks() once a step.
     Kokkos::View<long long[2], Memory> fallback_counts_{"hydro_fallbacks"};
     Kokkos::View<long long[2], Kokkos::HostSpace> fallback_host_{"hydro_fallbacks_host"};
