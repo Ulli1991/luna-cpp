@@ -1898,7 +1898,6 @@ public:
     // positions, and the positions move with the point velocities, which depend on W. The geometry's derivative in the positions
     // comes from a GeometryDerivative (the mesh library's, or the tests' reference). Correctness first: plain kernels, per-call
     // arrays. The forward is step() itself. Quantisation of the positions to the mesh grid is taken as the identity.
-
     // d face_angle / d |A|. Used by: Regularised.
     KOKKOS_INLINE_FUNCTION static double face_angle_slope(double area) {
         if constexpr (D == 3)

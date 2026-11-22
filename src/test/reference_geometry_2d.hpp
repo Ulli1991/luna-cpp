@@ -2,11 +2,6 @@
 
 // Test-only: the derivatives of a 2D Voronoi mesh's geometry in the generator positions at fixed topology (hydro::GeometryDerivative),
 // on the host from the mesh's triangles, until voronoi-cpp provides them. Used by: hydro_derivatives_test.
-//
-// Voronoi vertex of triangle t: its circumcentre, p0 + C(a, b) with a, b the nearest-image offsets of corners 1, 2 from corner 0.
-// Face f, the edge opposite corner k of t with t' across it (as tri_mesh::faces_as): e = c_t - c_t', A = sign (e_y, -e_x),
-// x_f = c_t - x_owner - e / 2. Cell i (as tet_cells.hpp): p_f = |A_f . d_f| with d_f the separation to the other cell,
-// P = sum p_f, V = P / 4, c = (2/3) sum p_f x_f,i / P with x_f,i the face centroid relative to i.
 
 #include "geometry_derivative.hpp"
 
@@ -39,6 +34,10 @@ inline V2 circle_tangent(V2 a, V2 b, V2 da, V2 db) {
             (dlb * a[0] + lb * da[0] - dla * b[0] - la * db[0]) / (2 * det) - c[1] * ddet / det};
 }
 
+// Voronoi vertex of triangle t: its circumcentre, p0 + C(a, b) with a, b the nearest-image offsets of corners 1, 2 from corner 0.
+// Face f, the edge opposite corner k of t with t' across it (as tri_mesh::faces_as): e = c_t - c_t', A = sign (e_y, -e_x),
+// x_f = c_t - x_owner - e / 2. Cell i (as tet_cells.hpp): p_f = |A_f . d_f| with d_f the separation to the other cell,
+// P = sum p_f, V = P / 4, c = (2/3) sum p_f x_f,i / P with x_f,i the face centroid relative to i.
 template <class Mesh, class Memory>
 class Geometry2D : public hydro::GeometryDerivative<2, Memory> {
 public:

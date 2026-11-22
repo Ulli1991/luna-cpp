@@ -1145,10 +1145,15 @@ void geometry_test_2d(Check& check, int nx) {
     };
     auto read = [&]() {
         Values v;
-        v.V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
-        v.c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
-        v.A = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.area());
-        v.xf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.face_centroid());
+        // Copies (on a host build the mesh's views are already host views, and const).
+        v.V = decltype(v.V)("V", n);
+        v.c = decltype(v.c)("c", n);
+        v.A = decltype(v.A)("A", mesh.faces());
+        v.xf = decltype(v.xf)("xf", mesh.faces());
+        Kokkos::deep_copy(v.V, mesh.volume());
+        Kokkos::deep_copy(v.c, mesh.centroid());
+        Kokkos::deep_copy(v.A, mesh.area());
+        Kokkos::deep_copy(v.xf, mesh.face_centroid());
         const auto o = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.owner());
         const auto j = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.neighbour());
         for (int f = 0; f < mesh.faces(); ++f) v.sides.emplace_back(o(f), j(f));

@@ -2,6 +2,8 @@
 
 #include <Kokkos_Core.hpp>
 
+namespace hydro {
+
 // The derivatives of a Voronoi mesh's geometry with respect to its generator positions, at fixed topology (the same faces and
 // cell lists), as the moving step's tangent and adjoint read them. The mesh library is to provide these (voronoi-cpp issue:
 // "Geometry derivatives at fixed topology"); until it does, the derivative tests use a reference implementation of their own.
@@ -13,8 +15,6 @@
 //  - x_f: face centroids relative to the owner.
 // The mesh computes them from offsets on its integer grid; the derivative is that of the same formulas with the offsets
 // continuous. The separations x_j - x_i the hydro also reads have the derivative dx_j - dx_i, which the hydro takes itself.
-namespace hydro {
-
 template <int D, class Memory>
 struct GeometryDerivative {
     using Points = Kokkos::View<double* [D], Kokkos::LayoutRight, Memory>;  // one row per cell or per face
