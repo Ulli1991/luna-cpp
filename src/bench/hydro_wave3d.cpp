@@ -34,9 +34,9 @@ bool has(int argc, char** argv, const char* name) {
 
 // One run with the precision policy P (--precision, as in hydro_sedov); argv[1] problem, argv[2] nx.
 // Used by: main.
-template <class P>
+template <class P, class R = hydro::HLLC>
 int run(int argc, char** argv) {
-    using FV = hydro::FiniteVolume<3, Exec, hydro::HLLC, P>;
+    using FV = hydro::FiniteVolume<3, Exec, R, P>;
     const std::string problem = argv[1];
     const int nx = std::stoi(argv[2]);
     const double courant = std::stod(flag(argc, argv, "--courant", "0.3")), jitter = std::stod(flag(argc, argv, "--jitter", "0.1"));
@@ -124,6 +124,8 @@ int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     luna::pin_notice();
     const std::string precision = flag(argc, argv, "--precision", "default");
+    // --riemann=hll: LUNA's HLL (default precision only).
+    if (flag(argc, argv, "--riemann", "hllc") == "hll") return run<hydro::DefaultPrecision<3>, hydro::HLL>(argc, argv);
     if (precision == "default") return run<hydro::DefaultPrecision<3>>(argc, argv);
     if (precision == "double") return run<hydro::Precision<>>(argc, argv);
     if (precision == "grad32") return run<hydro::Grad32>(argc, argv);
