@@ -1525,6 +1525,141 @@ void tests_2d(Check& check) {
     step_test_2d<FV2_32>(check, "2D HLLC grad32", 32, 3, 0.01, &reference);
 }
 
+// Device bytes in use and their peak, from Kokkos's allocation callbacks (every space but the host's). Used by: cost_moving_2d.
+struct DeviceBytes {
+    static inline long long now = 0, peak = 0;
+    static void allocate(const Kokkos_Profiling_SpaceHandle h, const char*, const void*, const uint64_t size) {
+        if (std::string(h.name) == "Host") return;
+        now += static_cast<long long>(size);
+        peak = std::max(peak, now);
+    }
+    static void deallocate(const Kokkos_Profiling_SpaceHandle h, const char*, const void*, const uint64_t size) {
+        if (std::string(h.name) != "Host") now -= static_cast<long long>(size);
+    }
+};
+// A GeometryDerivative that times the one it wraps (the tests' host reference: its time is not the hydro's).
+struct TimedGeometry : hydro::GeometryDerivative<2, Exec::memory_space> {
+    const hydro::GeometryDerivative<2, Exec::memory_space>& inner;
+    mutable double ms = 0;
+    explicit TimedGeometry(const hydro::GeometryDerivative<2, Exec::memory_space>& g) : inner(g) {}
+    void tangent(const Points& dx, const Scalars& dV, const Points& dc, const Points& dA, const Points& dxf) const override {
+        Kokkos::fence();
+        Kokkos::Timer t;
+        inner.tangent(dx, dV, dc, dA, dxf);
+        Kokkos::fence();
+        ms += t.seconds() * 1e3;
+    }
+    void adjoint(const Scalars& Vbar, const Points& cbar, const Points& Abar, const Points& xfbar, const Points& xbar) const override {
+        Kokkos::fence();
+        Kokkos::Timer t;
+        inner.adjoint(Vbar, cbar, Abar, xfbar, xbar);
+        Kokkos::fence();
+        ms += t.seconds() * 1e3;
+    }
+};
+
+// The moving step's derivatives on an nx x nx jittered periodic 2D mesh, order 1: time_step + step against step_moving_tangent and
+// step_moving_adjoint (medians of 5 after a warm-up; each from the same state, the reload not timed). The geometry's derivative is
+// the tests' host reference, timed apart: "hydro" is the rest. Peak: the device bytes in use at most during the call.
+template <class F>
+void cost_moving_2d(int nx) {
+    using Mesh = typename F::Mesh;
+    const hydro::Gas gas{5.0 / 3.0};
+    const exact_predicates::BoxN<2> box(1.0);
+    const int n = nx * nx;
+    typename F::Points x0("x0", n);
+    auto hx = Kokkos::create_mirror_view(x0);
+    std::mt19937_64 rng(5);
+    std::uniform_real_distribution<double> jit(-0.15, 0.15), small(-0.01, 0.01);
+    for (int i = 0; i < nx; ++i)
+        for (int j = 0; j < nx; ++j) {
+            hx(i * nx + j, 0) = std::floor((i + 0.5 + jit(rng)) / nx / box.step) * box.step;
+            hx(i * nx + j, 1) = std::floor((j + 0.5 + jit(rng)) / nx / box.step) * box.step;
+        }
+    Kokkos::deep_copy(x0, hx);
+    Mesh mesh(Exec{}, box);
+    mesh.update(x0);
+    mesh.update_cells();
+    F fv(Exec{}, mesh, gas, 1, hydro::Update::per_face, hydro::Limiter::face_centroid, hydro::Motion::moving);
+    const auto V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
+    const auto cen = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
+    HostCells2 q0("q0", n);
+    const double k = 2 * M_PI;
+    for (int i = 0; i < n; ++i) {
+        const double px = hx(i, 0) + cen(i, 0), py = hx(i, 1) + cen(i, 1);
+        const State2 W{1 + 0.2 * std::sin(k * px) + small(rng), 0.3 * std::sin(k * py) + small(rng), 0.2 * std::cos(k * px) + small(rng),
+                       1 + 0.2 * std::cos(k * (px + py)) + small(rng)};
+        const State2 U = hydro::conserved(W, gas);
+        for (int v = 0; v < 4; ++v) q0(i, v) = U[v] * V(i);
+    }
+    auto load = [&]() {
+        Kokkos::deep_copy(fv.positions(), x0);
+        mesh.update(fv.positions());
+        mesh.update_cells();
+        fv.mesh_moved();
+        Kokkos::deep_copy(fv.state(), q0);
+        Kokkos::fence();
+    };
+    typename F::Cells dq("dq", n), qbar("qbar", n);
+    typename F::Points dx("dx", n), xbar("xbar", n);
+    load();
+    const double dt = fv.time_step(0.3);
+    struct Result {
+        double ms = 0, geometry_ms = 0;
+        long long peak = 0;
+    };
+    auto time = [&](auto&& f) {
+        std::vector<double> t, g;
+        long long peak = 0;
+        for (int r = 0; r < 6; ++r) {
+            load();
+            Kokkos::deep_copy(dq, 1e-6);
+            Kokkos::deep_copy(dx, 0.0);
+            Kokkos::deep_copy(qbar, 1.0);
+            Kokkos::deep_copy(xbar, 1.0);
+            Kokkos::fence();
+            const long long before = DeviceBytes::now;
+            DeviceBytes::peak = DeviceBytes::now;
+            Kokkos::Timer timer;
+            const double geometry_ms = f();
+            Kokkos::fence();
+            if (r > 0) {
+                t.push_back(timer.seconds() * 1e3);
+                g.push_back(geometry_ms);
+            }
+            peak = std::max(peak, DeviceBytes::peak - before);
+        }
+        std::sort(t.begin(), t.end());
+        std::sort(g.begin(), g.end());
+        return Result{t[t.size() / 2], g[g.size() / 2], peak};
+    };
+    const reference::Geometry2D<Mesh, Exec::memory_space> ref(mesh);
+    const Result forward = time([&] {
+        fv.step(fv.time_step(0.3));
+        return 0.0;
+    });
+    const Result tangent = time([&] {
+        const TimedGeometry timed(ref);
+        fv.step_moving_tangent(dt, dq, dx, timed);
+        return timed.ms;
+    });
+    const Result adjoint = time([&] {
+        const TimedGeometry timed(ref);
+        fv.step_moving_adjoint(dt, qbar, xbar, timed);
+        return timed.ms;
+    });
+    long long resident = DeviceBytes::now;
+    auto line = [&](const char* what, const Result& r) {
+        const double hydro_ms = r.ms - r.geometry_ms;
+        std::printf("  %-8s %9.3f ms (%5.2fx), without the reference geometry %9.3f ms (%5.2fx, %.4f G cell steps/s); peak +%.0f B/cell\n", what,
+                    r.ms, r.ms / forward.ms, hydro_ms, hydro_ms / forward.ms, n / (hydro_ms * 1e-3) * 1e-9, double(r.peak) / n);
+    };
+    std::printf("cost_moving_2d n %d faces %d, order 1, resident %.0f B/cell:\n", n, mesh.faces(), double(resident) / n);
+    line("forward", forward);
+    line("tangent", tangent);
+    line("adjoint", adjoint);
+}
+
 // One warm-up of each, then time_step + step, time_step + step_tangent, step_adjoint once each: the kernels ncu measures.
 template <class F>
 void profile(int n) {
@@ -1555,7 +1690,12 @@ void profile(int n) {
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
     for (int a = 1; a + 1 < argc; ++a)
-        if (std::string(argv[a]) == "--cost") {
+        if (std::string(argv[a]) == "--cost-moving") {  // the 2D moving step's derivatives, nx x nx cells
+            Kokkos::Tools::Experimental::set_allocate_data_callback(DeviceBytes::allocate);
+            Kokkos::Tools::Experimental::set_deallocate_data_callback(DeviceBytes::deallocate);
+            cost_moving_2d<FV2>(std::stoi(argv[a + 1]));
+            return 0;
+        } else if (std::string(argv[a]) == "--cost") {
             cost<FV>(std::stoi(argv[a + 1]), "double");
             cost<FV16>(std::stoi(argv[a + 1]), "grad16");
             return 0;
