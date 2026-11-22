@@ -65,6 +65,11 @@ public:
         supply_right_ = open(walls_.right);
         spacing_ = spacing;
     }
+    // Derefinement (moving only, luna-cpp #30): after each step a cell narrower than `min_volume` loses its generator and its
+    // two neighbours share its mass, momentum and energy (derefine()). 0: off, the default; the step is then unchanged.
+    void set_derefine(double min_volume) { deref_volume_ = motion_ == Motion::moving ? min_volume : 0.0; }
+    double derefine_volume() const { return deref_volume_; }
+    long long cells_removed() const { return removed_; }
     int order() const { return order_; }
     Motion motion() const { return motion_; }
     const Gas& gas() const { return gas_; }
@@ -309,6 +314,7 @@ public:
             mesh_stats_.updates += 1;
             mesh_stats_.rebuilds += report.rebuilt;
             if (due()) supply_cells();
+            derefine();
             looked_ = false;
             phase_end(timings, &Timings::mesh);
         }
@@ -375,6 +381,61 @@ public:
         n_ += change.done;
         added_ += change.done;
         return change.done > 0;
+    }
+
+    // Removes the generators of cells narrower than deref_volume_ (luna-cpp #30: a slab of tiny mass squeezed to a layer keeps all
+    // its generators, and the cells and dt shrink with it). As AREPO's derefinement: the removed cell's Voronoi length goes to its
+    // two neighbours (Mesh<1>::remove's overlaps), and so do its conserved totals, in the same proportions; mass, momentum and energy
+    // are summed, so conserved to rounding. A neighbour that is a wall gives all to the other side. Mesh<1>::remove defers a cell
+    // next to another one going in the same call (the next step takes it) and keeps 3 cells. Returns whether any went.
+    // Used by: step(), run_fused(). Public because CUDA lambdas cannot be in private members.
+    bool derefine() {
+        if (!(deref_volume_ > 0)) return false;
+        const Line line = mesh_->line();
+        const double limit = deref_volume_;
+        const int n = n_;
+        if (deref_ids_.extent(0) < static_cast<std::size_t>(n))
+            deref_ids_ = Kokkos::View<int*, Memory>(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_deref_ids")), capacity_);
+        const auto ids = deref_ids_;
+        int count = 0;
+        Kokkos::parallel_scan(
+            "hydro1::deref_find", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n),
+            KOKKOS_LAMBDA(int s, int& at, bool final) {
+                if (line.volume(s) < limit) {
+                    if (final) ids(at) = line.order(s);
+                    ++at;
+                }
+            },
+            count);
+        if (count == 0) return false;
+        const auto wanted = Kokkos::subview(ids, std::make_pair(0, count));
+        const typename Mesh::Changes& change = mesh_->remove(wanted);
+        if (change.done == 0) return false;
+        const auto q = q_;
+        const auto x = x_;
+        const auto id = change.id;
+        const auto neighbour = change.neighbour;
+        const auto overlap = change.overlap;
+        const auto moved = change.moved;
+        // One pass per side: within a pass no two removed cells share a neighbour (remove() never takes two adjacent cells), so no
+        // atomics, and a cell between two removed ones sums left share then right share, the same bits every run.
+        for (int side = 0; side < 2; ++side)
+            Kokkos::parallel_for(
+                "hydro1::deref_share", Kokkos::RangePolicy<ExecSpace>(exec_, 0, change.requested), KOKKOS_LAMBDA(int r) {
+                    const int i = id(r), to = neighbour(r, side);
+                    if (i < 0 || to < 0) return;  // deferred, or a wall: overlap 0 on its side
+                    const double fraction = overlap(r, side) / (overlap(r, 0) + overlap(r, 1));
+                    for (int v = 0; v < V; ++v) q(to, v) += fraction * q(i, v);
+                });
+        Kokkos::parallel_for(
+            "hydro1::deref_move", Kokkos::RangePolicy<ExecSpace>(exec_, 0, change.moves), KOKKOS_LAMBDA(int m) {
+                const int from = moved(m, 0), to = moved(m, 1);
+                for (int v = 0; v < V; ++v) q(to, v) = q(from, v);
+                x(to, 0) = x(from, 0);
+            });
+        n_ -= change.done;
+        removed_ += change.done;
+        return true;
     }
 
     // Fences and adds the elapsed time to Timings::*part. Used by: time_step(), step().
@@ -609,6 +670,7 @@ public:
             wants_ = wants;
             looked_ = watching_;
             if (due()) again = supply_cells() || again;
+            again = derefine() || again;
             looked_ = false;
             if (again) return time_step(courant, TimeStep::luna);
         }
@@ -676,6 +738,9 @@ private:
     double spacing_ = 0;
     int wants_ = 0, until_look_ = 0;
     long long added_ = 0;
+    double deref_volume_ = 0;  // set_derefine(); 0: off
+    long long removed_ = 0;
+    Kokkos::View<int*, Memory> deref_ids_;
     Kokkos::View<double[5], Memory> ends_{"hydro_ends"};
     typename Kokkos::View<double[5], Memory>::host_mirror_type ends_host_ = Kokkos::create_mirror_view(ends_);
     Points points_{"hydro_new_points", 2};

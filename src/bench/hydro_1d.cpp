@@ -77,6 +77,7 @@ std::string sci(double x) {
 struct Options {
     int n = 0, order = 1;
     double jitter = 0, courant = 0.8, fixed_dt = 0, inflow_spacing = 1, max_wall = 0;
+    double derefine = 0;  // --derefine=f: moving, remove cells narrower than f L / N (luna-cpp #30); 0: off
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
     hydro::Motion motion = hydro::Motion::static_mesh;
     bool fixed = false, phases = false, regularise = true, fused = true, smallest = false;
@@ -89,6 +90,7 @@ struct Options {
 struct Result {
     long long steps = 0, sorts = 0, cell_updates = 0;
     int cells = 0;
+    long long removed = 0;  // cells removed by --derefine
     bool reached = false;
     double wall_s = 0, t = 0, smallest_h = 0;  // smallest_h: with --smallest, in units of L / N
     std::uint64_t hash = 0;
@@ -141,6 +143,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{pb.gamma}, o.order, o.limiter, o.motion,
                                              o.motion == hydro::Motion::moving ? pb.moving_walls : pb.walls, o.regularise);
     fv.set_inflow_spacing(o.inflow_spacing * pb.L / n);
+    fv.set_derefine(o.derefine * pb.L / n);
     {
         const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
         const auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
@@ -162,7 +165,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     double next = fused ? fv.time_step(o.courant, o.rule) : 0;
     double smallest = 1e300;
     // --times: at each of these times (the step shortened to land on it) the generators and conserved totals, rows of (x, Q0, Q1, Q2)
-    // in <out stem>_t<time>.npy, and a line "t steps wall_s" in <out stem>_times.txt. Reads only: the run is the same without it.
+    // in <out stem>_t<time>.npy, and a line "t steps wall_s" in <out stem>_times.txt (begun anew by each run). Reads only: the run is the same without it.
     std::size_t snap = 0;
     const auto snapshot = [&](double at) {
         const auto q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
@@ -181,7 +184,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
         char name[64];
         std::snprintf(name, sizeof name, "_t%g.npy", o.times[snap]);
         write_npy(stem + name, rows);
-        std::ofstream(stem + "_times.txt", std::ios::app) << at << " " << r.steps << " " << timer.seconds() << "\n";
+        std::ofstream(stem + "_times.txt", snap == 0 ? std::ios::trunc : std::ios::app) << at << " " << r.steps << " " << timer.seconds() << "\n";
     };
     while (t < pb.t_end * (1 - 1e-12) && (o.max_steps == 0 || r.steps < o.max_steps)) {
         double dt = fused ? next : o.fixed ? o.fixed_dt : fv.time_step(o.courant, o.rule, timings);
@@ -210,6 +213,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     r.reached = t >= pb.t_end * (1 - 1e-12);
     r.sorts = mesh.sorts();
     r.cells = fv.cells();
+    r.removed = fv.cells_removed();
     const auto q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
     r.hash = 14695981039346656037ull;
     hash_into(r.hash, q, r.cells, 3);
@@ -241,7 +245,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|none|minmod|vanleer]"
                      " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--smallest]"
-                     " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name] [--times=t1,t2,...]\n";
+                     " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name] [--times=t1,t2,...] [--derefine=f]\n";
         return 1;
     }
     const std::string name = argv[1];
@@ -266,6 +270,7 @@ int main(int argc, char* argv[]) {
     o.regularise = !has(argc, argv, "--no-regularise");
     o.fused = !has(argc, argv, "--unfused");
     o.smallest = has(argc, argv, "--smallest");
+    o.derefine = std::stod(flag(argc, argv, "--derefine", "0"));
     for (std::string list = flag(argc, argv, "--times", ""); !list.empty();) {
         const std::size_t comma = list.find(',');
         o.times.push_back(std::stod(list.substr(0, comma)));
@@ -302,6 +307,7 @@ int main(int argc, char* argv[]) {
               << " final_cells=" << best.cells << " cell_updates=" << double(best.cell_updates) << " M_cell_updates_per_s=" << rate / 1e6 << " hash=" << best.hash
               << " same_bits=" << (same ? 1 : 0) << " backend=" << Exec::name();
     if (o.smallest) std::cout << " smallest_h=" << best.smallest_h;
+    if (o.derefine > 0) std::cout << " derefine=" << o.derefine << " removed=" << best.removed;
     std::cout << "\n";
     if (o.phases) {
         const hydro::Timings& t = best.timings;

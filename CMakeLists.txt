@@ -72,9 +72,9 @@ if(BUILD_TESTING)
         add_test(NAME ${test} COMMAND ${test}_test)
         set_tests_properties(${test} PROPERTIES TIMEOUT ${hydro_test_timeout})
     endforeach()
-    # luna-cpp #30 (points pile into a squeezed low-density slab): the reproducer's gate, off until #30 is fixed (ctest -R issue30 shows it).
+    # luna-cpp #30 (points pile into a squeezed low-density slab): the reproducer with derefinement (f = 1e-2) reaches t = 0.35 in 60000 steps.
     add_test(NAME hydro1d_issue30 COMMAND hydro1d_cases_test issue30)
-    set_tests_properties(hydro1d_issue30 PROPERTIES TIMEOUT ${hydro_test_timeout} DISABLED TRUE)
+    set_tests_properties(hydro1d_issue30 PROPERTIES TIMEOUT ${hydro_test_timeout})
 endif()
 
 # The hand-written tangents and adjoints (hydro_derivatives_test): opt-in while they are new; off, the build is as before.

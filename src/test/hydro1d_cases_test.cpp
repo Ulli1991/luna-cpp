@@ -44,7 +44,8 @@ struct Run {
 // The problem on n uniform cells to t (default its t_end), LUNA's rule at 0.8
 // on a static line, AREPO's at 0.4 on a moving one, the bench's defaults.
 template <class Riemann = hydro::HLLC>
-Run simulate(const std::string& name, int n, Motion motion, Limiter limiter = Limiter::face_centroid, double amp = 0, double stop = 0, bool watch = false, long max_steps = 0) {
+Run simulate(const std::string& name, int n, Motion motion, Limiter limiter = Limiter::face_centroid, double amp = 0, double stop = 0, bool watch = false, long max_steps = 0,
+             double derefine = 0) {
     const Exec exec;
     const pr::Problem pb = pr::problem(name, amp);
     const double t_end = stop > 0 ? stop : pb.t_end;
@@ -58,6 +59,7 @@ Run simulate(const std::string& name, int n, Motion motion, Limiter limiter = Li
     }
     hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{pb.gamma}, 1, limiter, motion, motion == Motion::moving ? pb.moving_walls : pb.walls);
     fv.set_inflow_spacing(pb.L / n);
+    fv.set_derefine(derefine * pb.L / n);  // luna-cpp #30; 0: off
     auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
     auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
     auto V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
@@ -272,13 +274,14 @@ int main(int argc, char* argv[]) {
     Check check;
     const char* names[3] = {"rho", "v", "P"};
 
-    // luna-cpp #30, the reproducer (CTest `hydro1d_issue30`, disabled until #30 is fixed): stage L's window of the tube v2, the high state,
+    // luna-cpp #30, the reproducer (CTest `hydro1d_issue30`): stage L's window of the tube v2, the high state,
     // the 1e-6 slab 1 wide, then the ambient gas, 256 cells (the tube's spacing at N = 4096), moving, to t = 0.35. Once the slab is
     // squeezed between L's shock and the ambient's (t = 0.137), its ~100 generators pile into a layer about 1e-6 wide: measured
-    // 8.9 million steps to t = 0.35 (research_notes/stage_l_2026-11-19.md). The gate: t = 0.35 within 100000 steps, smallest cell > 1e-3 h.
+    // 8.9 million steps to t = 0.35 (research_notes/stage_l_2026-11-19.md). The gate, with derefinement at f = 1e-2 (cells narrower than 1e-2 h removed, FiniteVolume<1>::derefine): t = 0.35 within
+    // 100000 steps (59995 measured), smallest cell > 1e-3 h.
     if (argc > 1 && std::string(argv[1]) == "issue30") {
         const double h = pr::super_tube_v2_length / 4096;
-        const Run r = simulate("super-v2-l", 256, Motion::moving, Limiter::face_centroid, 0, 0.35, true, 100000);
+        const Run r = simulate("super-v2-l", 256, Motion::moving, Limiter::face_centroid, 0, 0.35, true, 100000, 1e-2);
         check.expect(r.reached && r.smallest > 1e-3 * h, "super-v2-l N=256 moving to t = 0.35 (#30): t = " + sci(r.t) + " after " + std::to_string(r.steps) +
                                                              " steps, smallest cell " + sci(r.smallest / h) + " h (> 1e-3 h)");
         return check.failed() != 0;
