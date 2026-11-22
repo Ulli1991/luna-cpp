@@ -1312,7 +1312,8 @@ void geometry_test_2d(Check& check, int nx) {
 // one grid step in 1e4), one-sided at a switch; step_moving_adjoint against the tangent (the dot test). The geometry's derivative:
 // the tests' reference (reference_geometry_2d.hpp).
 template <class F>
-void moving_test_2d(Check& check, const std::string& name, int nx, int steps, double gate, double scale = 1, double noise = 0.01) {
+void moving_test_2d(Check& check, const std::string& name, int nx, int steps, double gate, double scale = 1, int order = 0, bool steps_fixed = false,
+                    double noise = 0.01) {
     using Mesh = typename F::Mesh;
     using Points2 = typename F::Points;
     using HostPoints = Kokkos::View<double* [2], Kokkos::LayoutRight, Kokkos::HostSpace>;
@@ -1332,7 +1333,7 @@ void moving_test_2d(Check& check, const std::string& name, int nx, int steps, do
     Mesh mesh(Exec{}, box);
     mesh.update(xd);
     mesh.update_cells();
-    F fv(Exec{}, mesh, gas, 0, hydro::Update::per_face, hydro::Limiter::face_centroid, hydro::Motion::moving);
+    F fv(Exec{}, mesh, gas, order, hydro::Update::per_face, hydro::Limiter::face_centroid, hydro::Motion::moving);
     const auto V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
     const auto cen = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
     HostCells2 q0("q0", n), dq0("dq0", n), wbar("wbar", n);
@@ -1361,6 +1362,7 @@ void moving_test_2d(Check& check, const std::string& name, int nx, int steps, do
         Kokkos::deep_copy(fv.positions(), x);
         mesh.update(fv.positions());
         mesh.update_cells();
+        fv.mesh_moved();
         Kokkos::deep_copy(fv.state(), q);
     };
     auto read_q = [&]() {
@@ -1406,7 +1408,7 @@ void moving_test_2d(Check& check, const std::string& name, int nx, int steps, do
     Kokkos::deep_copy(dx, dx0);
     for (int s = 0; s < steps; ++s) {
         const reference::Geometry2D<Mesh, Exec::memory_space> ref(mesh);
-        fv.step_moving_tangent(dts[s], dq, dx, ref);
+        fv.step_moving_tangent(dts[s], dq, dx, ref, steps_fixed);
     }
     const HostCells2 q_end = read_q();
     const HostPoints x_end = read_x();
@@ -1423,6 +1425,20 @@ void moving_test_2d(Check& check, const std::string& name, int nx, int steps, do
     run(1, qp, xp);
     run(-1, qm, xm);
     auto wrapped = [](double d) { return d - std::nearbyint(d); };
+    // steps_fixed (order 1, one step): the cells whose whole grid steps x +- the direction changed (the tangent holds them).
+    int steps_changed = 0;
+    if (steps_fixed && steps == 1)
+        for (int i = 0; i < n; ++i)
+            for (int a = 0; a < 2; ++a) {
+                const double base = std::nearbyint(wrapped(xs[1](i, a) - x0(i, a)) / box.step);
+                const double p = std::nearbyint(wrapped(xp(i, a) - x0(i, a) - dx0(i, a)) / box.step);
+                const double m = std::nearbyint(wrapped(xm(i, a) - x0(i, a) + dx0(i, a)) / box.step);
+                if (p != base || m != base) {
+                    ++steps_changed;
+                    break;
+                }
+            }
+    if (steps_fixed) std::printf("moving2d %-12s cells whose grid steps changed: %d\n", name.c_str(), steps_changed);
     // Per cell: central difference of (Q, x), or where it differs (a switch within +- the direction), a one-sided one.
     double worst = 0, scale_q = 0, scale_x = 0, worst_one_sided = 0;
     int cells_off = 0;
@@ -1450,9 +1466,16 @@ void moving_test_2d(Check& check, const std::string& name, int nx, int steps, do
     }
     // gate < 0: reported only (several HLLC steps: the contact switch at S* = 0, where a mesh moving with the flow sits, is crossed
     // within the direction, and the positions after a step are quantised to the grid, 1 step in 1e4).
-    if (gate > 0)
+    if (gate > 0 && steps_fixed) {
+        // A cell whose whole grid steps changed jumps, and so do its faces' cells: there one side must match.
+        check.expect(worst_one_sided < gate && cells_off <= 8 * steps_changed,
+                     name + ": J (dq, dx) equals central differences away from the " + std::to_string(steps_changed) +
+                         " cells whose grid steps changed, a one-sided one at the " + std::to_string(cells_off) + " cells next to them (" +
+                         sci(worst_one_sided) + ")");
+    } else if (gate > 0) {
         check.expect(worst < gate, name + ": J (dq, dx) equals central differences over " + std::to_string(steps) + " steps (" + sci(worst) +
                                        " of the largest; direction x" + sci(scale) + ")");
+    }
     // The adjoint, backwards along the forward path.
     typename F::Cells qbar("qbar", n);
     Points2 xbar("xbar", n);
@@ -1461,7 +1484,7 @@ void moving_test_2d(Check& check, const std::string& name, int nx, int steps, do
     for (int s = steps - 1; s >= 0; --s) {
         load(qs[s], xs[s]);
         const reference::Geometry2D<Mesh, Exec::memory_space> ref(mesh);
-        fv.step_moving_adjoint(dts[s], qbar, xbar, ref);
+        fv.step_moving_adjoint(dts[s], qbar, xbar, ref, steps_fixed);
     }
     HostCells2 aq("aq", n);
     HostPoints ax("ax", n);
@@ -1492,6 +1515,11 @@ void tests_2d(Check& check) {
     moving_test_2d<FV2HLL>(check, "2D moving HLL", 32, 1, 1e-8, 0.01);
     moving_test_2d<FV2HLL>(check, "2D moving HLL", 32, 3, 1e-3);  // quantised positions after the first step: 1 grid step in 1e4
     moving_test_2d<FV2>(check, "2D moving HLLC", 32, 3, -1);
+    // Order 1 (step_moving): the grid steps held, a direction of up to 1 grid step and 1e-9 of Q (few steps change); the dot test also
+    // with the steps' derivative (dw-hat = dw) over 3 steps.
+    moving_test_2d<FV2>(check, "2D moving order 1 HLLC", 32, 1, 1e-5, 1e-4, 1, true);
+    moving_test_2d<FV2HLL>(check, "2D moving order 1 HLL", 32, 1, 1e-5, 1e-4, 1, true);
+    moving_test_2d<FV2>(check, "2D moving order 1 HLLC", 32, 3, -1, 1.0, 1);
     const HostCells2 reference = step_test_2d<FV2>(check, "2D HLLC", 32, 3);
     step_test_2d<FV2HLL>(check, "2D HLL", 32, 3);
     step_test_2d<FV2_32>(check, "2D HLLC grad32", 32, 3, 0.01, &reference);
@@ -1548,6 +1576,11 @@ int main(int argc, char** argv) {
                 moving_test_2d<FV2>(check, "2D moving HLLC x" + sci(s), 32, 1, -1, s);
                 moving_test_2d<FV2HLL>(check, "2D moving HLL x" + sci(s), 32, 1, -1, s);
             }
+            for (const double s : {1e-4, 1e-3, 1e-2, 1.0}) {  // order 1 with the grid steps held
+                moving_test_2d<FV2>(check, "2D moving order 1 HLLC fixed x" + sci(s), 32, 1, -1, s, 1, true);
+                moving_test_2d<FV2HLL>(check, "2D moving order 1 HLL fixed x" + sci(s), 32, 1, -1, s, 1, true);
+            }
+            moving_test_2d<FV2HLL>(check, "2D moving order 1 HLL", 32, 1, -1, 1.0, 1);
             return 0;
         }
     const hydro::Gas gas{5.0 / 3.0};

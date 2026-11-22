@@ -45,7 +45,13 @@ public:
     using typename Base::Points;
     using typename Base::Scalars;
 
-    explicit Geometry2D(const Mesh& mesh) {
+    // Live: each call reads the mesh as it is then (the moving step asks before and after its move).
+    explicit Geometry2D(const Mesh& mesh) : mesh_(&mesh) { build(); }
+    void build() const {
+        const Mesh& mesh = *mesh_;
+        tri_.clear();
+        face_.clear();
+        cell_.clear();
         const auto& tri = mesh.triangles();
         const auto corners = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, tri.corners);
         const auto links = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, tri.links);
@@ -113,6 +119,7 @@ public:
     V2 face_centroid(int f) const { return face_[f].xf; }
 
     void tangent(const Points& dx_d, const Scalars& dV_d, const Points& dc_d, const Points& dA_d, const Points& dxf_d) const override {
+        build();
         const auto dx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, dx_d);
         auto at = [&](int i) { return V2{dx(i, 0), dx(i, 1)}; };
         std::vector<V2> dct(tri_.size()), dA(faces_), dxf(faces_);
@@ -160,6 +167,7 @@ public:
     }
 
     void adjoint(const Scalars& Vbar_d, const Points& cbar_d, const Points& Abar_d, const Points& xfbar_d, const Points& xbar_d) const override {
+        build();
         const auto Vbar = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, Vbar_d);
         const auto cbar = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, cbar_d);
         const auto Ab = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, Abar_d);
@@ -245,12 +253,13 @@ private:
         for (int a = 0; a < 2; ++a) d[a] -= side_[a] * std::nearbyint(d[a] / side_[a]);
         return d;
     }
-    double side_[2] = {1, 1};
-    int n_ = 0, faces_ = 0;
-    std::vector<V2> x_;
-    std::vector<Tri> tri_;
-    std::vector<Face> face_;
-    std::vector<Cell> cell_;
+    const Mesh* mesh_;
+    mutable double side_[2] = {1, 1};
+    mutable int n_ = 0, faces_ = 0;
+    mutable std::vector<V2> x_;
+    mutable std::vector<Tri> tri_;
+    mutable std::vector<Face> face_;
+    mutable std::vector<Cell> cell_;
 };
 
 }  // namespace reference
