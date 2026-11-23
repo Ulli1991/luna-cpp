@@ -21,23 +21,45 @@
 
 namespace hydro::grid {
 
+// The smaller of two time steps (a NaN cell's -inf wins). Used by: block_min().
+__device__ inline double smaller(double a, double b) { return b < a ? b : a; }
+
+// The block's minimum of x, valid in thread 0 (lever 6): a shuffle tree in each warp, the warps' minima through 32 doubles of shared
+// memory, a shuffle tree again; blocks under 32 threads (powers of two) take a shared-memory tree. The same minimum as any order.
+// Used by: step_kernel.
+__device__ inline double block_min(double x) {
+    __shared__ double low[32];
+    const int t = static_cast<int>(threadIdx.x), n = static_cast<int>(blockDim.x);
+    if (n < 32) {
+        low[t] = x;
+        __syncthreads();
+        for (int w = n / 2; w > 0; w >>= 1) {
+            if (t < w) low[t] = smaller(low[t], low[t + w]);
+            __syncthreads();
+        }
+        return low[0];
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) x = smaller(x, __shfl_down_sync(0xffffffffu, x, offset));
+    if ((t & 31) == 0) low[t >> 5] = x;
+    __syncthreads();
+    if (t < 32) {
+        x = t < n / 32 ? low[t] : Kokkos::Experimental::infinity_v<double>;
+        for (int offset = 16; offset > 0; offset >>= 1) x = smaller(x, __shfl_down_sync(0xffffffffu, x, offset));
+    }
+    return x;
+}
+
 // One block per tile, one thread per cell (z fastest within the tile, tiles numbered z fastest as the Kokkos kernel's league), the
-// tile's minimum time step by a shared-memory tree (block sizes are powers of two), then one atomicMin on its order key.
-// Split: the faces pass of the split step, reading the half-step states H. S: the options fixed at compile time (Fixed).
+// tile's minimum time step by block_min(), then one atomicMin on its order key. Split: the faces pass of the split step, reading the
+// half-step states H. S: the options fixed at compile time (Fixed).
 template <int D, class Riemann, bool Split, class S = Fixed<>>
 __global__ void LUNA_GRID_BOUNDS step_kernel(Field<D> W, HalfField<D> H, Arrays a, Params p, double dt, int3 tile, int3 tiles, unsigned long long* key) {
     S::apply(p, W);
-    __shared__ double low[1024];
     const int r = static_cast<int>(blockIdx.x), t = static_cast<int>(threadIdx.x);
     const int tz = r % tiles.z, ty = (r / tiles.z) % tiles.y, tx = r / (tiles.z * tiles.y);
     const int k = tz * tile.z + t % tile.z, j = ty * tile.y + (t / tile.z) % tile.y, i = tx * tile.x + t / (tile.z * tile.y);
-    low[t] = cell_step<D, Riemann, Split>(W, a, i, j, k, p, dt, H);
-    __syncthreads();
-    for (int w = static_cast<int>(blockDim.x) / 2; w > 0; w >>= 1) {
-        if (t < w && low[t + w] < low[t]) low[t] = low[t + w];
-        __syncthreads();
-    }
-    if (t == 0) atomicMin(key, static_cast<unsigned long long>(order_key(low[0])));
+    const double low = block_min(cell_step<D, Riemann, Split>(W, a, i, j, k, p, dt, H));
+    if (t == 0) atomicMin(key, static_cast<unsigned long long>(order_key(low)));
 }
 
 // The predictor pass of the split step: one thread per cell of the grid plus its ghost ring, numbered z fastest.
