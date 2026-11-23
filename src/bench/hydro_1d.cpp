@@ -86,6 +86,7 @@ struct Options {
     double split_min = hydro::split_min_default, merge_max = hydro::merge_max_default;  // --split-min=, --merge-max= (h); mass only
     double refine_mass = hydro::refine_mass_default, derefine_mass = hydro::derefine_mass_default;
     bool refine_linear = true;
+    double steer = 0;  // --steer=ratio: moving, generators move away from a neighbour cell narrower than ratio times their own; 0: off
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
     hydro::Motion motion = hydro::Motion::static_mesh;
     bool fixed = false, phases = false, regularise = true, fused = true, smallest = false;
@@ -157,6 +158,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     if (o.derefine >= 0) fv.set_derefine(o.derefine * pb.L / n);
     if (o.refine >= 0) fv.set_refine(o.refine * pb.L / n);
     fv.set_split(o.refine_linear);
+    fv.set_steer(o.steer);
     {
         const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
         const auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
@@ -261,7 +263,7 @@ int main(int argc, char* argv[]) {
                      " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--smallest]"
                      " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name] [--times=t1,t2,...]"
                      " [--amr=mass|length|off] [--refine-mass=2] [--derefine-mass=0.5] [--split-min=0.12] [--merge-max=2] [--derefine=f]"
-                     " [--refine=F] [--split=linear|constant]\n"
+                     " [--refine=F] [--split=linear|constant] [--steer=ratio]\n"
                      "  refinement of a moving line: --amr=mass (default) splits cells above refine-mass times their initial mass if wider than"
                      " split-min h,\n  removes cells below derefine-mass times it if narrower than merge-max h, and any cell narrower than"
                      " --derefine=f h (default 0.03);\n  --derefine / --refine without --amr: --amr=length (cells narrower than f h go, wider"
@@ -294,6 +296,7 @@ int main(int argc, char* argv[]) {
     o.refine = std::stod(flag(argc, argv, "--refine", "-1"));
     o.split_min = std::stod(flag(argc, argv, "--split-min", std::to_string(hydro::split_min_default).c_str()));
     o.merge_max = std::stod(flag(argc, argv, "--merge-max", std::to_string(hydro::merge_max_default).c_str()));
+    o.steer = std::stod(flag(argc, argv, "--steer", "0"));
     o.refine_mass = std::stod(flag(argc, argv, "--refine-mass", std::to_string(hydro::refine_mass_default).c_str()));
     o.derefine_mass = std::stod(flag(argc, argv, "--derefine-mass", std::to_string(hydro::derefine_mass_default).c_str()));
     o.refine_linear = std::string(flag(argc, argv, "--split", "linear")) == "linear";

@@ -3,7 +3,7 @@
     python deref_sweep.py run <bin> <out dir> <configs,...> <N,...> [jobs]   # every ladder problem moving (and moving-wide), each config
     python deref_sweep.py table <out dir> <refs dir>                          # cells removed and added, same bits as off, L1 rho
 
-A config is `off` (--amr=off) or parts joined by `+`: mass (--amr=mass, the default), s<x> (--split-min=x), m<x> (--merge-max=x), d<f> (--derefine=f), r<F> (--refine=F, split
+A config is `off` (--amr=off) or parts joined by `+`: mass (--amr=mass, the default), off (--amr=off), t<x> (--steer=x), s<x> (--split-min=x), m<x> (--merge-max=x), d<f> (--derefine=f), r<F> (--refine=F, split
 --split=constant), r<F>lin (--refine=F --split=linear); lengths without mass mean --amr=length. E.g. mass, mass+d3e-2, d3e-2,
 r2, r2lin, r2+d3e-2. `off` is always run. Run with LUNA's environment. Each run: hydro_1d <p> <N> --moving [--pad=...] --steps=200 N
 <config flags> --out=<out>/<series>_<p>_<N>_<config>.npy; the log line gives the hash and the cells removed and added. L1 rho as the
@@ -31,11 +31,13 @@ def flags(config):
     if config == "off":
         return ["--amr=off"]
     parts = config.split("+")
-    out = ["--amr=mass"] if "mass" in parts else []
+    out = ["--amr=mass"] if "mass" in parts else ["--amr=off"] if "off" in parts else []
     for part in parts:
-        if part == "mass":
+        if part in ("mass", "off"):
             continue
-        if part.startswith("s"):    # mass: split only cells wider than x h
+        if part.startswith("t"):    # steering: away from a neighbour cell narrower than x times one's own
+            out.append(f"--steer={part[1:]}")
+        elif part.startswith("s"):  # mass: split only cells wider than x h
             out.append(f"--split-min={part[1:]}")
         elif part.startswith("m"):  # mass: remove by mass only cells narrower than x h
             out.append(f"--merge-max={part[1:]}")

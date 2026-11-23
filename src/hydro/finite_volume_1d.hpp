@@ -112,6 +112,8 @@ public:
         check_hysteresis();
     }
     void set_split(bool linear) { refine_linear_ = linear; }
+    // Steering (moving only; off by default): see Stencil::steering. ratio e.g. 0.25.
+    void set_steer(double ratio) { steer_ = motion_ == Motion::moving ? ratio : 0.0; }
     double derefine_volume() const { return deref_volume_; }
     double refine_volume() const { return refine_volume_; }
     long long cells_removed() const { return removed_; }
@@ -132,6 +134,7 @@ public:
         Limiter limiter;
         bool regularise, supply_left, supply_right;
         double spacing;
+        double steer = 0;  // set_steer(): a generator moves away from a neighbour cell narrower than steer times its own; 0: off
 
         // Used by: wants_cell(). Whether end slot s has room for a cell from its wall, d grid steps from it.
         KOKKOS_INLINE_FUNCTION bool room_at(double volume, i64 d) const {
@@ -272,13 +275,27 @@ public:
             const double fraction = d > r ? cell_shaping_speed : cell_shaping_speed * (d - 0.75 * r) / (0.25 * r);
             return offset * (fraction * sound_speed(W, gas) / d);
         }
+        // Steering after plume's face-angle trigger (Doug Rennehan's code): a cell that flattens symmetrically keeps its centroid on
+        // its generator, so drift()'s offset trigger never fires. In 1D a cell's length is set by its neighbours' generators alone, so
+        // moving its own generator cannot widen it: the neighbours move instead. A generator next to a cell narrower than steer times
+        // its own cell moves away from it, at cell_shaping_speed times the sound speed, scaled by how far below that ratio the neighbour
+        // is (both sides add). Off unless set_steer(ratio > 0). Used by: point_velocity().
+        KOKKOS_INLINE_FUNCTION double steering(const Cell* cell, double volume) const {
+            double v = 0;
+            for (int side = -1; side <= 1; side += 2) {
+                const double ratio = cell[side].V / volume;
+                if (cell[side].V > 0 && ratio < steer) v -= side * (1 - ratio / steer);
+            }
+            return v * cell_shaping_speed * sound_speed(cell->W, gas);
+        }
         // The point velocity relative to the cell's mean velocity: drift(), plus, for a generator beyond 0.75 r of its centroid (where the drift starts),
         // up to the fluid's velocity at the generator, linear between the centroids of this cell and its neighbour there (luna-cpp #25).
         // Used by: time_step(), Kernel::body().
         KOKKOS_INLINE_FUNCTION double point_velocity(const Cell* cell, double gapL, double gapR, double g_rho, double volume) const {
             const Cell& me = *cell;
             const double r = 0.5 * volume, d = Kokkos::fabs(me.c), weight = Kokkos::fmin(1.0, (d - 0.75 * r) / (0.25 * r));
-            const double drifting = drift(me.W, g_rho, me.c, volume);
+            double drifting = drift(me.W, g_rho, me.c, volume);
+            if (steer > 0) drifting += steering(cell, volume);
             if (!(weight > 0)) return drifting;
             const int side = me.c < 0 ? 1 : -1;
             const double between = side > 0 ? gapR + cell[1].c - me.c : gapL + me.c - cell[-1].c;
@@ -891,7 +908,7 @@ private:
     }
     // Used by: time_step(), supply_cells(), run(), run_fused().
     Stencil stencil() const {
-        return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_};
+        return {mesh_->line(), q_, gas_, walls_, limiter_, regularise_, supply_left_, supply_right_, spacing_, steer_};
     }
     // Whether to look at the end cells after this step: as the kernels asked while gas enters, else every 64 steps. Used by: step(), run_fused().
     bool due() {
@@ -950,6 +967,7 @@ private:
     long long refined_ = 0;
     Adapt adapt_ = Adapt::off;  // set_adapt(); the constructor makes it mass on a moving line
     double refine_mass_ = refine_mass_default, deref_mass_ = derefine_mass_default;
+    double steer_ = 0;  // set_steer(); 0: off
     double split_min_ = 0, merge_max_ = 0, safeguard_ = 0;  // set_mass_bounds(); the constructor sets the defaults on a moving line
     bool targets_ready_ = false;
     Kokkos::View<double*, Memory> target_;        // per id: the target mass (Adapt::mass)
