@@ -2546,10 +2546,12 @@ public:
         const Gas gas = gas_;
         Kokkos::parallel_for(
             "hydro::moving_pass_adjoint", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
-                for (int s = 0; s < pass_row; ++s) rows(f, s) = 0;
                 const int o = geo.owner_of(f), j = geo.neighbour_of(f);
                 const Vec a = geo.area_of(f);
-                if (dot(a, a) == 0) return;
+                if (dot(a, a) == 0) {  // no flux: no bars (every other row is written in full below)
+                    for (int s = 0; s < pass_row; ++s) rows(f, s) = 0;
+                    return;
+                }
                 const Vec d = geo.separation(o, j), xf = geo.face_centroid_of(f), wL = geo.row(wh, o), wR = geo.row(wh, j);
                 const Vec wf = FaceVelocity::value(d, xf, wL, wR);
                 State side[2];
@@ -2614,18 +2616,25 @@ public:
         Kokkos::parallel_for(
             "hydro::moving_pass_gather", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 const int base = 2 * V + 2 * V * D;
+                // Summed in registers, written once (not a read-modify-write of the cell rows per face).
+                double W[V] = {}, g[V * D] = {}, wh[D] = {}, c0[D] = {}, x[D] = {};
                 for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
                     const int f = geo.face_at(k);
                     const int s = geo.owned_at(k, f, i) ? 0 : 1;
-                    for (int v = 0; v < V; ++v) {
-                        Wb(i, v) += rows(f, s * V + v);
-                        for (int c = 0; c < D; ++c) gb(i, D * v + c) += rows(f, 2 * V + s * V * D + D * v + c);
-                    }
+                    for (int v = 0; v < V; ++v) W[v] += rows(f, s * V + v);
+                    for (int e = 0; e < V * D; ++e) g[e] += rows(f, 2 * V + s * V * D + e);
                     for (int c = 0; c < D; ++c) {
-                        whb(i, c) += rows(f, base + s * D + c);
-                        cb(i, c) += rows(f, base + 2 * D + s * D + c);
-                        xb(i, c) += rows(f, base + 4 * D + s * D + c);
+                        wh[c] += rows(f, base + s * D + c);
+                        c0[c] += rows(f, base + 2 * D + s * D + c);
+                        x[c] += rows(f, base + 4 * D + s * D + c);
                     }
+                }
+                for (int v = 0; v < V; ++v) Wb(i, v) += W[v];
+                for (int e = 0; e < V * D; ++e) gb(i, e) += g[e];
+                for (int c = 0; c < D; ++c) {
+                    whb(i, c) += wh[c];
+                    cb(i, c) += c0[c];
+                    xb(i, c) += x[c];
                 }
             });
     }
