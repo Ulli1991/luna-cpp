@@ -4,11 +4,10 @@
 # local voronoi-cpp checkout (-DLUNA_VORONOI_SOURCE), COMMIT the commit it must be at (-DLUNA_VORONOI_COMMIT, optional).
 #   sbatch --export=ALL,NEW=<tree>,VORONOI=<checkout>,COMMIT=<sha>,BUILD=<dir>,OUT=<dir> scripts/voronoi_ci_host.sh
 #SBATCH -J voronoi_ci_host
-#SBATCH -p gpu1
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p general
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=18
-#SBATCH --mem=120G
+#SBATCH --cpus-per-task=36
+#SBATCH --mem=100G
 #SBATCH --time=02:30:00
 source /etc/profile.d/modules.sh; module purge; module load gcc/15 cmake; module load hdf5-serial 2>/dev/null
 export OMP_NUM_THREADS=2 OMP_PROC_BIND=false UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=1

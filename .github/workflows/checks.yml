@@ -1,5 +1,12 @@
 name: Checks
-on: [push, pull_request, workflow_dispatch]
+# Builds against voronoi-cpp's current main, fetched at configure time (cmake/voronoi.cmake); the daily run catches a
+# voronoi-cpp change that breaks luna-cpp before anyone builds with it.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * *'
 permissions:
   contents: read
 jobs:
@@ -16,8 +23,6 @@ jobs:
       ASAN_OPTIONS: 'detect_leaks=1'
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - run: sudo apt-get update && sudo apt-get install -y clang-tidy ninja-build libhdf5-dev
       - name: Build host Kokkos
         run: |
@@ -25,10 +30,14 @@ jobs:
           cmake -S /tmp/kokkos -B /tmp/kokkos-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKokkos_ENABLE_OPENMP=OFF -DCMAKE_INSTALL_PREFIX=/tmp/kokkos-install
           cmake --build /tmp/kokkos-build --parallel 2
           cmake --install /tmp/kokkos-build
-      - name: Configure and build
+      - name: Configure and build (voronoi-cpp main)
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/tmp/kokkos-install -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DVORONOI_SANITIZERS=${{ matrix.sanitizers }}
           cmake --build build --parallel 2
+      - name: Commits built with
+        run: |
+          cat build/luna_build_info.txt
+          echo "$(cat build/luna_build_info.txt)" >> "$GITHUB_STEP_SUMMARY"
       - name: C++ static checks
         if: matrix.sanitizers == 'OFF'
         run: bash scripts/lint_cpp.sh build
