@@ -1,7 +1,7 @@
 // 3D problems with an exact solution; prints steps, wall seconds and cell updates/s. Usage: hydro_wave3d <sound|simple|vortex|tube> <nx> [flags].
 // Drives: main -> run<P>: problem_3d -> jittered_points -> Mesh::update/update_cells -> FiniteVolume<3> (wave_initial) -> time_step, step -> --out npy.
 
-#include "pin_notice.hpp"
+#include "build_info.hpp"
 #include "finite_volume.hpp"
 #include "problems_3d.hpp"
 #include "support.hpp"
@@ -108,6 +108,7 @@ int run(int argc, char** argv) {
         int length = std::snprintf(header, sizeof header, "{'descr': '<f8', 'fortran_order': False, 'shape': (%zu, 12), }", rows.size());
         while ((10 + length + 1) % 64 != 0) header[length++] = ' ';
         header[length++] = '\n';
+        luna::write_build_json(out);
         std::ofstream file(out, std::ios::binary);
         file.write("\x93NUMPY\x01\x00", 8);
         const unsigned short size = static_cast<unsigned short>(length);
@@ -122,7 +123,7 @@ int run(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
-    luna::pin_notice();
+    luna::print_build_info();
     const std::string precision = flag(argc, argv, "--precision", "default");
     // --riemann=hll: LUNA's HLL (default precision only).
     if (flag(argc, argv, "--riemann", "hllc") == "hll") return run<hydro::DefaultPrecision<3>, hydro::HLL>(argc, argv);

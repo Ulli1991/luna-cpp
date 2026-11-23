@@ -1,6 +1,7 @@
 // Checks 2D hydro (uniform, conservation, determinism, sound-wave order, Sod, Noh, Galilean invariance) on static and moving meshes.
 // Drives FiniteVolume<2>::time_step and step (src/hydro/finite_volume.hpp).
 
+#include "build_info.hpp"
 #include "check.hpp"
 #include "exact_riemann.hpp"
 #include "finite_volume.hpp"
@@ -344,6 +345,7 @@ void galilean(Check& check) {
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard guard(argc, argv);
+    luna::print_build_info();
     std::cout << std::unitbuf;
     Check check;
     uniform(check);

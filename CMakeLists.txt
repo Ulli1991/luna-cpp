@@ -8,34 +8,40 @@ if(VORONOI_SANITIZERS)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
-# Here and not only in the submodule: imported targets are visible in the
+# Here and not only in voronoi-cpp: imported targets are visible in the
 # directory that finds them and below it.
 find_package(Kokkos CONFIG REQUIRED)
 find_package(HDF5 COMPONENTS C)
 include(CTest)
 
-if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/extern/voronoi-cpp/CMakeLists.txt)
-    message(FATAL_ERROR "extern/voronoi-cpp is empty: git submodule update --init --recursive")
-endif()
+# voronoi-cpp: its current main by default, fetched at configure time; -DLUNA_VORONOI_COMMIT=<sha> for exactly one commit,
+# -DLUNA_VORONOI_SOURCE=<dir> for a local checkout (cmake/voronoi.cmake, README "Install and build").
+include(cmake/voronoi.cmake)
 
-# Warns, loudly, when the pinned voronoi-cpp is behind its main, at configure, at every build and when a program starts.
-option(LUNA_STRICT_PIN "Stop the build when extern/voronoi-cpp is behind voronoi-cpp main" OFF)
-set(LUNA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-include(cmake/check_pin.cmake)
-add_compile_definitions(LUNA_VORONOI_PIN="${pin}" LUNA_VORONOI_LATEST="${latest}" LUNA_VORONOI_BEHIND=${luna_pin_behind})
-add_custom_target(luna_check_pin ALL COMMAND ${CMAKE_COMMAND} -DLUNA_STRICT_PIN=${LUNA_STRICT_PIN}
-                  -DLUNA_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_pin.cmake)
+# The commits built with (luna-cpp and voronoi-cpp, dirty flags), regenerated at every build: luna::build_info().
+set(luna_build_info_args -DLUNA_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DVORONOI_DIR=${luna_voronoi_dir}
+    -DVORONOI_ORIGIN=${luna_voronoi_origin} -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR})
+execute_process(COMMAND ${CMAKE_COMMAND} ${luna_build_info_args} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_info.cmake)
+file(READ ${CMAKE_CURRENT_BINARY_DIR}/luna_build_info.txt luna_build_line)
+string(STRIP "${luna_build_line}" luna_build_line)
+message(STATUS "${luna_build_line}")
+add_custom_target(luna_build_info_files ALL
+                  COMMAND ${CMAKE_COMMAND} ${luna_build_info_args} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_info.cmake
+                  BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/luna_build_info.cpp ${CMAKE_CURRENT_BINARY_DIR}/luna_build_info.txt)
+add_library(luna_build_info STATIC ${CMAKE_CURRENT_BINARY_DIR}/luna_build_info.cpp)
+add_dependencies(luna_build_info luna_build_info_files)
+target_include_directories(luna_build_info PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/hydro)
 
-# voronoi_library. The submodule's tests and programs stay out of this build.
+# voronoi_library. The library's tests and programs stay out of this build.
 set(luna_build_testing ${BUILD_TESTING})
 set(BUILD_TESTING OFF)
-add_subdirectory(extern/voronoi-cpp EXCLUDE_FROM_ALL)
+add_subdirectory(${luna_voronoi_dir} ${CMAKE_CURRENT_BINARY_DIR}/voronoi-cpp EXCLUDE_FROM_ALL)
 set(BUILD_TESTING ${luna_build_testing})
 
 # voronoi-cpp is the mesh library only: this repository owns the solver. The targets keep their luna_ prefix
-# from the split (the programs keep their names); only voronoi_library is linked from the submodule.
+# from the split (the programs keep their names); only voronoi_library is linked from voronoi-cpp.
 add_library(luna_hydro_library INTERFACE)
-target_link_libraries(luna_hydro_library INTERFACE voronoi_library)
+target_link_libraries(luna_hydro_library INTERFACE voronoi_library luna_build_info)
 target_include_directories(luna_hydro_library INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src/hydro)
 
 function(hydro_program target output source)
@@ -45,7 +51,7 @@ function(hydro_program target output source)
     # check.hpp and support.hpp are the library's.
     target_include_directories(${target} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/test
-        ${CMAKE_CURRENT_SOURCE_DIR}/extern/voronoi-cpp/src/test)
+        ${luna_voronoi_dir}/src/test)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
 endfunction()
 
@@ -53,7 +59,7 @@ hydro_program(luna_hydro_1d hydro_1d src/bench/hydro_1d.cpp)
 hydro_program(luna_hydro_wave3d hydro_wave3d src/bench/hydro_wave3d.cpp)
 hydro_program(luna_hydro_kh2d hydro_kh2d src/bench/hydro_kh2d.cpp)
 # device_memory.hpp is the library's.
-target_include_directories(luna_hydro_kh2d PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern/voronoi-cpp/src/bench)
+target_include_directories(luna_hydro_kh2d PRIVATE ${luna_voronoi_dir}/src/bench)
 # Snapshots need HDF5.
 if(HDF5_FOUND)
     hydro_program(luna_hydro_sedov hydro_sedov src/bench/hydro_sedov.cpp)

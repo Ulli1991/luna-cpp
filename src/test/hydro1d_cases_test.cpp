@@ -1,6 +1,7 @@
 // The 1D test cases of LUNA, and two it lacks, against LUNA and their exact solutions, static and moving. Gates: luna_1d_gates.hpp, generated
 // by scripts/ladder_1d.py from one ladder of runs; what each check means is in docs/design.md.
 
+#include "build_info.hpp"
 #include "check.hpp"
 #include "exact_riemann.hpp"
 #include "finite_volume_1d.hpp"
@@ -269,6 +270,7 @@ double fit(const std::vector<double>& ns, const std::vector<double>& es) {
 
 int main(int argc, char* argv[]) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::print_build_info();
     Check check;
     const char* names[3] = {"rho", "v", "P"};
 

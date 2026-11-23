@@ -2,6 +2,7 @@
 // and whole static steps on a small mesh (FiniteVolume::step_tangent, step_adjoint). Tangent against central differences away from
 // switches, adjoint against tangent (<w, J v> = <J^T w, v>). `--cost N`: times of step, step_tangent and step_adjoint on N cells.
 
+#include "build_info.hpp"
 #include "check.hpp"
 #include "finite_volume.hpp"
 #include "support.hpp"
@@ -565,6 +566,7 @@ void cost(int n) {
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::print_build_info();
     for (int a = 1; a + 1 < argc; ++a)
         if (std::string(argv[a]) == "--cost") {
             cost(std::stoi(argv[a + 1]));

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "build_info.hpp"
 #include "euler.hpp"
 
 #include <hdf5.h>
@@ -97,6 +98,12 @@ inline std::string write_snapshot(const std::string& dir, const SnapshotData& s)
     detail::attribute(cells, "Lz", s.sides[2]);
     detail::attribute(cells, "mesh", std::string("voronoi"));
     detail::attribute(cells, "N_cells", static_cast<long long>(n));
+    const luna::BuildInfo build = luna::build_info();  // the commits this program was built with
+    detail::attribute(cells, "luna_cpp_commit", std::string(build.luna_commit));
+    detail::attribute(cells, "luna_cpp_dirty", build.luna_dirty ? 1LL : 0LL);
+    detail::attribute(cells, "voronoi_cpp_commit", std::string(build.voronoi_commit));
+    detail::attribute(cells, "voronoi_cpp_dirty", build.voronoi_dirty ? 1LL : 0LL);
+    detail::attribute(cells, "voronoi_cpp_origin", std::string(build.voronoi_origin));
     detail::dataset(cells, "x", s.x);
     detail::dataset(cells, "y", s.y);
     detail::dataset(cells, "z", s.z);
