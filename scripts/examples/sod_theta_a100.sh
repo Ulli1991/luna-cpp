@@ -16,7 +16,7 @@ lim=${1:-minmod}
 repo=${REPO:-/raven/u/uli/luna-cpp-adx}
 luna=${LUNA_REPO:-/raven/u/uli/LUNA-worktrees/autodiff-examples}
 py=$HOME/jax-env/bin/python
-b=/ptmp/uli/luna-cpp-adx/build/cuda
+b=${BUILD:-/ptmp/uli/luna-cpp-adx/build/cuda}
 out=/ptmp/uli/luna-cpp-adx/runs/sod_theta
 mkdir -p $out
 cd $repo && git log --oneline -1

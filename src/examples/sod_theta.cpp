@@ -56,6 +56,7 @@ struct Tube {
     double dt, gamma;
     Mesh mesh;
     std::vector<double> V, x, rho_obs;  // before fv: make() fills V and x
+    double noise = 0;  // U0 + noise sin(2.3 i + v) (|U0| + 1): no cell exactly flat ("noise" command)
     FV fv;
     Tape tape;
 
@@ -88,6 +89,7 @@ struct Tube {
             h(i, 0) = r * V[i];
             h(i, 1) = r * u * V[i];
             h(i, 2) = (P / (gamma - 1) + 0.5 * r * u * u) * V[i];
+            for (int v = 0; v < 3; ++v) h(i, v) += noise * std::sin(2.3 * i + v) * (std::abs(h(i, v) / V[i]) + 1.0) * V[i];
         }
         return h;
     }
@@ -298,6 +300,9 @@ int main(int argc, char** argv) {
             const Theta t = read_theta(in);
             const Host Q = tube.forward(t, false);
             std::cout << "J " << tube.objective('J', Q, nullptr) << " L " << (tube.rho_obs.empty() ? 0.0 : tube.objective('L', Q, nullptr)) << std::endl;
+        } else if (cmd == "noise") {
+            in >> tube.noise;
+            std::cout << "ok" << std::endl;
         } else if (cmd == "fcell") {  // fcell i v h t1..t6: forward with U0(i, v) + h (per volume) -> "J <J> L <L>"
             int i = 0, v = 0;
             double h = 0;

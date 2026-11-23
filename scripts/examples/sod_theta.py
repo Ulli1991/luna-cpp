@@ -157,6 +157,25 @@ def main(argv):
     closer = np.minimum(np.abs(checks[:, 2] - checks[:, 4]), np.abs(checks[:, 2] - checks[:, 5])) / scale
     print(f"map against differences at {len(checks)} entries, of the map's largest: central {central.max():.2e}, closer one-sided "
           f"{closer.max():.2e}")
+    # The same at Sod + 1e-3 sin(2.3 i + v) (|U0| + 1): no cell exactly flat, so minmod is differentiable at every cell (at an exactly
+    # flat cell its directional derivative minmod(da, db) is not linear in the direction: no derivative exists there).
+    tube.ask("noise 1e-3")
+    Jn = tube.J(THETA_SOD)[0]
+    tube.ask(f"dump {path} J " + tube.th(THETA_SOD))
+    rows_n = np.fromfile(path, dtype=np.float64).reshape(-1, 7)
+    checks_n = []
+    for i in (0, 20, 60, 99, 100, 140, 180, 199):
+        for v in range(3):
+            h = 1e-6
+            Jp = float(tube.ask(f"fcell {i} {v} {h} " + tube.th(THETA_SOD))[1])
+            Jm = float(tube.ask(f"fcell {i} {v} {-h} " + tube.th(THETA_SOD))[1])
+            checks_n.append((i, v, rows_n[i, 4 + v], (Jp - Jm) / (2 * h) / dx, (Jp - Jn) / h / dx, (Jn - Jm) / h / dx))
+    checks_n = np.array(checks_n)
+    tube.ask("noise 0")
+    scale = np.max(np.abs(rows_n[:, 4:7]))
+    r.update(J_noisy=Jn, dJdU0_noisy=rows_n[:, 4:7], map_checks_noisy=checks_n)
+    print(f"noisy Sod: map against central differences at {len(checks_n)} entries: "
+          f"{(np.abs(checks_n[:, 2] - checks_n[:, 3]) / scale).max():.2e} of the map's largest")
     # 4. the inverse problem
     tube.ask("target " + tube.th(THETA_SOD))
 

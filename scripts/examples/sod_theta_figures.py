@@ -41,6 +41,10 @@ def main(cpp_path, luna_path, out):
         print(f"  map cell {int(i):3d} var {int(v)}: luna-cpp {ours: .6e}  LUNA {theirs: .6e}  FD central {fc: .6e} +h {fp: .6e} -h {fm: .6e}")
     mscale = np.max(np.abs(j["dJdU0"]))
     print("map dJ/dU0, cpp - LUNA: %.1e of the largest entry" % (np.max(np.abs(c["dJdU0"] - j["dJdU0"])) / mscale))
+    ns = np.max(np.abs(j["dJdU0_noisy"]))
+    print("noisy Sod (no flat cell): map cpp - LUNA %.1e of the largest entry; cpp against central FD at %d entries %.1e" % (
+        np.max(np.abs(c["dJdU0_noisy"] - j["dJdU0_noisy"])) / ns, len(c["map_checks_noisy"]),
+        np.max(np.abs(c["map_checks_noisy"][:, 2] - c["map_checks_noisy"][:, 3])) / ns))
 
     # 1. FD sweep
     fig, ax = plt.subplots(figsize=FIGSIZE)
@@ -68,18 +72,18 @@ def main(cpp_path, luna_path, out):
     axs[0].set_ylabel(r"state at $t = 0.2$")
     labels = [r"$\delta J/\delta \rho_0$", r"$\delta J/\delta (\rho u)_0$", r"$\delta J/\delta E_0$"]
     for v in range(3):
-        axs[1].plot(c["x"], c["dJdU0"][:, v], "-", color=f"C{v}", label=labels[v] + " luna-cpp")
-        axs[1].plot(j["x"], j["dJdU0"][:, v], ".", color=f"C{v}", ms=3, label="LUNA")
-    ch = c["map_checks"]
+        axs[1].plot(c["x"], c["dJdU0_noisy"][:, v], "-", color=f"C{v}", label=labels[v] + " luna-cpp")
+        axs[1].plot(j["x"], j["dJdU0_noisy"][:, v], ".", color=f"C{v}", ms=3, label="LUNA")
+    ch = c["map_checks_noisy"]
     xc = c["x"][ch[:, 0].astype(int)]
-    closer = np.where(np.abs(ch[:, 4] - ch[:, 2]) < np.abs(ch[:, 5] - ch[:, 2]), ch[:, 4], ch[:, 5])
-    axs[1].plot(xc, closer, "kx", ms=8, label="closer one-sided difference")
+    closer = ch[:, 3]  # central: at the noisy state every cell is differentiable
+    axs[1].plot(xc, closer, "kx", ms=8, label="central differences")
     axs[1].set_xlabel(r"$x$ (initial)")
-    axs[1].set_ylabel("sensitivity per unit length")
+    axs[1].set_ylabel(r"sensitivity per unit length (Sod $+ 10^{-3}$ noise)")
     # The two end cells (outflow walls copy them into the ghosts) are far larger: off the scale, written in.
-    lim = 1.3 * np.max(np.abs(c["dJdU0"][2:-2]))
+    lim = 1.3 * np.max(np.abs(c["dJdU0_noisy"][2:-2]))
     axs[1].set_ylim(-lim, lim)
-    ends = ", ".join(f"{v:.0f}" for v in np.concatenate([c["dJdU0"][0], c["dJdU0"][-1]]))
+    ends = ", ".join(f"{v:.0f}" for v in np.concatenate([c["dJdU0_noisy"][0], c["dJdU0_noisy"][-1]]))
     axs[1].text(0.5, 0.04, f"end cells off scale: ({ends})", transform=axs[1].transAxes, ha="center", fontsize=10)
     for a in axs:
         decorate(a)
