@@ -21,6 +21,8 @@ SHOW = [
     ("stall_math%", "smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active.pct", 1),
     ("stall_wait%", "smsp__warp_issue_stalled_wait_per_warp_active.pct", 1),
     ("stall_barrier%", "smsp__warp_issue_stalled_barrier_per_warp_active.pct", 1),
+    ("stall_branch%", "smsp__warp_issue_stalled_branch_resolving_per_warp_active.pct", 1),
+    ("issue%", "smsp__issue_active.avg.pct_of_peak_sustained_active", 1),
     ("clock_MHz", "sm__cycles_elapsed.avg.per_second", 1e-6),
 ]
 PER_CELL = [
@@ -31,6 +33,8 @@ PER_CELL = [
     ("fp64_inst/cell", ("smsp__sass_thread_inst_executed_op_dfma_pred_on.sum", "smsp__sass_thread_inst_executed_op_dadd_pred_on.sum",
                         "smsp__sass_thread_inst_executed_op_dmul_pred_on.sum"), 1.0),
     ("warp_inst/cell", "smsp__inst_executed.sum", 32.0),
+    ("branch_warp_inst/cell", "smsp__sass_inst_executed_op_branch.sum", 1.0),
+    ("divergent_targets/cell", "smsp__sass_branch_targets_threads_divergent.sum", 1.0),
 ]
 
 

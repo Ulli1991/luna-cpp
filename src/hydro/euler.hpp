@@ -443,6 +443,7 @@ struct HLL {
             U = {s.rho, s.rho * s.vn, s.rho * s.vt1, s.rho * s.vt2, E};
         };
         AxisFlux<T> FL, UL, FR, UR;
+#if !defined(LUNA_GRID_SELECT_RIEMANN)
         if (SL >= T(0)) {
             side(L, FL, UL);
             return FL;
@@ -451,11 +452,16 @@ struct HLL {
             side(R, FR, UR);
             return FR;
         }
+#endif
+        // -DLUNA_GRID_SELECT_RIEMANN: every case computed, then selected as LUNA's jnp.where (the same values; lever 3, slower).
         side(L, FL, UL);
         side(R, FR, UR);
         const T inv_dS = T(1) / (SR - SL);
         AxisFlux<T> F;
-        for (int v = 0; v < 5; ++v) F[v] = (SR * FL[v] - SL * FR[v] + SL * SR * (UR[v] - UL[v])) * inv_dS;
+        for (int v = 0; v < 5; ++v) {
+            const T mid = (SR * FL[v] - SL * FR[v] + SL * SR * (UR[v] - UL[v])) * inv_dS;
+            F[v] = SL >= T(0) ? FL[v] : SR <= T(0) ? FR[v] : mid;
+        }
         return F;
     }
 
@@ -583,13 +589,16 @@ struct HLLC {
         const T ke = T(0.5) * (vn * vn + vt1 * vt1 + vt2 * vt2);
         const T E = P * inv_gm1 + rho * ke, m = rho * vn;
         AxisFlux<T> F = {m, m * vn + P, m * vt1, m * vt2, (E + P) * vn};
+#if !defined(LUNA_GRID_SELECT_RIEMANN)
         if (!star) return F;
+#endif
         const T S = left ? SL : SR, denom = left ? denomL : denomR;
         const T rho_star = denom / nonzero(S - SM);
         const T E_star = E * inv_rho + (SM - vn) * (SM + P * (T(1) / nonzero(denom)));
         const AxisFlux<T> U = {rho, rho * vn, rho * vt1, rho * vt2, E};
         const AxisFlux<T> U_star = {rho_star, rho_star * SM, rho_star * vt1, rho_star * vt2, rho_star * E_star};
-        for (int v = 0; v < 5; ++v) F[v] = F[v] + S * (U_star[v] - U[v]);
+        // With -DLUNA_GRID_SELECT_RIEMANN the star correction is computed always and selected (the same values; lever 3, slower).
+        for (int v = 0; v < 5; ++v) F[v] = star ? F[v] + S * (U_star[v] - U[v]) : F[v];
         return F;
     }
 

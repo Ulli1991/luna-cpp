@@ -116,6 +116,8 @@ if [[ -n "${NCU:-}" ]]; then
     M+=,smsp__sass_thread_inst_executed_op_dfma_pred_on.sum,smsp__sass_thread_inst_executed_op_dadd_pred_on.sum,smsp__sass_thread_inst_executed_op_dmul_pred_on.sum
     M+=,smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct,smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active.pct
     M+=,smsp__warp_issue_stalled_wait_per_warp_active.pct,smsp__warp_issue_stalled_barrier_per_warp_active.pct,sm__cycles_elapsed.avg.per_second
+    M+=,smsp__sass_branch_targets_threads_divergent.sum,smsp__sass_inst_executed_op_branch.sum,smsp__warp_issue_stalled_branch_resolving_per_warp_active.pct
+    M+=,smsp__issue_active.avg.pct_of_peak_sustained_active
     dcgmi profile --pause 2>&1 | tail -1
     for b in $BINS; do
         for kernel in cuda kokkos; do

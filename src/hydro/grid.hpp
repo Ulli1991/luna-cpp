@@ -60,19 +60,34 @@ inline Params make_params(double gamma, const double (&dx)[3], double cfl, Limit
     return p;
 }
 
+// Branch-free variants of lever 3 (measured 2026-11-23, slower in the CUDA form: tried.md), off unless asked for:
+// -DLUNA_GRID_SELECT_LIMITER (the limiters), -DLUNA_GRID_SELECT_RIEMANN (HLL and HLLC, euler.hpp), -DLUNA_GRID_SELECT_REST (face rule, ghosts).
+
 // slopes.minmod: the smaller magnitude when a and b share a sign, else 0. Used by: limit().
 template <class T>
 KOKKOS_INLINE_FUNCTION T minmod(T a, T b) {
+#if defined(LUNA_GRID_SELECT_LIMITER)
+    const T m = nan_min(Kokkos::fabs(a), Kokkos::fabs(b));
+    const T s = a > T(0) ? m : -m;
+    return a * b > T(0) ? s : T(0);
+#else
     if (!(a * b > T(0))) return T(0);
     const T m = nan_min(Kokkos::fabs(a), Kokkos::fabs(b));
     return a > T(0) ? m : -m;
+#endif
 }
 // slopes.minmod3. Used by: limit() (MC).
 template <class T>
 KOKKOS_INLINE_FUNCTION T minmod3(T a, T b, T c) {
+#if defined(LUNA_GRID_SELECT_LIMITER)
+    const T m = nan_min(Kokkos::fabs(a), nan_min(Kokkos::fabs(b), Kokkos::fabs(c)));
+    const T s = a > T(0) ? m : -m;
+    return (a * b > T(0)) & (a * c > T(0)) ? s : T(0);
+#else
     if (!(a * b > T(0) && a * c > T(0))) return T(0);
     const T m = nan_min(Kokkos::fabs(a), nan_min(Kokkos::fabs(b), Kokkos::fabs(c)));
     return a > T(0) ? m : -m;
+#endif
 }
 // slopes.slope_limiter on the left and right differences: minmod, MC (moncen) or van Leer (with LUNA's normal-float threshold).
 // Used by: cell_step().
@@ -202,10 +217,17 @@ KOKKOS_INLINE_FUNCTION State<D> predict(const State<D>& W, const State<D> (&slop
 template <int D>
 KOKKOS_INLINE_FUNCTION State<D> face_rule(State<D> W, const State<D>& Wc, const Params& p) {
     constexpr int P = D + 1;
-    const bool bad = W[0] <= 0.0 || W[P] <= 0.0;
+    const bool bad = (W[0] <= 0.0) | (W[P] <= 0.0);
+#if !defined(LUNA_GRID_SELECT_REST)
     if (!(p.floors && !p.allow_first_order) && bad)
         LUNA_GRID_UNROLL
         for (int v = 0; v < D + 2; ++v) W[v] = p.allow_first_order ? Wc[v] : Kokkos::Experimental::quiet_NaN_v<double>;
+#else
+    // Selected per value, as LUNA's jnp.where (no divergent branch).
+    const bool replace = !(p.floors && !p.allow_first_order) && bad;
+    LUNA_GRID_UNROLL
+    for (int v = 0; v < D + 2; ++v) W[v] = replace ? (p.allow_first_order ? Wc[v] : Kokkos::Experimental::quiet_NaN_v<double>) : W[v];
+#endif
     if (!p.floors) return W;
     double rho = W[0] < p.smallr ? Wc[0] : W[0];
     const double pressure = W[P] < p.smallr_c2 ? Wc[P] : W[P];
@@ -248,6 +270,22 @@ KOKKOS_INLINE_FUNCTION State<D> face_flux(const State<D>& halfL, const State<D>&
 // 2 min(v, 0) (diode, low side), 3 max(v, 0) (diode, high side). Used by: Field::operator().
 KOKKOS_INLINE_FUNCTION int ghost(int c, int n, Boundary b, int& velocity) {
     velocity = 0;
+#if defined(LUNA_GRID_SELECT_REST)
+    // Selects only (the boundary is the same for every thread; on or off the grid differs between the threads of a warp).
+    const bool lo = c < 0, hi = c >= n;
+    switch (b) {
+        case Boundary::periodic:
+            return lo ? c + n : hi ? c - n : c;
+        case Boundary::reflective:
+            velocity = lo | hi ? 1 : 0;
+            return lo ? -1 - c : hi ? 2 * n - 1 - c : c;
+        case Boundary::diode:
+            velocity = lo ? 2 : hi ? 3 : 0;
+            return lo ? 0 : hi ? n - 1 : c;
+        default:
+            return lo ? 0 : hi ? n - 1 : c;
+    }
+#endif
     if (c >= 0 && c < n) return c;
     const bool low = c < 0;
     switch (b) {
@@ -286,9 +324,13 @@ struct Field {
         LUNA_GRID_UNROLL
         for (int a = 0; a < D; ++a) {
             double& u = w[1 + a];
+#if !defined(LUNA_GRID_SELECT_REST)
             if (fix[a] == 1) u = -u;
             if (fix[a] == 2) u = nan_min(u, 0.0);
             if (fix[a] == 3) u = nan_max(u, 0.0);
+#else
+            u = fix[a] == 1 ? -u : fix[a] == 2 ? nan_min(u, 0.0) : fix[a] == 3 ? nan_max(u, 0.0) : u;
+#endif
         }
         return w;
     }

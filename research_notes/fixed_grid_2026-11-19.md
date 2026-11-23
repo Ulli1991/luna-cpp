@@ -473,3 +473,17 @@ LUNA's own profile, CODE_NOTES 2026-11-04 (Sedov 256³, FP64, minmod, HLLC, spli
 - **Spills:** none in the split path (132 and 78 registers). Our own spills before unrolling cost us 7 KB/cell of local traffic: that, not LUNA, was the spill story of phase 1.
 - **FMA:** LUNA's FP64 instruction mix shows no contraction. Ours, with FMA on, executes 1576 FP64 instructions per cell against LUNA's 1615 for the same numerics.
 - **Node:** every phase 1 job landed on ravg1002, LUNA's "slow" node of CODE_NOTES. There LUNA ran at 1.09–1.14 G at 256³–384³ minmod (CODE_NOTES' best elsewhere: 1.19–1.29 G), and at 0.69–0.88 G at 128³, with 1305 MHz throughout. A job pinned to another node is still to run.
+
+**Lever 3, branch-free selects (measured, dropped, 2026-11-23).** Job 32901695 (256³, against lever 4, with nsys kernel sums) and ncu 32901696; ravg1002 at 1305 MHz, the same box.
+
+| 256³ | LUNA | CUDA lever 4 | CUDA selects | Kokkos lever 4 | Kokkos selects |
+|---|---|---|---|---|---|
+| whole step, minmod (G) | 1.091 | 1.219 | 0.988 | 0.727 | 0.806 |
+| whole step, MC (G) | 0.979 | 1.154 | 0.909 | 0.686 | 0.745 |
+| kernel time only, minmod (nsys, 40 steps; G and ns/cell) | 1.135 (0.881) | 1.152 (0.868) | 0.980 (1.020) | 0.728 (1.373) | 0.793 (1.262) |
+
+LUNA's kernels per step (nsys, CUDA graph nodes traced): faces 8.17 ms, padding 1.91, predictor 1.91, update 1.46, the dt function's 0.90; ours: faces 12.70, predictor 1.83. On kernel time alone ours and LUNA's are level (0.868 against 0.881 ns/cell); the whole-step lead (0.82 against 0.92 ns/cell) is LUNA's Python dispatch and separate dt call. (nsys's sums are means over 40 steps, warm-up included, under tracing; the whole-step numbers are medians after 10 steps.)
+
+The selects cost more arithmetic than they save: every case is computed (FP64 instructions 928 -> 1017 per cell), the registers fall only to 146 (still 3 blocks of 128), and nvcc had already predicated the short branches. Divergence comes from elsewhere: of 0.055 divergent branch targets per cell, 0.039 are the block minimum's shared-memory tree (5 divergent levels per 128-thread block) and 0.016 the ghost map at the boundary; the limiters and Riemann solvers contribute none. The variants stay behind `-DLUNA_GRID_SELECT_LIMITER`, `_RIEMANN` and `_REST`.
+
+Next, from the side-by-side: registers to 128 or fewer (4 blocks of 128) by removing run-time switches (limiter, boundary and floors as compile-time parameters, as LUNA's are static), the block minimum by warp shuffles instead of the shared-memory tree, and early loads.
