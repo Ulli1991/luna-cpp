@@ -313,6 +313,9 @@ int main(int argc, char* argv[]) {
             FV<> split(exec, m1, gas, 1, hydro::Limiter::face_centroid, motion, walls);
             FV<> fused(exec, m2, gas, 1, hydro::Limiter::face_centroid, motion, walls);
             FV<> again(exec, m3, gas, 1, hydro::Limiter::face_centroid, motion, walls);
+            // The kernels' equivalence, not the mesh's adaptation: with the default (Adapt::mass) the two paths adapt after different
+            // dt (a split cell's next step is computed again in the fused path), so their meshes differ.
+            for (FV<>* fv : {&split, &fused, &again}) fv->set_adapt(hydro::Adapt::off);
             rough(split, m1);
             rough(fused, m2);
             rough(again, m3);
@@ -401,6 +404,7 @@ int main(int argc, char* argv[]) {
         (from_left ? walls.left : walls.right) = hydro::Wall::inflow;
         (from_left ? walls.left_inflow : walls.right_inflow) = in;
         FV<> fv(exec, mesh, gas, 1, hydro::Limiter::face_centroid, Motion::moving, walls);
+        fv.set_adapt(hydro::Adapt::off);  // the wall's own lattice: the default (Adapt::mass) adapts cells there (165 cells, spacing off by 3 %)
         const auto near_wall = [&](double x) { return from_left ? x : 1.0 - x; };
         set(fv, mesh, [&](double x) { return near_wall(x) < 0.5 ? in : rest; }, gas);
         run(fv, 0.1, 0.4, hydro::TimeStep::arepo);
@@ -551,18 +555,21 @@ int main(int argc, char* argv[]) {
             fv.set_adapt(k == 0 ? hydro::Adapt::off : k == 3 ? hydro::Adapt::mass : hydro::Adapt::length);
             if (k == 1) fv.set_derefine(1e-3 * problem.L / 256);
             if (k == 2) fv.set_refine(20 * problem.L / 256);
-            if (k == 3) fv.set_adapt_mass(1e3, 1e-3);
+            if (k == 3) {
+                fv.set_adapt_mass(1e3, 1e-3);
+                fv.set_mass_bounds(0.12 * problem.L / 256, problem.L / 256, 0, 0);  // no length bound: the default 2 h one splits in Sod
+            }
             run(fv, problem.t_end, 0.4, hydro::TimeStep::arepo);
             const auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
             for (int i = 0; i < fv.cells(); ++i)
                 for (int v = 0; v < 3; ++v) q[k].push_back(h(i, v));
             if (k == 1) check.expect(fv.cells_removed() == 0, "derefinement, Sod: no cell below 1e-3 h");
             if (k == 2) check.expect(fv.cells_refined() == 0, "refinement, Sod: no cell above 20 h");
-            if (k == 3) check.expect(fv.cells_refined() + fv.cells_removed() == 0, "mass, Sod: no cell beyond 1e3 or 1e-3 times its target");
+            if (k == 3) check.expect(fv.cells_refined() + fv.cells_removed() == 0, "mass, Sod, no length bounds: no cell beyond 1e3 or 1e-3 times its target");
         }
         check.expect(q[0] == q[1], "derefinement, Sod: a threshold no cell crosses gives the same bits as off");
         check.expect(q[0] == q[2], "refinement, Sod: a threshold no cell crosses gives the same bits as off");
-        check.expect(q[0] == q[3], "mass, Sod: factors no cell crosses give the same bits as off");
+        check.expect(q[0] == q[3], "mass, Sod, no length bounds: factors no cell crosses give the same bits as off");
     }
     // Mass (the default on a moving line). A uniform state moving with the mesh keeps each cell's mass, so the test changes it: one
     // step sets the targets, then the density goes to 3 times (every cell above twice its target: they split, the children inheriting
@@ -652,6 +659,14 @@ int main(int argc, char* argv[]) {
             refused = true;
         }
         check.expect(refused, "mass: refine 1.5 with derefine 0.5 times the target is refused (no gap of 4)");
+        refused = false;
+        fv.set_adapt_mass(2.0, 0.5);  // back to valid factors, so only the bounds are checked
+        try {
+            fv.set_mass_bounds(0.12 / 64, 1.5 / 64, 0.03 / 64, 2.0 / 64);
+        } catch (const std::invalid_argument&) {
+            refused = true;
+        }
+        check.expect(refused, "mass: removal below 1.5 h with splits above 2 h is refused (a split's children would be removed)");
     }
     return check.failed() != 0;
 }

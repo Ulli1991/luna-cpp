@@ -26,9 +26,11 @@ inline constexpr double courant_static_1d = 0.8, courant_moving_1d = 0.4;
 enum class Adapt { off, mass, length };
 inline constexpr double refine_mass_default = 2.0, derefine_mass_default = 0.5;
 // Adapt::mass's size bounds, in initial spacings h: a cell narrower than derefine_length_default goes whatever its mass (the safeguard
-// that fixes #30, where the cells keep their mass); mass splits only cells wider than split_min_default, mass removes only cells
-// narrower than merge_max_default (a light cell next to dense gas would otherwise split every step, and open walls would empty).
-inline constexpr double derefine_length_default = 0.03, split_min_default = 0.12, merge_max_default = 2.0;
+// that fixes #30, where the cells keep their mass); a cell wider than split_max_default splits whatever its mass (keeps rarefactions
+// and open walls resolved); mass splits only cells wider than split_min_default (a light cell next to dense gas would otherwise split
+// every step) and removes only cells narrower than merge_max_default. merge_max must not exceed split_max / 2: the children of a
+// length split are at least half the parent, and if mass could remove them, the two would undo each other every step.
+inline constexpr double derefine_length_default = 0.03, split_min_default = 0.12, merge_max_default = 1.0, split_max_default = 2.0;
 
 template <class ExecSpace, class Riemann>
 class FiniteVolume<1, ExecSpace, Riemann, Precision<>> {
@@ -62,7 +64,7 @@ public:
             Kokkos::deep_copy(exec_, x_, mesh.positions());
             adapt_ = Adapt::mass;
             const double h = mesh.box() / n_;
-            set_mass_bounds(split_min_default * h, merge_max_default * h, derefine_length_default * h);
+            set_mass_bounds(split_min_default * h, merge_max_default * h, derefine_length_default * h, split_max_default * h);
         }
     }
 
@@ -91,6 +93,7 @@ public:
     void set_adapt(Adapt mode) {
         adapt_ = motion_ == Motion::moving ? mode : Adapt::off;
         targets_ready_ = false;
+        check_hysteresis();
     }
     Adapt adapt() const { return adapt_; }
     void set_adapt_mass(double refine_mass, double derefine_mass) {
@@ -98,10 +101,13 @@ public:
         deref_mass_ = derefine_mass;
         check_hysteresis();
     }
-    void set_mass_bounds(double split_min, double merge_max, double safeguard) {
+    // split_max: a cell wider splits whatever its mass (0: none); safeguard: a cell narrower goes whatever its mass (0: none).
+    void set_mass_bounds(double split_min, double merge_max, double safeguard, double split_max) {
         split_min_ = split_min;
         merge_max_ = merge_max;
         safeguard_ = safeguard;
+        split_max_ = split_max;
+        check_hysteresis();
     }
     void set_derefine(double min_volume) {
         deref_volume_ = motion_ == Motion::moving ? min_volume : 0.0;
@@ -543,7 +549,7 @@ public:
     // so no atomics and the same bits every run. One request per gap (Mesh<1>::insert defers a second). Returns whether any went in.
     // Used by: step(), run_fused(). Public because CUDA lambdas cannot be in private members.
     bool refine() {
-        const double limit = length_on() ? refine_volume_ : 0.0;
+        const double limit = split_length();
         const double factor = mass_on() && targets_ready_ ? refine_mass_ : 0.0;
         const double split_min = split_min_;
         if (!(limit > 0) && !(factor > 0)) return false;
@@ -968,7 +974,7 @@ private:
     Adapt adapt_ = Adapt::off;  // set_adapt(); the constructor makes it mass on a moving line
     double refine_mass_ = refine_mass_default, deref_mass_ = derefine_mass_default;
     double steer_ = 0;  // set_steer(); 0: off
-    double split_min_ = 0, merge_max_ = 0, safeguard_ = 0;  // set_mass_bounds(); the constructor sets the defaults on a moving line
+    double split_min_ = 0, merge_max_ = 0, safeguard_ = 0, split_max_ = 0;  // set_mass_bounds(); defaults set by the constructor (moving)
     bool targets_ready_ = false;
     Kokkos::View<double*, Memory> target_;        // per id: the target mass (Adapt::mass)
     Points refine_points_;                        // the new generators' positions, one per wide cell
@@ -981,7 +987,12 @@ private:
             throw std::invalid_argument("FiniteVolume<1>: refinement needs max_volume > 4 min_volume of derefinement");
         if (refine_mass_ > 0 && deref_mass_ > 0 && !(refine_mass_ >= 4 * deref_mass_))
             throw std::invalid_argument("FiniteVolume<1>: refinement needs refine_mass >= 4 derefine_mass");
+        const double split_length = refine_volume_ > 0 ? refine_volume_ : split_max_;
+        if (adapt_ == Adapt::mass && split_length > 0 && merge_max_ > 0 && !(merge_max_ <= 0.5 * split_length))
+            throw std::invalid_argument("FiniteVolume<1>: mass removal needs merge_max <= split_max / 2");
     }
+    // The length above which a cell splits whatever its mass: set_refine's, else (mass) split_max_.
+    double split_length() const { return !length_on() ? 0.0 : refine_volume_ > 0 ? refine_volume_ : mass_on() ? split_max_ : 0.0; }
     bool mass_on() const { return adapt_ == Adapt::mass; }
     bool length_on() const { return adapt_ != Adapt::off; }  // length thresholds: the criterion (length) or a safeguard (mass)
     Kokkos::View<double[5], Memory> ends_{"hydro_ends"};
