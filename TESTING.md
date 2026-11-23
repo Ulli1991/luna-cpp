@@ -119,4 +119,7 @@ after t = 0.32 at N = 4096 and 32768. The moving mesh cannot run the tube (#14, 
 stream, stands in for it; it stalls in stage L at t = 0.81 (N = 4096) and 0.65 (N = 32768), #30. With derefinement
 (`hydro_1d --derefine=f`, cells narrower than f h removed) it reaches t = 4 at both N. Results:
 research_notes/super_tube_v2_2026-11-18.md, research_notes/derefine_1d_2026-11-20.md (`scripts/deref_sweep.py` for the ladder,
-`DEREF=f scripts/stage_l_run.sh` for stage L alone).
+`DEREF=f scripts/stage_l_run.sh` for stage L alone). The README's tube v2 figures: `scripts/lrs_to_runs.py` turns the
+luna-reference-solutions states (LUNA, luna-cpp static) into a runs directory, the moving m0 runs (`hydro_1d super-tube-v2-m0 N --moving
+--derefine=3e-2`) go beside them, then `SUPER2_RUNS=<dir> scripts/make_figures.py super_tube_v2_t01 super_tube_v2_t4 ...` and
+`scripts/super_tube_v2.py figures`.

@@ -1414,7 +1414,8 @@ def fig_super_end(n=SUPER_N):
 
 SUPER2_RUNS = os.environ.get("SUPER2_RUNS", os.path.join(HERE, "..", "build-tube2", "runs"))  # scripts/super_tube_v2_{run,gpu}.sh
 SUPER2_PENDING = {}                  # moving m0 runs to t = 4 still running (job ids by N), when there are any
-SUPER2_STALL = {4096: "#30", 32768: "#30"}   # moving m0 to t = 4 stalled (stage L)
+SUPER2_STALL = {4096: "#30", 32768: "#30"}   # moving m0 to t = 4 without derefinement stalled (stage L)
+SUPER2_DEREF = os.environ.get("SUPER2_DEREF", "3e-2")   # the moving runs' --derefine (research_notes/derefine_1d_2026-11-20.md); "" if none
 
 
 def fig_super_v2(t, views, ylim, n=SUPER_N):
@@ -1449,6 +1450,9 @@ def fig_super_v2(t, views, ylim, n=SUPER_N):
         keep = r[0] >= cut
         runs.append((r[0][keep], r[1][keep], "moving"))
         notes.append(f"moving: the tube without M's stream, $x \\geq {cut:.2f}$")
+        if SUPER2_DEREF:
+            m, e = f"{float(SUPER2_DEREF):.0e}".split("e")
+            notes.append(f"moving: cells below ${m} \\times 10^{{{int(e)}}}\\,h$ removed")
     elif r is not None:
         notes.append(f"moving: stalled at $t = {r[2]['t']:.3g}$ ({SUPER2_STALL.get(n, '')})")
     elif t != "0.1" and n in SUPER2_PENDING:
