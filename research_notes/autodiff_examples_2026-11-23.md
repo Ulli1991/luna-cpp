@@ -69,3 +69,32 @@ tangents but a different kind of work; later), H (needs a network inside the C++
 `step_adjoint(dt, qbar)` expects Q at the start of the step. A rollout's adjoint therefore stores the states of each step
 (256² × 4 doubles = 2 MB; 730 steps ≈ 1.5 GB, on the device or host) or checkpoints and recomputes. dt is fixed per run
 (recorded in the forward and replayed), as in example C; CFL dt's dependence on Q is not differentiated.
+
+## Step 1b: LUNA's own derivative examples (survey; LUNA scripts/examples/autodiff at 60cf841, read-only)
+
+LUNA differentiates its production step with JAX (`luna.autodiff.rollout.build_simulate`: a `lax.scan` of the step under
+`jax.checkpoint`), forward and reverse, through gravity (implicit adjoint of the FMG solve), cooling and radiation. Its examples:
+
+| example | setup | differentiated w.r.t. | optimised | numbers on record |
+|---|---|---|---|---|
+| `luna_emergence`, blast driver (`blast_emergence_run.py`) | 2D, 256², periodic, γ = 5/3, MC, HLLC, FP64, uniform ρ = 1 at rest, 300 fixed steps (dt = 0.25 dx / c_s(e_max = 50)) | the per-cell internal energy e(x, 0) through a sigmoid to [1, 50]: 65 536 parameters | Adam lr 0.2, 200 iterations, loss mean((e(x, T) − target)²), target a rendered word in [1, 4] | figure only (GALLERY §2; 4 GPUs) |
+| `luna_emergence`, turbulence driver | the same box, isothermal (thermostat each step), velocity on a 32² control grid, Mach 3 | 2 × 32² | Adam lr 0.15, 200 iterations, density target | figure only |
+| `ic_inversion` (`ic_inversion_run.py`): jeans, cooling, sedov | 3D, 32³ default (256³ in the gallery, 2 GPUs); Sedov: 50 pc box, outflow, t = 10 kyr, dt differentiated (`autodiff_dt_mode="diff"`) | the log-perturbation δ of the IC density (energy for Sedov) on every cell | Adam, 80 iterations, loss mean((U(T) − U_obs)²) over all fields | gallery 256³: cooling r(k) = 0.5 at k ≈ 97, residual 0.90; gravity r(k) = 1, residual 0.02; an FD check on one voxel |
+| `eta_recovery` (`m82_autodiff_run.py`) | the M82 wind: CC85 injection, cooling, external potential, 3D | (η_M, η_E), in log | Adam, 60 iterations, loss mean((U − U_obs)²) | circular test by design; no number on record |
+| `corrector_training` (`kh_corrector_run.py`) | KH, 32² coarse against 128²/256² reference | CNN weights (1622–15 599) | Adam, 100 iterations | t = 3 density error −70 %, ~10× below coarse |
+| tests and docs | Sedov 32³ forward mode against the analytic exponents (∂lnR/∂lnE = 1/5); AUTODIFF.md cost: grad/forward 5.3–5.4 (128³–256³), JVP/forward 2.8–2.9; MI300A | | | |
+
+**What luna-cpp can match** [I]:
+- **Blast emergence:** yes, 2D static and moving on the regular 256² lattice. Not matched: luna-cpp's 2D limiter is the
+  face-centroid (cell-gradient) one, not LUNA's per-direction MC.
+- **IC inversion, Sedov case:** yes, as pure hydro in 3D static. Not matched: luna-cpp's 3D box is periodic (LUNA's is
+  outflow) and its dt is fixed (LUNA differentiates the CFL dt). The jeans and cooling cases need gravity and cooling, which
+  luna-cpp does not have.
+- **eta recovery:** no. luna-cpp has no source terms, cooling or external gravity. The closest it can do is a source-free
+  analogue: recovering a blast's injected energy (and the ambient density) from the final state, the brief's case (a).
+- **Turbulence emergence (isothermal thermostat) and the corrector (a network inside the step):** not matched.
+
+**What LUNA lacks of our set, added on LUNA branch `autodiff-examples`** (worktree /raven/u/uli/LUNA-worktrees/autodiff-examples):
+- `sod_theta.py`: astronomix's Sod θ;
+- `kh_twin.py`: astronomix's KH twin;
+- the field-level inference (to come).

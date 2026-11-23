@@ -55,7 +55,7 @@ def main(cpp_path, luna_path, out):
     ax.set_xlabel(r"finite-difference step $h$")
     ax.set_ylabel(r"$\|g - g_{\rm FD}\| \,/\, \|g\|$")
     decorate(ax)
-    legend(ax, fontsize=10, loc="lower right")
+    legend(ax, fontsize=10, loc="upper left")
     fig.savefig(f"{out}/sod_theta_fd.png")
     plt.close(fig)
 
@@ -72,9 +72,15 @@ def main(cpp_path, luna_path, out):
         axs[1].plot(j["x"], j["dJdU0"][:, v], ".", color=f"C{v}", ms=3, label="LUNA")
     ch = c["map_checks"]
     xc = c["x"][ch[:, 0].astype(int)]
-    axs[1].plot(xc, ch[:, 3], "kx", ms=8, label="central differences")
+    closer = np.where(np.abs(ch[:, 4] - ch[:, 2]) < np.abs(ch[:, 5] - ch[:, 2]), ch[:, 4], ch[:, 5])
+    axs[1].plot(xc, closer, "kx", ms=8, label="closer one-sided difference")
     axs[1].set_xlabel(r"$x$ (initial)")
     axs[1].set_ylabel("sensitivity per unit length")
+    # The two end cells (outflow walls copy them into the ghosts) are far larger: off the scale, written in.
+    lim = 1.3 * np.max(np.abs(c["dJdU0"][2:-2]))
+    axs[1].set_ylim(-lim, lim)
+    ends = ", ".join(f"{v:.0f}" for v in np.concatenate([c["dJdU0"][0], c["dJdU0"][-1]]))
+    axs[1].text(0.5, 0.04, f"end cells off scale: ({ends})", transform=axs[1].transAxes, ha="center", fontsize=10)
     for a in axs:
         decorate(a)
         legend(a, fontsize=9, ncol=2)
