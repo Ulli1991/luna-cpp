@@ -15,6 +15,7 @@ source /etc/profile.d/modules.sh; module purge; module load gcc/14 cuda/13.0 cma
 nvidia-smi --query-gpu=name,clocks.sm,clocks.applications.graphics,clocks.max.sm,clocks.applications.memory --format=csv
 new="${NEW:?NEW: the worktree with the new pin}"
 old="${OLD:?OLD: the worktree with the old pin}"
+declare -A bin=([new]="${NEW_BUILD:-$new/build-cuda}" [old]="${OLD_BUILD:-$old/build-cuda}")  # build dirs (e.g. on /ptmp)
 p="${OUT:-$new/build-pin-proof}"; mkdir -p "$p"
 nvidia-smi --query-gpu=timestamp,clocks.sm,clocks.mem,utilization.gpu,temperature.gpu,power.draw --format=csv -l 1 > $p/clock-$SLURM_JOB_ID.csv &
 smi=$!
@@ -26,7 +27,7 @@ for side in 128 256; do
         for v in old new; do
             d=${!v}
             echo "-- $v ${side}^3 round $round"
-            $d/build-cuda/hydro_sedov $side jittered --moving --snapshots=1 2>/dev/null | grep -E "^(run|mesh_updates|checksum)"
+            ${bin[$v]}/hydro_sedov $side jittered --moving --snapshots=1 2>/dev/null | grep -E "^(run|mesh_updates|checksum)"
         done
     done
 done
@@ -38,7 +39,7 @@ for round in 1 2 3; do
             for v in old new; do
                 d=${!v}
                 echo "-- $v ${side}^3 ${mesh:-static} round $round"
-                $d/build-cuda/hydro_sedov $side jittered $mesh --steps=40 --snapshots=1 --memory 2>/dev/null | grep -E "$keep|^memory"
+                ${bin[$v]}/hydro_sedov $side jittered $mesh --steps=40 --snapshots=1 --memory 2>/dev/null | grep -E "$keep|^memory"
             done
         done
     done

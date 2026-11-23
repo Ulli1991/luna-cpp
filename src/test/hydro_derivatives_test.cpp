@@ -1304,6 +1304,37 @@ void geometry_test_2d(Check& check, int nx) {
         }
     const double dot = std::abs(lhs - rhs) / magnitude;
     check.expect(dot < 1e-13, "2D geometry: <bars, J dx> = <J^T bars, dx> (" + sci(dot) + ")");
+    // The library's (voronoi::GeometryDerivative, voronoi-cpp #63) against this reference: the same tangent and transpose.
+    {
+        const hydro::MeshDerivative<Mesh> library(mesh);
+        typename GD::Points lc("lc", n), lA("lA", faces), lxf("lxf", faces), lxb("lxb", n);
+        typename GD::Scalars lV("lV", n);
+        library.tangent(dx, lV, lc, lA, lxf);
+        library.adjoint(Vbar, cbar, Abar, xfbar, lxb);
+        const auto hV = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, lV);
+        const auto hc = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, lc);
+        const auto hA = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, lA);
+        const auto hf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, lxf);
+        const auto hl = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, lxb);
+        double t = 0, tscale = 0, a = 0, ascale = 0;
+        for (int i = 0; i < n; ++i) {
+            t = std::max(t, std::abs(hV(i) - tV(i)));
+            tscale = std::max(tscale, std::abs(tV(i)));
+            for (int c = 0; c < 2; ++c) {
+                t = std::max(t, std::abs(hc(i, c) - tc(i, c)));
+                tscale = std::max(tscale, std::abs(tc(i, c)));
+                a = std::max(a, std::abs(hl(i, c) - hxb(i, c)));
+                ascale = std::max(ascale, std::abs(hxb(i, c)));
+            }
+        }
+        for (int f = 0; f < faces; ++f)
+            for (int c = 0; c < 2; ++c) {
+                t = std::max({t, std::abs(hA(f, c) - tA(f, c)), std::abs(hf(f, c) - txf(f, c))});
+                tscale = std::max({tscale, std::abs(tA(f, c)), std::abs(txf(f, c))});
+            }
+        check.expect(t < 1e-12 * tscale && a < 1e-12 * ascale, "2D geometry: the library's tangent and adjoint equal the reference's (" +
+                                                                    sci(t / tscale) + ", " + sci(a / ascale) + ")");
+    }
     std::printf("geometry2d n %d faces %d: forward %.2e, dot %.2e\n", n, faces, forward, dot);
 }
 
@@ -1407,7 +1438,7 @@ void moving_test_2d(Check& check, const std::string& name, int nx, int steps, do
     Kokkos::deep_copy(dq, dq0);
     Kokkos::deep_copy(dx, dx0);
     for (int s = 0; s < steps; ++s) {
-        const reference::Geometry2D<Mesh, Exec::memory_space> ref(mesh);
+        const hydro::MeshDerivative<Mesh> ref(mesh);  // the library's (voronoi-cpp #63); the reference agrees (geometry_test_2d)
         fv.step_moving_tangent(dts[s], dq, dx, ref, steps_fixed);
     }
     const HostCells2 q_end = read_q();
@@ -1483,7 +1514,7 @@ void moving_test_2d(Check& check, const std::string& name, int nx, int steps, do
     Kokkos::deep_copy(xbar, xbar0);
     for (int s = steps - 1; s >= 0; --s) {
         load(qs[s], xs[s]);
-        const reference::Geometry2D<Mesh, Exec::memory_space> ref(mesh);
+        const hydro::MeshDerivative<Mesh> ref(mesh);
         fv.step_moving_adjoint(dts[s], qbar, xbar, ref, steps_fixed);
     }
     HostCells2 aq("aq", n);

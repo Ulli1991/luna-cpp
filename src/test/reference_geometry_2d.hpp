@@ -3,7 +3,7 @@
 // Test-only: the derivatives of a 2D Voronoi mesh's geometry in the generator positions at fixed topology (hydro::GeometryDerivative),
 // on the host from the mesh's triangles, until voronoi-cpp provides them. Used by: hydro_derivatives_test.
 
-#include "geometry_derivative.hpp"
+#include "mesh_derivative.hpp"
 
 #include <Kokkos_Core.hpp>
 

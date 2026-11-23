@@ -1,5 +1,7 @@
 #pragma once
 
+#include "geometry_derivative.hpp"  // voronoi-cpp's
+
 #include <Kokkos_Core.hpp>
 
 namespace hydro {
@@ -24,6 +26,23 @@ struct GeometryDerivative {
     virtual void tangent(const Points& dx, const Scalars& dV, const Points& dc, const Points& dA, const Points& dxf) const = 0;
     // The transpose: from the bars of V, c (per cell), A, x_f (per face), adds to xbar (per cell).
     virtual void adjoint(const Scalars& Vbar, const Points& cbar, const Points& Abar, const Points& xfbar, const Points& xbar) const = 0;
+};
+
+// The mesh library's geometry derivative (voronoi::GeometryDerivative, voronoi-cpp #63) behind this interface. It reads the mesh as
+// it is at each call (after update() and update_cells()), as the moving step needs before and after its move.
+template <class Mesh>
+struct MeshDerivative : GeometryDerivative<Mesh::dimensions, typename Mesh::Memory> {
+    using Base = GeometryDerivative<Mesh::dimensions, typename Mesh::Memory>;
+    using typename Base::Points;
+    using typename Base::Scalars;
+    voronoi::GeometryDerivative<Mesh> library;
+    explicit MeshDerivative(const Mesh& mesh) : library(mesh) {}
+    void tangent(const Points& dx, const Scalars& dV, const Points& dc, const Points& dA, const Points& dxf) const override {
+        library.tangent(dx, dV, dc, dA, dxf);
+    }
+    void adjoint(const Scalars& Vbar, const Points& cbar, const Points& Abar, const Points& xfbar, const Points& xbar) const override {
+        library.adjoint(Vbar, cbar, Abar, xfbar, xbar);
+    }
 };
 
 }  // namespace hydro
