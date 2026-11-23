@@ -80,6 +80,34 @@ for side in $SIDES; do
         fi
     done
 done
+# NSYS_SIDES="256 ...": the sum of kernel times per step (nsys, 40 steps; the set-up's kernels included, a few per cent of one step),
+# LUNA's and every build's, both forms, minmod (NSYS_LIMITERS), beside the whole-step times above.
+if [[ -n "${NSYS_SIDES:-}" ]]; then
+    for side in $NSYS_SIDES; do
+        for lim in ${NSYS_LIMITERS:-minmod}; do
+            l=$([[ $lim == mc ]] && echo 1 || echo 0)
+            base="$OUT/nsys_luna_${side}_$lim-$job"
+            (module purge; module load gcc/13 cuda/12 nsight_systems/2026
+             cd "$OUT" && PYTHONDONTWRITEBYTECODE=1 nsys profile -t cuda --cuda-graph-trace=node -o "$base" -f true "$py" -u "$here/luna_grid_time.py" "$side" "$l" steps=40 warm=10 \
+                >"$base.log" 2>&1
+             nsys stats -r cuda_gpu_kern_sum -f csv -o "$base" "$base.nsys-rep" >/dev/null 2>&1)
+            ic=$(sed -n 's/^luna_ic: rho=\([^ ]*\) p_bg=[^ ]* E_bg=\([^ ]*\) E_blast=\([^ ]*\).*/\1,\2,\3/p' "$base.log")
+            echo "nsys LUNA ${side}^3 $lim: $(grep luna_run "$base.log")"
+            (module purge; module load gcc/13; "$py" "$here/nsys_kernel_sum.py" "${base}_cuda_gpu_kern_sum.csv" 40 $((side * side * side)) "LUNA ${side}^3 $lim")
+            for b in $BINS; do
+                for kernel in cuda kokkos; do
+                    base="$OUT/nsys_${b%%=*}_${kernel}_${side}_$lim-$job"
+                    (module purge; module load gcc/14 cuda/13.0 hdf5-serial nsight_systems/2026
+                     nsys profile -t cuda --cuda-graph-trace=node -o "$base" -f true "$(bdir "$b")/hydro_sedov" "$side" grid --grid --kernel=$kernel --limiter=$lim --ic="$ic" \
+                        --steps=40 --warm=10 $(bflags "$b") >"$base.log" 2>&1
+                     nsys stats -r cuda_gpu_kern_sum -f csv -o "$base" "$base.nsys-rep" >/dev/null 2>&1)
+                    (module purge; module load gcc/13; "$py" "$here/nsys_kernel_sum.py" "${base}_cuda_gpu_kern_sum.csv" 40 $((side * side * side)) \
+                        "${b%%=*} $kernel ${side}^3 $lim")
+                done
+            done
+        done
+    done
+fi
 if [[ -n "${NCU:-}" ]]; then
     M=gpu__time_duration.sum,dram__bytes_read.sum,dram__bytes_write.sum,launch__registers_per_thread,launch__block_size,launch__grid_size
     M+=,sm__warps_active.avg.pct_of_peak_sustained_active,sm__maximum_warps_per_active_cycle_pct,dram__throughput.avg.pct_of_peak_sustained_elapsed

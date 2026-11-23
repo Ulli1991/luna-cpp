@@ -158,7 +158,7 @@ public:
                     "grid_predictor", Kokkos::RangePolicy<Exec>(exec_, 0, half_cells_), KOKKOS_LAMBDA(long c) {
                         const int k = static_cast<int>(c % H.m[2]), j = static_cast<int>((c / H.m[2]) % H.m[1]);
                         const int i = static_cast<int>(c / (static_cast<long>(H.m[2]) * H.m[1]));
-                        predictor_cell<D>(W, H, i - 1, D > 1 ? j - 1 : j, D > 2 ? k - 1 : k, p, h);
+                        predictor_any<D>(W, H, i - 1, D > 1 ? j - 1 : j, D > 2 ? k - 1 : k, p, h);
                     });
                 const StepTeam<true> f{W, H, a, p_, dt, {tile_[0], tile_[1], tile_[2]}, {tiles_[0], tiles_[1], tiles_[2]}};
                 Kokkos::parallel_reduce("grid_faces", teams, f, Kokkos::Min<double, Memory>(dt_));

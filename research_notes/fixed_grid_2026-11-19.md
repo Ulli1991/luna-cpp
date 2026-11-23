@@ -412,6 +412,52 @@ ncu at 256³ minmod, faces kernel:
 
 The cap spills, and its extra warps do not pay for that at 256³ and up. It is off, and the macro stays for sweeps. Our whole step now takes 0.11 + 0.73 = 0.84 ns/cell of kernel time, against LUNA's 0.86. LUNA's faces kernel is still busier (0.50 ns, 78 % FP64 pipe) but does 1390 FP64 instructions per cell against our 928, and LUNA carries 0.20 ns/cell of padding and update that we do not have.
 
+**Why our faces kernel is slower than LUNA's** (job 32896266, 2026-11-23). ncu's full set ran on one launch of each kernel in the same job on ravg1002 at 1300 MHz: ours is lever 4's `step_kernel<3, HLLC, split>`, LUNA's is Pallas `kernel__1`; Sedov 256³ minmod, from the same initial bits. Reports are in `/ptmp/uli/luna-cpp-fixed-grid/faces-ncu/`.
+
+| | LUNA faces | ours, faces |
+|---|---|---|
+| time (ms, 16.8 M cells) | 8.11 (0.48 ns/cell) | 12.13 (0.72 ns/cell) |
+| thread instructions per cell | 4271 | 4090 |
+| of which FP64 (DFMA + DMUL + DADD) | 1396 (354 + 564 + 478; no contraction) | 934 (501 + 230 + 203) |
+| selects (FSEL + SEL) | 834 | 465 |
+| branches and convergence (BRA + BSSY + BSYNC) | 204 | 660 |
+| integer compares (ISETP) | 55 | 302 |
+| global loads (LDG) per cell, sectors per request | 100, 8.6 | 105, 8.4 |
+| shared memory | none (0 B static or dynamic: Pallas stages nothing; its tile ops load through L1) | 8 KB static (our block minimum of dt); 7 LDS/STS per cell |
+| registers, blocks per SM, warps per SM | 128, 4, 16 (25 %) | 156, 3, 12 (18.75 %) |
+| eligible warps per scheduler, issue slots busy, IPC | 0.90, 49 %, 1.96 | 0.43, 31 %, 1.26 |
+| FP64 pipe | 81 % | 37 % |
+| warp cycles per issued instruction | 8.06 | 9.46 |
+| L1 hit, L2 hit, DRAM throughput | 38 %, 79 %, 17.6 % | 33 %, 64 %, 27 % |
+| branch efficiency, divergent branches (avg.) | 100 %, 1.75 | 99.45 %, 2134 |
+
+Stall cycles per issued instruction (ncu `smsp__average_warps_issue_stalled_*_per_issue_active`):
+
+| stall | LUNA | ours |
+|---|---|---|
+| long scoreboard (waiting on a global load) | 0.21 | **2.89** |
+| wait (fixed-latency dependency) | 1.78 | 2.27 |
+| branch resolving | 0.23 | 0.63 |
+| barrier | 0 | 0.14 |
+| math pipe throttle (the FP64 pipe is full: a good stall) | **2.01** | 0.65 |
+| no instruction | 1.81 | 1.32 |
+| not selected (another warp issued) | 0.84 | 0.36 |
+| selected (issuing) | 1.00 | 1.00 |
+
+**What explains the 0.24 ns/cell.**
+- The two kernels issue the same number of instructions (4090 against 4271 per cell), so the gap is the issue rate. Ours issues every 9.46 / 3 = 3.15 cycles per scheduler, LUNA every 8.06 / 4 = 2.02. That predicts 1.51× and 1.50× is measured.
+- **Occupancy (about 0.18 of the 0.24 ns).** Our 156 registers leave 3 warps per scheduler, LUNA's 128 leave 4. At our own cycles per instruction, 4 warps would give 0.72 × 3/4 = 0.54 ns.
+- **Exposed load latency (most of the rest, about 0.06 ns).** Our warps wait 2.89 cycles per instruction on global loads, against LUNA's 0.21. The loads are the same count, size and coalescing (105 against 100 per cell, 8.4 sectors per request). Triton issues a tile's loads together ahead of their use. Ours sit inside the per-axis loop, between that axis's flux computations, so few are in flight when needed. LUNA's warps instead stall on a full FP64 pipe (math throttle 2.01): it is compute-bound, we are latency-bound.
+- **Control flow (inside the above).** We execute about 460 more branch and convergence instructions and 250 more integer compares per cell than LUNA. Of these, 176 BSSY/BSYNC pairs come from divergent branches (2134 divergent branches against LUNA's 1.75). LUNA computes every branch and selects (834 selects per cell), and spends its extra issue slots on FP64: 1396 FP64 instructions against our 934, uncontracted.
+- **Not the cause.** Memory traffic is not it: L2 serves both, our DRAM 27 % is no limit. Shared memory is not it either: LUNA uses none.
+
+**Levers this points to**, in order:
+1. **Fewer registers, to 128 or less without spills:** 16 warps. The launch-bounds cap spilled (lever 4c). The registers must come from the code: branch-free selects shorten live ranges, and the faces kernel need not hold a whole State per neighbour.
+2. **Loads issued early:** all of a cell's W and half-step loads at the start of the faces kernel, as Triton does. This must be weighed against registers. `__ldg` / `const __restrict__` let the compiler move them.
+3. **Branch-free selects (lever 3):** removes about 700 control instructions per cell and the branch-resolving stall (0.63 cycles per issue).
+4. **The interior fast path (lever 2):** removes integer index work, about 300 ISETP per cell.
+
+
 ## 10. Speed LUNA leaves unused
 
 LUNA's own profile, CODE_NOTES 2026-11-04 (Sedov 256³, FP64, minmod, HLLC, split Pallas path, at ncu's base clock of 1095 MHz), and what each item would be worth:

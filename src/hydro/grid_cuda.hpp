@@ -46,7 +46,7 @@ __global__ void predictor_kernel(Field<D> W, HalfField<D> H, Params p, double h)
     if (c >= H.cells) return;
     const int k = static_cast<int>(c % H.m[2]), j = static_cast<int>((c / H.m[2]) % H.m[1]);
     const int i = static_cast<int>(c / (static_cast<long>(H.m[2]) * H.m[1]));
-    predictor_cell<D>(W, H, i - 1, D > 1 ? j - 1 : j, D > 2 ? k - 1 : k, p, h);
+    predictor_any<D>(W, H, i - 1, D > 1 ? j - 1 : j, D > 2 ? k - 1 : k, p, h);
 }
 
 // Launches the step on `stream`: tile cells per block, tiles per axis; with split, first the predictor pass (256 threads a block).

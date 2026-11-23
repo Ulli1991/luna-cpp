@@ -292,6 +292,27 @@ struct Field {
         }
         return w;
     }
+    // W at (i, j, k); Ghosts = false: the caller knows the cell is on the grid, so no ghost map (the interior fast path).
+    template <bool Ghosts>
+    KOKKOS_INLINE_FUNCTION State<D> load(int i, int j, int k) const {
+        if constexpr (Ghosts) {
+            return (*this)(i, j, k);
+        } else {
+            const long at = (static_cast<long>(i) * n[1] + j) * n[2] + k;
+            State<D> w;
+            LUNA_GRID_UNROLL
+            for (int v = 0; v < D + 2; ++v) w[v] = W[v * cells + at];
+            return w;
+        }
+    }
+    // True when every cell within `reach` of (i, j, k) along each axis is on the grid. Used by: cell_step(), the predictor kernels.
+    KOKKOS_INLINE_FUNCTION bool inside(int i, int j, int k, int reach) const {
+        const int c[3] = {i, j, k};
+        bool in = true;
+        LUNA_GRID_UNROLL
+        for (int a = 0; a < D; ++a) in = in && c[a] >= reach && c[a] < n[a] - reach;
+        return in;
+    }
 };
 
 // -div F of cell (i, j, k) (Pallas _call, the fused kernel: the cell's predictor and its 2 D neighbours', its 2 D faces; dU summed
@@ -379,17 +400,17 @@ struct HalfField {
 
 // Pass A of the split step: the half-step state of cell (i, j, k), i, j, k from -1 to n on the grid's axes (the cells and one ghost
 // ring), from all of its slopes; the same predict() as divergence(). h = 0.5 dt. Used by: the split step's predictor kernels.
-template <int D>
+template <int D, bool Ghosts = true>
 KOKKOS_INLINE_FUNCTION void predictor_cell(const Field<D>& W, const HalfField<D>& out, int i, int j, int k, const Params& p, double h) {
     const int o[3] = {i, j, k};
-    const State<D> W0 = W(i, j, k);
+    const State<D> W0 = W.template load<Ghosts>(i, j, k);
     State<D> slope[D];
     LUNA_GRID_UNROLL
     for (int d = 0; d < D; ++d) {
         int lo[3] = {o[0], o[1], o[2]}, hi[3] = {o[0], o[1], o[2]};
         lo[d] -= 1;
         hi[d] += 1;
-        const State<D> Wl = W(lo[0], lo[1], lo[2]), Wh = W(hi[0], hi[1], hi[2]);
+        const State<D> Wl = W.template load<Ghosts>(lo[0], lo[1], lo[2]), Wh = W.template load<Ghosts>(hi[0], hi[1], hi[2]);
         LUNA_GRID_UNROLL
         for (int v = 0; v < D + 2; ++v) slope[d][v] = limit(W0[v] - Wl[v], Wh[v] - W0[v], p.limiter);
     }
@@ -399,22 +420,40 @@ KOKKOS_INLINE_FUNCTION void predictor_cell(const Field<D>& W, const HalfField<D>
     for (int v = 0; v < D + 2; ++v) out.H[v * out.cells + at] = half[v];
 }
 
+// The interior fast path (lever 2, measured and dropped 2026-11-23: 2.5x slower, both code paths inlined into each kernel): a cell whose
+// whole stencil lies on the grid loads W without the ghost map; the same bits. Off; -DLUNA_GRID_FAST_INTERIOR turns it on.
+// Used by: predictor_any(), cell_step().
+#if !defined(LUNA_GRID_FAST_INTERIOR)
+inline constexpr bool interior_fast_path = false;
+#else
+inline constexpr bool interior_fast_path = true;
+#endif
+
+// predictor_cell() with the interior fast path. Used by: the predictor kernels.
+template <int D>
+KOKKOS_INLINE_FUNCTION void predictor_any(const Field<D>& W, const HalfField<D>& out, int i, int j, int k, const Params& p, double h) {
+    if (interior_fast_path && W.inside(i, j, k, 1))
+        predictor_cell<D, false>(W, out, i, j, k, p, h);
+    else
+        predictor_cell<D, true>(W, out, i, j, k, p, h);
+}
+
 // Pass B of the split step (Pallas _faces_call): -div F of cell (i, j, k) from the stored half-step states and the slopes along each
 // axis, recomputed (each cell's own and its two neighbours'); the same faces, sums and order as divergence(). Used by: cell_step().
-template <int D, class Riemann>
+template <int D, class Riemann, bool Ghosts = true>
 KOKKOS_INLINE_FUNCTION State<D> divergence_split(const Field<D>& W, const HalfField<D>& H, int i, int j, int k, const Params& p) {
     const int o[3] = {i, j, k};
     auto at = [&](int d, int s) {  // W at o + s e_d
         int c[3] = {o[0], o[1], o[2]};
         c[d] += s;
-        return W(c[0], c[1], c[2]);
+        return W.template load<Ghosts>(c[0], c[1], c[2]);
     };
     auto half = [&](int d, int s) {  // the half-step state at o + s e_d
         int c[3] = {o[0], o[1], o[2]};
         c[d] += s;
         return H(c[0], c[1], c[2]);
     };
-    const State<D> W0 = W(i, j, k), H0 = H(i, j, k);
+    const State<D> W0 = W.template load<Ghosts>(i, j, k), H0 = H(i, j, k);
     State<D> dU;
     LUNA_GRID_UNROLL
     for (int d = 0; d < D; ++d) {
@@ -453,7 +492,8 @@ KOKKOS_INLINE_FUNCTION double cell_step(const Field<D>& W, const Arrays& a, int 
     const long at = (static_cast<long>(i) * W.n[1] + j) * W.n[2] + k;
     State<D> dU;
     if constexpr (Split)
-        dU = divergence_split<D, Riemann>(W, H, i, j, k, p);
+        dU = interior_fast_path && W.inside(i, j, k, 2) ? divergence_split<D, Riemann, false>(W, H, i, j, k, p)
+                                                        : divergence_split<D, Riemann, true>(W, H, i, j, k, p);
     else
         dU = divergence<D, Riemann>(W, i, j, k, p, 0.5 * dt);
     State<D> U;
