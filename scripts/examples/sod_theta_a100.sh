@@ -25,9 +25,11 @@ cmake -S . -B $b -DCMAKE_BUILD_TYPE=Release -DKokkos_DIR=/u/uli/kokkos-cuda/lib6
 cmake --build $b --parallel 16 --target luna_sod_theta > $b.build.log 2>&1; echo "build exit $?"
 grep -E "warning|error" $b.build.log | grep -v "extern/" | head -40
 [[ -x $b/sod_theta ]] || exit 1
+cmake --build $b --parallel 16 --target luna_rollout > $b.rollout.log 2>&1; echo "rollout build exit $?"; grep -E "error" -A3 $b.rollout.log | head -40
 export PYTHONDONTWRITEBYTECODE=1
 [[ ${SKIP_CPP:-0} == 1 ]] || $py -u $repo/scripts/examples/sod_theta.py $b/sod_theta $out/sod_theta_cpp_$lim.npz --limiter=$lim
 [[ ${SKIP_CPP:-0} == 1 ]] || $b/sod_theta --limiter=$lim --cost=200,16384,131072,1048576,8388608
 case $lim in minmod) lnum=0 ;; mc) lnum=1 ;; *) lnum=2 ;; esac
 cd $out && git -C $luna log --oneline -1
 PYTHONPATH=$luna:$luna/src XLA_PYTHON_CLIENT_PREALLOCATE=false $py -u -m scripts.examples.autodiff.sod_theta limiter=$lnum out=$out/sod_theta_luna_$lim.npz
+PYTHONPATH=$luna:$luna/src XLA_PYTHON_CLIENT_PREALLOCATE=false $py -u -m scripts.examples.autodiff.sod_theta limiter=$lnum out=$out/sod_theta_luna_$lim.npz cost_sizes=200,16384,131072,1048576,8388608

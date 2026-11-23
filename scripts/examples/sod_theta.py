@@ -141,18 +141,22 @@ def main(argv):
     r.update(x=rows[:, 0], rho=rows[:, 1], u=rows[:, 2], P=rows[:, 3], dJdU0=rows[:, 4:7])
     n = rows.shape[0]
     dx = 1.0 / n
+    # Central and one-sided differences (h = 1e-6, per unit length as the map). The Sod state is at rest outside the fan: u = 0 puts
+    # HLLC's contact at S* = 0, a switch, and minmod's flat slopes are kinks, so a single cell's perturbation is one-sided there.
     checks = []
-    for i in (20, 60, 99, 100, 140, 180):
+    for i in (0, 20, 60, 99, 100, 140, 180, 199):
         for v in range(3):
-            h = 1e-5
+            h = 1e-6
             Jp = float(tube.ask(f"fcell {i} {v} {h} " + tube.th(THETA_SOD))[1])
             Jm = float(tube.ask(f"fcell {i} {v} {-h} " + tube.th(THETA_SOD))[1])
-            fd = (Jp - Jm) / (2 * h) / dx  # per unit length, as the map
-            checks.append((i, v, rows[i, 4 + v], fd))
+            checks.append((i, v, rows[i, 4 + v], (Jp - Jm) / (2 * h) / dx, (Jp - J) / h / dx, (J - Jm) / h / dx))
     checks = np.array(checks)
     r["map_checks"] = checks
-    err = np.abs(checks[:, 2] - checks[:, 3]) / np.max(np.abs(rows[:, 4:7]))
-    print(f"map against central differences at {len(checks)} entries: largest {err.max():.2e} of the map's largest")
+    scale = np.max(np.abs(rows[:, 4:7]))
+    central = np.abs(checks[:, 2] - checks[:, 3]) / scale
+    closer = np.minimum(np.abs(checks[:, 2] - checks[:, 4]), np.abs(checks[:, 2] - checks[:, 5])) / scale
+    print(f"map against differences at {len(checks)} entries, of the map's largest: central {central.max():.2e}, closer one-sided "
+          f"{closer.max():.2e}")
     # 4. the inverse problem
     tube.ask("target " + tube.th(THETA_SOD))
 
