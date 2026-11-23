@@ -14,6 +14,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 // Solver stage (D = 2, 3): driver calls time_step() then step(); this class owns Q and turns the voronoi::Mesh<D> into updated Q.
 // The state is the extensive Q per cell; the mesh (static or moving) is the only thing taken from voronoi-cpp. Design: docs/design.md.
@@ -992,6 +993,7 @@ public:
         mesh_->update_cells();
         phase_end(timings, &Timings::cells);
         refresh();
+        ranges_valid_ = false;  // new faces and lists (apply()'s chunked schedule)
     }
 
     // The mesh renumbered its cells (voronoi::Layout): every per-cell array that outlives the update follows. Used by: move().
@@ -1299,41 +1301,99 @@ public:
         // The magnitudes the next sweep reads: from a moving step's second pass, or once on a static mesh.
         const bool keep = cache_magnitudes_ && (pass == 1 || (motion_ == Motion::static_mesh && !magnitudes_valid_));
         const auto mag = magnitudes_;
-        Kokkos::parallel_reduce(
-            "hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_),
-            KOKKOS_LAMBDA(int f, long long& count) {
-                int fallbacks = 0;
-                const State value = flux(f, fallbacks, fallbacks);
-                count += fallbacks;
-                for (int v = 0; v < V; ++v) F(f, v) = static_cast<FluxStore>(value[v]);
-                if (keep) {
-                    const Vec a = geo.area_of(f);
-                    mag(f) = Kokkos::sqrt(dot(a, a));
-                }
-            },
-            Kokkos::subview(fallback_counts_, pass));
-        phase_end(timings, &Timings::fluxes);
-        Kokkos::parallel_for(
-            "hydro::update", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
-                State sum{};
-                for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                    const int f = geo.face_at(k);
-                    const double sign = geo.owned_at(k, f, i) ? 1.0 : -1.0;
-                    for (int v = 0; v < V; ++v) sum[v] += sign * static_cast<double>(F(f, v));
-                }
-                State next;
-                for (int v = 0; v < V; ++v) q(i, v) = next[v] = q(i, v) - dt * sum[v];
-                if (next_prims) {
-                    const double inv = 1.0 / geo.volume(i);
-                    const State W = primitive(make_state<D>([&](int v) { return next[v] * inv; }), gas);
-                    for (int v = 0; v < V; ++v) prim(i, v) = W[v];
-                    prim(i, V) = sound_speed(W, gas);
-                    prim(i, V + 1) = radius(geo.volume(i));
-                }
-            });
+        // One face's flux row (and |area| for the next sweep), and one cell's update in list order: the same two bodies
+        // for the whole-mesh kernels and for the chunked schedule below, so both compile the same arithmetic.
+        const auto flux_body = KOKKOS_LAMBDA(int f, long long& count) {
+            int fallbacks = 0;
+            const State value = flux(f, fallbacks, fallbacks);
+            count += fallbacks;
+            for (int v = 0; v < V; ++v) F(f, v) = static_cast<FluxStore>(value[v]);
+            if (keep) {
+                const Vec a = geo.area_of(f);
+                mag(f) = Kokkos::sqrt(dot(a, a));
+            }
+        };
+        const auto update_body = KOKKOS_LAMBDA(int i) {
+            State sum{};
+            for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
+                const int f = geo.face_at(k);
+                const double sign = geo.owned_at(k, f, i) ? 1.0 : -1.0;
+                for (int v = 0; v < V; ++v) sum[v] += sign * static_cast<double>(F(f, v));
+            }
+            State next;
+            for (int v = 0; v < V; ++v) q(i, v) = next[v] = q(i, v) - dt * sum[v];
+            if (next_prims) {
+                const double inv = 1.0 / geo.volume(i);
+                const State W = primitive(make_state<D>([&](int v) { return next[v] * inv; }), gas);
+                for (int v = 0; v < V; ++v) prim(i, v) = W[v];
+                prim(i, V) = sound_speed(W, gas);
+                prim(i, V + 1) = radius(geo.volume(i));
+            }
+        };
+        if (chunk_shift_ > 0) {
+            // Chunked (LUNA_UPDATE_CHUNK): the flux kernel over face chunk k, then the update kernel over the cell ranges
+            // whose highest face lies in chunk k, while their rows sit in L2. Two kernels as above, each at its own
+            // occupancy, ordered by the stream; every cell is updated after all its faces, in list order: the same bits.
+            if (!ranges_valid_) build_ranges();
+            const int chunks = static_cast<int>(range_schedule_.size());
+            const auto counts = chunk_counts_;
+            for (int c = 0; c < chunks; ++c) {
+                const int first = c << chunk_shift_, last = std::min(faces_, (c + 1) << chunk_shift_);
+                Kokkos::parallel_reduce("hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, first, last), flux_body,
+                                        Kokkos::subview(counts, c));
+                for (const auto& [a, b] : range_schedule_[c])
+                    Kokkos::parallel_for("hydro::update", Kokkos::RangePolicy<ExecSpace>(exec_, a, b), update_body);
+            }
+            Kokkos::parallel_reduce(
+                "hydro::chunk_counts", Kokkos::RangePolicy<ExecSpace>(exec_, 0, chunks),
+                KOKKOS_LAMBDA(int c, long long& sum) { sum += counts(c); }, Kokkos::subview(fallback_counts_, pass));
+            phase_end(timings, &Timings::fluxes);  // fluxes and update together
+        } else {
+            Kokkos::parallel_reduce("hydro::fluxes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), flux_body,
+                                    Kokkos::subview(fallback_counts_, pass));
+            phase_end(timings, &Timings::fluxes);
+            Kokkos::parallel_for("hydro::update", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), update_body);
+        }
         if (keep) magnitudes_valid_ = true;
         prims_ready_ = next_prims;
         phase_end(timings, &Timings::update);
+    }
+
+    // The chunked schedule of apply() for the current mesh (LUNA_UPDATE_CHUNK = log2 of the faces a chunk): as many cell
+    // ranges as face chunks, each scheduled after the chunk holding the highest face of its cells (a team's maximum, no
+    // atomics). Adjacent ranges of one chunk are merged into one launch. Once per mesh. Used by: apply().
+    void build_ranges() {
+        const int shift = chunk_shift_;
+        const int chunks = std::max(1, (faces_ + (1 << shift) - 1) >> shift);
+        const int per = (n_ + chunks - 1) / chunks, n = n_;
+        Kokkos::View<int*, Memory> top(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_range_top")), chunks);
+        const Geometry geo = geometry_;
+        using Team = Kokkos::TeamPolicy<ExecSpace>;
+        Kokkos::parallel_for(
+            "hydro::range_top", Team(exec_, chunks, Kokkos::AUTO), KOKKOS_LAMBDA(const typename Team::member_type& m) {
+                const int r = m.league_rank(), a = r * per, b = Kokkos::min(n, a + per);
+                int hi = 0;
+                Kokkos::parallel_reduce(
+                    Kokkos::TeamThreadRange(m, a, b),
+                    [&](int i, int& h) {
+                        for (int k = geo.start(i); k < geo.start(i + 1); ++k) h = Kokkos::max(h, geo.face_at(k) >> shift);
+                    },
+                    Kokkos::Max<int>(hi));
+                Kokkos::single(Kokkos::PerTeam(m), [&]() { top(r) = hi; });
+            });
+        const auto host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, top);
+        range_schedule_.assign(chunks, {});
+        for (int r = 0; r < chunks; ++r) {
+            const int a = r * per, b = std::min(n, a + per);
+            if (a >= b) continue;
+            auto& list = range_schedule_[std::min(std::max(host(r), 0), chunks - 1)];
+            if (!list.empty() && list.back().second == a)
+                list.back().second = b;
+            else
+                list.emplace_back(a, b);
+        }
+        if (static_cast<int>(chunk_counts_.extent(0)) < chunks) chunk_counts_ = Kokkos::View<long long*, Memory>("hydro_chunk_counts", chunks);
+        ranges_valid_ = true;
     }
 
     // Derivatives of a step (docs/derivatives.md): a static mesh, order 1, the per-face loop, double throughout (Precision<>), dt fixed.
@@ -1594,6 +1654,11 @@ private:
     Magnitudes magnitudes_;
     bool magnitudes_valid_ = false;
     bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr;
+    // apply()'s chunked schedule (LUNA_UPDATE_CHUNK = log2 faces a chunk; 0: off) and its cell ranges per face chunk.
+    int chunk_shift_ = std::getenv("LUNA_UPDATE_CHUNK") ? std::atoi(std::getenv("LUNA_UPDATE_CHUNK")) : 0;
+    bool ranges_valid_ = false;
+    std::vector<std::vector<std::pair<int, int>>> range_schedule_;
+    Kokkos::View<long long*, Memory> chunk_counts_;
     bool dt_trace_ = std::getenv("LUNA_DT_TRACE") != nullptr;  // trace_step(): the limiting terms of each time step (diagnostic)
     long long traced_steps_ = 0;
     // Fallbacks of the two flux passes of the last step (one pass: the first), read back by fallbacks() once a step.
