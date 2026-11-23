@@ -266,6 +266,16 @@ KOKKOS_INLINE_FUNCTION State<D> face_flux(const State<D>& halfL, const State<D>&
     return out;
 }
 
+// A load of data no thread writes during the kernel (W, the half-step states): through the read-only data cache on the device
+// (__ldg, lever 7a: measured -0.8 to +1.6 %, so off; -DLUNA_GRID_LDG turns it on). Used by: Field, HalfField.
+KOKKOS_INLINE_FUNCTION double read_only(const double* x) {
+#if defined(__CUDA_ARCH__) && defined(LUNA_GRID_LDG)
+    return __ldg(x);
+#else
+    return *x;
+#endif
+}
+
 // Ghost index on an axis of n cells (c in [-2, n + 1]) and what it does to the axis's velocity: 0 nothing, 1 negate (reflective),
 // 2 min(v, 0) (diode, low side), 3 max(v, 0) (diode, high side). Used by: Field::operator().
 KOKKOS_INLINE_FUNCTION int ghost(int c, int n, Boundary b, int& velocity) {
@@ -320,7 +330,7 @@ struct Field {
         const long at = (static_cast<long>(m[0]) * n[1] + m[1]) * n[2] + m[2];
         State<D> w;
         LUNA_GRID_UNROLL
-        for (int v = 0; v < D + 2; ++v) w[v] = W[v * cells + at];
+        for (int v = 0; v < D + 2; ++v) w[v] = read_only(W + v * cells + at);
         LUNA_GRID_UNROLL
         for (int a = 0; a < D; ++a) {
             double& u = w[1 + a];
@@ -343,7 +353,7 @@ struct Field {
             const long at = (static_cast<long>(i) * n[1] + j) * n[2] + k;
             State<D> w;
             LUNA_GRID_UNROLL
-            for (int v = 0; v < D + 2; ++v) w[v] = W[v * cells + at];
+            for (int v = 0; v < D + 2; ++v) w[v] = read_only(W + v * cells + at);
             return w;
         }
     }
@@ -435,7 +445,7 @@ struct HalfField {
         const long at = index(i, j, k);
         State<D> h;
         LUNA_GRID_UNROLL
-        for (int v = 0; v < D + 2; ++v) h[v] = H[v * cells + at];
+        for (int v = 0; v < D + 2; ++v) h[v] = read_only(H + v * cells + at);
         return h;
     }
 };
