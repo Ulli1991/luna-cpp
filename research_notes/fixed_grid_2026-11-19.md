@@ -487,3 +487,26 @@ LUNA's kernels per step (nsys, CUDA graph nodes traced): faces 8.17 ms, padding 
 The selects cost more arithmetic than they save: every case is computed (FP64 instructions 928 -> 1017 per cell), the registers fall only to 146 (still 3 blocks of 128), and nvcc had already predicated the short branches. Divergence comes from elsewhere: of 0.055 divergent branch targets per cell, 0.039 are the block minimum's shared-memory tree (5 divergent levels per 128-thread block) and 0.016 the ghost map at the boundary; the limiters and Riemann solvers contribute none. The variants stay behind `-DLUNA_GRID_SELECT_LIMITER`, `_RIEMANN` and `_REST`.
 
 Next, from the side-by-side: registers to 128 or fewer (4 blocks of 128) by removing run-time switches (limiter, boundary and floors as compile-time parameters, as LUNA's are static), the block minimum by warp shuffles instead of the shared-memory tree, and early loads.
+
+**Lever 5, options fixed at compile time (done, 2026-11-23).** The CUDA split step launches kernels instantiated for the run's limiter and boundary when there are no floors or first-order faces. `Fixed<L, B, G>` makes each kernel overwrite its copies of the options with constants, which nvcc then propagates. Every other combination of options runs the run-time kernels, and `--specialise=0` asks for them; the Kokkos form is not specialised. One binary was run both ways: jobs 32904562 (256³), 32904563 (384³), 32904898 (128³, bits), profile 32904899; ravg1002 at 1305 MHz, with the same box as above.
+
+| N | limiter | LUNA whole step | CUDA run-time | **CUDA specialised** | LUNA kernels only | CUDA run-time kernels | **CUDA specialised kernels** |
+|---|---|---|---|---|---|---|---|
+| 128³ | minmod | 0.756 | 1.218 | **1.750** | — | — | — |
+| 128³ | MC | 0.681 | 1.138 | **1.641** | — | — | — |
+| 256³ | minmod | 1.094 | 1.215 | **1.781** | 1.134 (0.882 ns) | 1.153 (0.867) | **1.767 (0.566)** |
+| 256³ | MC | 0.978 | 1.154 | **1.677** | — | — | — |
+| 384³ | minmod | 1.140 | 1.166 | **1.613** | 1.144 (0.874) | 1.097 (0.911) | **1.604 (0.624)** |
+| 384³ | MC | 1.027 | 1.116 | **1.556** | — | — | — |
+
+Speeds are in G cell updates/s. Whole step is the median after 10 of 100 steps; kernels only is the nsys sum over 40 steps. The CUDA step is now 1.5–1.6× LUNA's on whole steps and 1.4–1.6× on kernel time alone. The bit-exact specialised build equals LUNA after 100 Sedov steps at 128³, with both limiters.
+
+Profile at 256³ minmod:
+- **Faces kernel:** 0.721 -> 0.488 ns/cell. Registers fall from 156 to 142 and instructions per cell from 4090 to 3250 (FP64 928 -> 861). The FP64 pipe is 48 % busy instead of 37 %, still with 12 warps per SM.
+- **Predictor:** 0.108 -> 0.072 ns/cell, with 56 instead of 76 registers and 538 instead of 963 instructions.
+- **Where the time went:** the run-time switches cost about 840 instructions per cell in the faces kernel: the limiter's three-way test for each of 15 slopes per axis, the boundary switch on each of 13 loads, and the floor tests.
+
+Cost:
+- 12 more kernel pairs per dimension and Riemann solver;
+- hydro_sedov grows from 16.3 to 17.1 MB, and its compile from 340 to 363 s;
+- grid_test grows from 5.8 to 10.8 MB, and its compile from 50 to 76 s.

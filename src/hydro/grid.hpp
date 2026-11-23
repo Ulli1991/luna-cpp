@@ -518,6 +518,23 @@ KOKKOS_INLINE_FUNCTION State<D> divergence_split(const Field<D>& W, const HalfFi
     return dU;
 }
 
+// Options fixed at compile time for one instantiation of the kernels (lever 5): the limiter L (Limiter's value), the boundary B
+// (Boundary's value) and the face guard G (0: no floors and no first-order faces); -1 leaves an option to the run-time Params. A kernel
+// overwrites its own copies of Params and Field with the fixed values, which nvcc then propagates as constants through the inlined cell.
+// Used by: the kernels of grid_cuda.hpp and grid_finite_volume.hpp, GridFiniteVolume::step (the dispatch).
+template <int L = -1, int B = -1, int G = -1>
+struct Fixed {
+    template <int D>
+    KOKKOS_INLINE_FUNCTION static void apply(Params& p, Field<D>& W) {
+        if constexpr (L >= 0) p.limiter = static_cast<Limiter>(L);
+        if constexpr (B >= 0) W.boundary = static_cast<Boundary>(B);
+        if constexpr (G == 0) {
+            p.floors = false;
+            p.allow_first_order = false;
+        }
+    }
+};
+
 // Raw arrays of one step: W and U now, U and W next (structure of arrays, `cells` apart). Used by: cell_step(), the kernels.
 struct Arrays {
     const double* U = nullptr;

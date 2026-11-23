@@ -30,6 +30,7 @@ struct Options {
     Kernel kernel = Kernel::kokkos;
     std::array<int, 3> tile{0, 0, 0};    // cells per block along x, y, z; 0: the default (LUNA's fused tiles on a GPU, one cell on a host)
     bool split = true;                   // LUNA's split step: a predictor pass, then the faces pass (+(D + 2) doubles a padded cell); false: one kernel
+    bool specialise = true;              // CUDA split step: kernels instantiated for the limiter and boundary (lever 5); false: the run-time kernels
 };
 
 // The team policy of the Kokkos kernels; -DLUNA_GRID_MIN_BLOCKS=b -DLUNA_GRID_MAX_THREADS=t adds launch bounds, as grid_cuda.hpp.
@@ -146,7 +147,7 @@ public:
         if (o_.kernel == Kernel::cuda) {
 #if defined(KOKKOS_ENABLE_CUDA)
             Kokkos::deep_copy(exec_, key_, ~0ULL);
-            step_cuda<D, Riemann>(exec_.cuda_stream(), W, H, o_.split, a, p_, dt, tile_, tiles_, key_.data());
+            step_cuda<D, Riemann>(exec_.cuda_stream(), W, H, o_.split, o_.specialise, a, p_, dt, tile_, tiles_, key_.data());
             from_key_ = true;
 #endif
         } else {
