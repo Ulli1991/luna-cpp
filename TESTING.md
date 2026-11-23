@@ -6,7 +6,7 @@ tests run on the default Kokkos execution space, so a CUDA build checks the devi
 the host code.
 
 The tests of the mesh, including `voronoi_mesh`, the contract the hydro relies on, are in voronoi-cpp
-(`extern/voronoi-cpp/TESTING.md`). They do not run here; `check.hpp` and `support.hpp` come from that submodule.
+(its TESTING.md). They do not run here; `check.hpp` and `support.hpp` come from the fetched voronoi-cpp tree.
 
 ## Running them
 
@@ -50,13 +50,45 @@ measures how far a change moves the bits and the accuracy (`snapshot_diff.py` af
 `hydro_ncu_summary.py`), `scripts/hydro_sass_count.sh` the instructions of the flux kernels, and
 `scripts/hydro_wholerun_a100.sh` whole Sedov runs to 1e4 yr (cell updates per GPU second over the run).
 
-## Moving the pin
+## When voronoi-cpp changes
 
-A new voronoi-cpp pin is checked against the old one with both trees built in the same A100 job: the CTest
-programs on the A100 and CI's host steps, the bit hashes above, and `hydro_sedov` to t_end for stuck steps and speed.
-`scripts/pin_bits_a100.sh` (builds, A100 ctest, bits), `scripts/pin_speed_a100.sh` (stuck steps, speed) and
-`scripts/pin_ci_host.sh` (CI's host steps) take the two worktrees as OLD and NEW. The last move, abd3d39 to 1741a1a
-(2026-11-18), is in docs/measurements.md ("voronoi-cpp abd3d39 to 1741a1a"):
+luna-cpp builds against voronoi-cpp's latest `main` (README, "Install and build"), so a new voronoi-cpp commit reaches
+every fresh configure without a step here. Every program, test log, snapshot and output side file names the voronoi-cpp
+commit it was built with (`build:` line, `luna_build_info.txt`), and the bit gates compare two builds by those recorded
+commits, not by a pin. CI builds against `main` on every push and daily, so a change that breaks the build or a CPU
+test shows within a day. A change in the mesh is checked on Raven, with both builds in the same A100 job:
+
+1. Configure two CUDA builds of the same luna-cpp commit where there is network, the old one with
+   `-DLUNA_VORONOI_COMMIT=<old sha>`, the new one with the default (`main`) or `-DLUNA_VORONOI_COMMIT=<new sha>`; or
+   point both at local checkouts with `-DLUNA_VORONOI_SOURCE`.
+2. `scripts/voronoi_bits_a100.sh` (OLD, NEW: the build dirs): compiles both, A100 ctest of NEW, and the bit hashes
+   old against new: Sedov 128³ on six paths (50 steps) and moving to t_end; 1D Sod, Shu-Osher, Woodward-Colella at
+   N = 1024, static and moving; 2D KH 256², 300 steps; 3D vortex and sound wave at 64, static and moving.
+3. `scripts/voronoi_speed_a100.sh` (the same build dirs): stuck steps and field L1 of moving Sedov 128³ and 256³ to
+   1e4 yr, then the speed of 40 steps, static and moving, with and without fenced phases, and the memory per cell.
+4. `scripts/voronoi_ci_host.sh` (NEW: the luna-cpp tree; VORONOI: a local voronoi-cpp checkout, COMMIT optional):
+   CI's host steps, sanitizers off and on, lint.
+
+What is expected:
+- **Same bits:** 1D, 2D and static 3D runs. The hydro on a static mesh only reads the mesh's geometry, which is exact up
+  to rounding and deterministic, so a voronoi-cpp change that keeps the geometry keeps their bits. A difference here is
+  a finding: either voronoi-cpp changed the geometry on purpose (its tried.md and README say so), or a bug.
+- **May differ at rounding:** moving 3D runs (Q; at 256³ also x and volume). A change in how the mesh update forms
+  its geometry sums (as 1741a1a's one-pass cell sums did) moves areas and centroids by rounding, and the moving step feeds them back into the positions. The gate is
+  then the accuracy: field L1 of rho, v_r and P of moving Sedov, the 3D vortex and the sound waves equal to the printed
+  digits, and no new stuck steps or rebuilds.
+- Record the move in docs/measurements.md (jobs, both commits, the speed change) and in the README's install paragraph.
+
+The move from the last pin, 1741a1a to 7da61fb (2026-11-23; luna-cpp branch `voronoi-latest`, logs in
+`/raven/u/uli/voronoi-cpp-joblogs/latest/`):
+- Builds and tests (jobs 32906593, 32906592): [A100 ctest n of n; CI's host steps ctest n of n with sanitizers off
+  and on, lint clean].
+- Bits (job 32906593): [results].
+- Stuck steps and field L1 (job 32906612): [results].
+- Speed (job 32906612): [moving step at 128³ and 256³: G cell updates/s, mesh part in ms, B/cell].
+
+Earlier moves of the pin (the same checks, then with `scripts/pin_*.sh`, now `scripts/voronoi_*.sh`): abd3d39 to
+1741a1a (2026-11-18), in docs/measurements.md ("voronoi-cpp abd3d39 to 1741a1a"):
 - Builds and tests (jobs 32540741, 32540744): A100 ctest 5 of 5; CI's host steps ctest 5 of 5 with sanitizers off
   and on, lint clean.
 - Bits (job 32540741): equal hashes of Q, x and volume on static, order 0, moving, and per-cell moving Sedov 128³
