@@ -2538,17 +2538,18 @@ public:
             });
     }
 
-    // One pass's adjoint per face, from qbar. Row (2V + 2D): the two sides' bars (of the face states), the face velocity's bar, and
-    // the neighbour side's bar of its offset (its offset carries x_owner). A bar and x_f bar (both sides' offsets in it) go to the
-    // face arrays Ab, xfb. The sides' own adjoints (W, g, c, w-hat, x) are each cell's, in moving_pass_gather().
-    // Used by: step_moving_adjoint_1().
+    // A moving pass's face row: 2V + 2D doubles (moving_pass_adjoint()).
     static constexpr int pass_row = 2 * V + 2 * D;
-    // A side of face f for cell i: the offset r (pass 2: from the old centroid to the new face, + dt w-hat) and the face state.
+    // The offset r of cell i's side of face f (pass 2: from the old centroid to the new face, + dt w-hat). Used by: the passes.
     KOKKOS_INLINE_FUNCTION static Vec pass_offset(bool second, double dt, const Geometry& geo, int f, int i, const Points& wh, const Points& c0) {
         Vec r = geo.face_offset(f, i);
         if (second) r = r + geo.row(geo.centroid, i) - geo.row(c0, i) + geo.row(wh, i) * dt;
         return r;
     }
+    // One pass's adjoint per face, from qbar. Row (2V + 2D): the two sides' bars (of the face states), the face velocity's bar, and
+    // the neighbour side's bar of its offset (its offset carries x_owner). A bar and x_f bar (both sides' offsets in it) go to the
+    // face arrays Ab, xfb. The sides' own adjoints (W, g, c, w-hat, x) are each cell's, in moving_pass_gather().
+    // Used by: step_moving_adjoint_1().
     void moving_pass_adjoint(bool second, double dt, const Geometry& geo, const PrimRows& W, const Rows& g, const Points& wh, const Points& c0,
                              const Cells& qbar, const Rows& rows, const Points& Ab, const Points& xfb) {
         const Gas gas = gas_;
