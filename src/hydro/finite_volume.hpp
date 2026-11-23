@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -2038,6 +2039,31 @@ public:
     using PrimRows = Kokkos::View<double* [V + 2], Kokkos::LayoutRight, Memory>;  // W, c_s (and room for the radius): readable as Prims
     KOKKOS_INLINE_FUNCTION static State row_state(const Rows& r, int i) { return make_state<D>([&](int v) { return r(i, v); }); }
     KOKKOS_INLINE_FUNCTION static State row_state(const PrimRows& r, int i) { return make_state<D>([&](int v) { return r(i, v); }); }
+    // A work array of the moving derivatives, kept between steps by label: rows x width entries (width: a Rows view's; the others
+    // have it in their type), allocated without a fill when it must grow, zeroed only if asked. Used by: the moving derivatives.
+    template <class View>
+    View work(const std::string& label, std::size_t rows, std::size_t width = 1, bool zero = false) {
+        using T = typename View::value_type;
+        std::size_t per_row = 1;
+        if constexpr (View::rank == 2) per_row = View::static_extent(1) != 0 ? View::static_extent(1) : width;
+        const std::size_t bytes = sizeof(T) * rows * per_row;
+        Kokkos::View<char*, Memory>& raw = work_[label];
+        if (raw.extent(0) < bytes) raw = Kokkos::View<char*, Memory>(Kokkos::view_alloc(Kokkos::WithoutInitializing, "hydro_work_" + label), bytes);
+        T* data = reinterpret_cast<T*>(raw.data());
+        View v;
+        if constexpr (View::rank == 2) {
+            if constexpr (View::static_extent(1) == 0)
+                v = View(data, rows, width);
+            else
+                v = View(data, rows);
+        } else {
+            v = View(data, rows);
+        }
+        if (zero) Kokkos::deep_copy(exec_, v, T(0));
+        return v;
+    }
+    // Frees the moving derivatives' work arrays (they stay between steps otherwise).
+    void release_derivative_work() { work_.clear(); }
     void require_moving_derivatives(const char* what) const {
         static_assert(std::is_same_v<FluxStore, double> && std::is_same_v<typename P::riemann, double> && !Mesh::float_rows,
                       "derivatives of a step: double flux rows, Riemann solve and geometry");
@@ -2075,11 +2101,12 @@ public:
         refresh();
         const Geometry geo = geometry_;
         const Gas gas = gas_;
-        Scalars dV("hydro_dV", n_);
-        Points dc("hydro_dc", n_), dA("hydro_dA", faces_), dxf("hydro_dxf", faces_), dw("hydro_dw", n_), w("hydro_w_tangent", n_);
+        Scalars dV = work<Scalars>("hydro_dV", n_);
+        Points dc = work<Points>("hydro_dc", n_), dA = work<Points>("hydro_dA", faces_), dxf = work<Points>("hydro_dxf", faces_),
+               dw = work<Points>("hydro_dw", n_), w = work<Points>("hydro_w_tangent", n_);
         geometry.tangent(dx, dV, dc, dA, dxf);
-        PrimRows W("hydro_moving_W", n_);
-        Rows dW("hydro_moving_dW", n_, V + 1), dG("hydro_moving_dG", faces_, V);
+        PrimRows W = work<PrimRows>("hydro_moving_W", n_);
+        Rows dW = work<Rows>("hydro_moving_dW", n_, V + 1), dG = work<Rows>("hydro_moving_dG", faces_, V);
         moving_primitives(W, dW, dq, dV);
         Kokkos::parallel_for(
             "hydro::moving_velocity_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
@@ -2134,13 +2161,14 @@ public:
         const Geometry geo = geometry_;
         const Gas gas = gas_;
         const auto q = q_;
-        PrimRows W("hydro_moving_W", n_);
-        Rows face_bar("hydro_moving_face_bar", faces_, 2 * V + 4 * D);
+        PrimRows W = work<PrimRows>("hydro_moving_W", n_);
+        Rows face_bar = work<Rows>("hydro_moving_face_bar", faces_, 2 * V + 4 * D);
         moving_primitives(W, Rows(), Cells(), Scalars());
-        Points w("hydro_w_adjoint", n_), Abar("hydro_Abar", faces_), xfbar("hydro_xfbar", faces_), cbar("hydro_cbar", n_);
-        Points angle_Abar("hydro_angle_Abar", n_), angle_dbar("hydro_angle_dbar", n_);
-        Scalars Vbar("hydro_Vbar", n_);
-        Kokkos::View<int*, Memory> fmax("hydro_fmax", n_);
+        Points w = work<Points>("hydro_w_adjoint", n_), Abar = work<Points>("hydro_Abar", faces_), xfbar = work<Points>("hydro_xfbar", faces_),
+               cbar = work<Points>("hydro_cbar", n_);
+        Points angle_Abar = work<Points>("hydro_angle_Abar", n_), angle_dbar = work<Points>("hydro_angle_dbar", n_);
+        Scalars Vbar = work<Scalars>("hydro_Vbar", n_);
+        Kokkos::View<int*, Memory> fmax = work<Kokkos::View<int*, Memory>>("hydro_fmax", n_);
         Kokkos::parallel_for(
             "hydro::moving_velocity", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
                 const Regularised r(geo, i, row_state(W, i), W(i, V));
@@ -2410,12 +2438,13 @@ public:
         const exact_predicates::BoxN<D> box = mesh_->sides();
         const auto x = x_;
         const Kokkos::RangePolicy<ExecSpace> cells(exec_, 0, n_);
-        Scalars dV("hydro_dV", n_);
-        Points dc("hydro_dc", n_), dA("hydro_dA", faces_), dxf("hydro_dxf", faces_);
+        Scalars dV = work<Scalars>("hydro_dV", n_);
+        Points dc = work<Points>("hydro_dc", n_), dA = work<Points>("hydro_dA", faces_), dxf = work<Points>("hydro_dxf", faces_);
         geometry.tangent(dx, dV, dc, dA, dxf);
-        PrimRows W("hydro_moving_W", n_);
-        Rows dW("hydro_moving_dW", n_, V + 1), g("hydro_moving_g", n_, V * D), dg("hydro_moving_dg", n_, V * D);
-        Points wh("hydro_w_hat", n_), dw("hydro_dw", n_), c0("hydro_c0", n_), dc0("hydro_dc0", n_);
+        PrimRows W = work<PrimRows>("hydro_moving_W", n_);
+        Rows dW = work<Rows>("hydro_moving_dW", n_, V + 1), g = work<Rows>("hydro_moving_g", n_, V * D), dg = work<Rows>("hydro_moving_dg", n_, V * D);
+        Points wh = work<Points>("hydro_w_hat", n_), dw = work<Points>("hydro_dw", n_), c0 = work<Points>("hydro_c0", n_),
+               dc0 = work<Points>("hydro_dc0", n_);
         moving_primitives(W, dW, dq, dV);
         const double unit = box.step / dt;
         {
@@ -2455,8 +2484,8 @@ public:
                 for (int a = 0; a < D; ++a) dx(i, a) += dt * dw(i, a);
             });
         refresh();
-        Scalars dV2("hydro_dV2", n_);
-        Points dc2("hydro_dc2", n_), dA2("hydro_dA2", faces_), dxf2("hydro_dxf2", faces_);
+        Scalars dV2 = work<Scalars>("hydro_dV2", n_);
+        Points dc2 = work<Points>("hydro_dc2", n_), dA2 = work<Points>("hydro_dA2", faces_), dxf2 = work<Points>("hydro_dxf2", faces_);
         geometry.tangent(dx, dV2, dc2, dA2, dxf2);
         moving_pass_tangent(true, dt, geometry_, W, dW, g, dg, wh, dw, c0, dc0, dx, dc2, dA2, dxf2, dq);
     }
@@ -2466,7 +2495,7 @@ public:
                              const Points& wh, const Points& dw, const Points& c0, const Points& dc0, const Points& dx, const Points& dc,
                              const Points& dA, const Points& dxf, const Cells& dq) {
         const Gas gas = gas_;
-        Rows dG("hydro_moving_dG", faces_, V);
+        Rows dG = work<Rows>("hydro_moving_dG", faces_, V);
         Kokkos::parallel_for(
             "hydro::moving_pass_tangent", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
                 for (int v = 0; v < V; ++v) dG(f, v) = 0;
@@ -2610,13 +2639,13 @@ public:
         const Limiter limiter = limiter_;
         const exact_predicates::BoxN<D> box = mesh_->sides();
         const Kokkos::RangePolicy<ExecSpace> cells(exec_, 0, n_);
-        Cells q_saved("hydro_q_saved", n_);
-        Points x_saved("hydro_x_saved", n_);
+        Cells q_saved = work<Cells>("hydro_q_saved", n_);
+        Points x_saved = work<Points>("hydro_x_saved", n_);
         Kokkos::deep_copy(exec_, q_saved, q_);
         Kokkos::deep_copy(exec_, x_saved, x_);
-        PrimRows W("hydro_moving_W", n_);
-        Rows g("hydro_moving_g", n_, V * D);
-        Points wh("hydro_w_hat", n_), c0("hydro_c0", n_);
+        PrimRows W = work<PrimRows>("hydro_moving_W", n_);
+        Rows g = work<Rows>("hydro_moving_g", n_, V * D);
+        Points wh = work<Points>("hydro_w_hat", n_), c0 = work<Points>("hydro_c0", n_);
         moving_primitives(W, Rows(), Cells(), Scalars());
         const double unit = box.step / dt;
         {
@@ -2638,18 +2667,18 @@ public:
                         for (int a = 0; a < D; ++a) g(i, D * v + a) = gi[v][a];
                 });
         }
-        Rows Wb("hydro_Wbar", n_, V), gb("hydro_gbar", n_, V * D);
-        Points whb("hydro_whbar", n_), cb("hydro_cbar", n_), xb("hydro_xbar_next", n_);
+        Rows Wb = work<Rows>("hydro_Wbar", n_, V, true), gb = work<Rows>("hydro_gbar", n_, V * D, true);  // summed into: zeroed
+        Points whb = work<Points>("hydro_whbar", n_, 1, true), cb = work<Points>("hydro_cbar1", n_, 1, true), xb = work<Points>("hydro_xbar_next", n_);
         Kokkos::deep_copy(exec_, xb, xbar);
         // Pass 2 on t^n+1.
         step(dt);
         refresh();
         {
-            Rows rows("hydro_pass_rows", faces_, pass_row);
+            Rows rows = work<Rows>("hydro_pass_rows", faces_, pass_row);
             moving_pass_adjoint(true, dt, geometry_, W, g, wh, c0, qbar, rows);
             moving_pass_gather(geometry_, rows, Wb, gb, whb, cb, xb);
-            Points Ab("hydro_Abar2", faces_), xfb("hydro_xfbar2", faces_), cb2("hydro_cbar2", n_);
-            Scalars Vb2("hydro_Vbar2", n_);
+            Points Ab = work<Points>("hydro_Abar2", faces_), xfb = work<Points>("hydro_xfbar2", faces_), cb2 = work<Points>("hydro_cbar2", n_, 1, true);
+            Scalars Vb2 = work<Scalars>("hydro_Vbar2", n_, 1, true);
             const int base = 2 * V + 2 * V * D;
             Kokkos::parallel_for(
                 "hydro::moving_pass2_faces", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
@@ -2677,7 +2706,7 @@ public:
         magnitudes_valid_ = false;
         const Geometry geo = geometry_;
         {
-            Rows rows("hydro_pass_rows", faces_, pass_row);
+            Rows rows = work<Rows>("hydro_pass_rows", faces_, pass_row);
             moving_pass_adjoint(false, dt, geo, W, g, wh, c0, qbar, rows);
             moving_pass_gather(geo, rows, Wb, gb, whb, cb, xb);
             const int entries = [&] {
@@ -2686,11 +2715,11 @@ public:
                 return total;
             }();
             constexpr int E = V + 2 * D + 1;  // per list entry: the neighbour's W bar, between bar, offset bar, weight bar
-            Rows entry_bar("hydro_entry_bar", entries, E);
-            Points angle_Abar("hydro_angle_Abar", n_), angle_dbar("hydro_angle_dbar", n_);
-            Kokkos::View<int*, Memory> fmax("hydro_fmax", n_);
-            Points Ab("hydro_Abar", faces_), xfb("hydro_xfbar", faces_);
-            Scalars Vb("hydro_Vbar", n_);
+            Rows entry_bar = work<Rows>("hydro_entry_bar", entries, E);
+            Points angle_Abar = work<Points>("hydro_angle_Abar", n_), angle_dbar = work<Points>("hydro_angle_dbar", n_);
+            Kokkos::View<int*, Memory> fmax = work<Kokkos::View<int*, Memory>>("hydro_fmax", n_);
+            Points Ab = work<Points>("hydro_Abar", faces_), xfb = work<Points>("hydro_xfbar", faces_);
+            Scalars Vb = work<Scalars>("hydro_Vbar", n_);
             // Per cell: w-hat's bar through the point velocity; g's bar through the fit (entries' bars); the own W bar.
             Kokkos::parallel_for(
                 "hydro::moving_cells_adjoint_1", cells, KOKKOS_LAMBDA(int i) {
@@ -2795,6 +2824,7 @@ private:
     int n_, faces_ = 0;
     bool swept_ = false;
     bool tangent_swept_ = false;  // time_step_tangent() also swept the tangents (dW, dg) for the next step_tangent()
+    std::map<std::string, Kokkos::View<char*, Memory>> work_;  // the moving derivatives' work arrays by label (work())
     mutable bool prims_ready_ = false;  // the last update wrote prims_ for the current Q and mesh
     StepRule rule_ = StepRule::arepo;
     // |area| per face kept for the sweep (LUNA_NO_MAGNITUDES turns it off, for measurements).
