@@ -2538,103 +2538,111 @@ public:
             });
     }
 
-    // One pass's adjoint per face: from qbar, the row 2V + 2VD + 8D: W bars of both sides, g bars, w-hat bars, c^n bars (second pass)
-    // or c bars (first), x bars of owner and neighbour, A bar, x_f bar. Used by: step_moving_adjoint_1().
-    static constexpr int pass_row = 2 * V + 2 * V * D + 8 * D;
+    // One pass's adjoint per face, from qbar. Row (2V + 2D): the two sides' bars (of the face states), the face velocity's bar, and
+    // the neighbour side's bar of its offset (its offset carries x_owner). A bar and x_f bar (both sides' offsets in it) go to the
+    // face arrays Ab, xfb. The sides' own adjoints (W, g, c, w-hat, x) are each cell's, in moving_pass_gather().
+    // Used by: step_moving_adjoint_1().
+    static constexpr int pass_row = 2 * V + 2 * D;
+    // A side of face f for cell i: the offset r (pass 2: from the old centroid to the new face, + dt w-hat) and the face state.
+    KOKKOS_INLINE_FUNCTION static Vec pass_offset(bool second, double dt, const Geometry& geo, int f, int i, const Points& wh, const Points& c0) {
+        Vec r = geo.face_offset(f, i);
+        if (second) r = r + geo.row(geo.centroid, i) - geo.row(c0, i) + geo.row(wh, i) * dt;
+        return r;
+    }
     void moving_pass_adjoint(bool second, double dt, const Geometry& geo, const PrimRows& W, const Rows& g, const Points& wh, const Points& c0,
-                             const Cells& qbar, const Rows& rows) {
+                             const Cells& qbar, const Rows& rows, const Points& Ab, const Points& xfb) {
         const Gas gas = gas_;
         Kokkos::parallel_for(
             "hydro::moving_pass_adjoint", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
                 const int o = geo.owner_of(f), j = geo.neighbour_of(f);
                 const Vec a = geo.area_of(f);
-                if (dot(a, a) == 0) {  // no flux: no bars (every other row is written in full below)
+                if (dot(a, a) == 0) {  // no flux: no bars
                     for (int s = 0; s < pass_row; ++s) rows(f, s) = 0;
+                    for (int c = 0; c < D; ++c) Ab(f, c) = xfb(f, c) = 0;
                     return;
                 }
                 const Vec d = geo.separation(o, j), xf = geo.face_centroid_of(f), wL = geo.row(wh, o), wR = geo.row(wh, j);
                 const Vec wf = FaceVelocity::value(d, xf, wL, wR);
                 State side[2];
-                Vec r[2];
+                Vec rbar[2];
                 bool fallback[2];
+                Gradient<D> gs[2];
                 for (int s = 0; s < 2; ++s) {
                     const int i = s == 0 ? o : j;
-                    r[s] = geo.face_offset(f, i);
-                    if (second) r[s] = r[s] + geo.row(geo.centroid, i) - geo.row(c0, i) + geo.row(wh, i) * dt;
-                    side[s] = FaceFlux<1, true>::side_value(row_state(W, i), gradient_row(g, i), r[s], second ? 2 * dt : 0.0, gas, fallback[s]);
+                    gs[s] = gradient_row(g, i);
+                    side[s] = FaceFlux<1, true>::side_value(row_state(W, i), gs[s], pass_offset(second, dt, geo, f, i, wh, c0), second ? 2 * dt : 0.0,
+                                                           gas, fallback[s]);
                 }
                 const State Gbar = make_state<D>([&](int v) { return -0.5 * dt * (qbar(o, v) - qbar(j, v)); });
                 State Sbar[2] = {State{}, State{}};
-                Vec Ab{}, wfbar{}, db{}, xfb{}, wLb{}, wRb{};
-                MovingFace<Riemann, D>::adjoint(side[0], side[1], a, wf, gas, Gbar, Sbar[0], Sbar[1], Ab, wfbar);
-                FaceVelocity::adjoint(d, xf, wL, wR, wfbar, db, xfb, wLb, wRb);
-                Vec xo = db * -1.0, xj = db;  // d = x_j - x_o
-                Vec whb[2] = {wLb, wRb}, cb[2] = {Vec{}, Vec{}};
+                Vec A{}, wfbar{}, db{}, xfbar{}, wLb{}, wRb{};
+                MovingFace<Riemann, D>::adjoint(side[0], side[1], a, wf, gas, Gbar, Sbar[0], Sbar[1], A, wfbar);
+                FaceVelocity::adjoint(d, xf, wL, wR, wfbar, db, xfbar, wLb, wRb);  // x_f's share here; the cells redo theirs
                 for (int s = 0; s < 2; ++s) {
-                    const int i = s == 0 ? o : j;
-                    const State Wi = row_state(W, i);
-                    const Gradient<D> gi = gradient_row(g, i);
-                    State Wb{};
-                    Gradient<D> gb;
-                    for (int v = 0; v < V; ++v) gb[v] = Vec{};
-                    FaceFlux<1, true>::side_adjoint(Wi, gi, r[s], second ? 2 * dt : 0.0, gas, Sbar[s], Wb, gb, fallback[s]);
-                    Vec rb{};
+                    rbar[s] = Vec{};
                     if (!fallback[s])
-                        for (int v = 0; v < V; ++v) rb = rb + gi[v] * Sbar[s][v];
-                    // r = x_f relative to i (+ x_o - x_i when i is the neighbour) - c_i [+ c_i' - c^n_i + dt w-hat_i]
-                    xfb = xfb + rb;
-                    if (i != o) {
-                        xo = xo + rb;
-                        xj = xj - rb;
-                    }
-                    if (second) {
-                        cb[s] = rb * -1.0;  // c^n's bar; c_i' cancels against face_offset's -c_i'
-                        whb[s] = whb[s] + rb * dt;
-                    } else {
-                        cb[s] = rb * -1.0;
-                    }
-                    for (int v = 0; v < V; ++v) {
-                        rows(f, s * V + v) = Wb[v];
-                        for (int c = 0; c < D; ++c) rows(f, 2 * V + s * V * D + D * v + c) = gb[v][c];
-                    }
+                        for (int v = 0; v < V; ++v) rbar[s] = rbar[s] + gs[s][v] * Sbar[s][v];
+                    xfbar = xfbar + rbar[s];  // r = x_f relative to i (...) - c_i
                 }
-                const int base = 2 * V + 2 * V * D;
+                for (int v = 0; v < V; ++v) {
+                    rows(f, v) = Sbar[0][v];
+                    rows(f, V + v) = Sbar[1][v];
+                }
                 for (int c = 0; c < D; ++c) {
-                    rows(f, base + c) = whb[0][c];
-                    rows(f, base + D + c) = whb[1][c];
-                    rows(f, base + 2 * D + c) = cb[0][c];
-                    rows(f, base + 3 * D + c) = cb[1][c];
-                    rows(f, base + 4 * D + c) = xo[c];
-                    rows(f, base + 5 * D + c) = xj[c];
-                    rows(f, base + 6 * D + c) = Ab[c];
-                    rows(f, base + 7 * D + c) = xfb[c];
+                    rows(f, 2 * V + c) = wfbar[c];
+                    rows(f, 2 * V + D + c) = rbar[1][c];
+                    Ab(f, c) = A[c];
+                    xfb(f, c) = xfbar[c];
                 }
             });
     }
-    // Gathers one pass's face rows into the cells (W, g, w-hat, c and x bars, added). Used by: step_moving_adjoint_1().
-    void moving_pass_gather(const Geometry& geo, const Rows& rows, const Rows& Wb, const Rows& gb, const Points& whb, const Points& cb, const Points& xb) {
+    // Each cell's sides of one pass, from the face rows: the side's adjoint (W, g), its offset's bar (c^n, x, and w-hat on pass 2),
+    // its share of the face velocity's adjoint (w-hat, x); summed in registers and added once. Used by: step_moving_adjoint_1().
+    void moving_pass_gather(bool second, double dt, const Geometry& geo, const PrimRows& W, const Rows& g, const Points& wh, const Points& c0,
+                            const Rows& rows, const Rows& Wb, const Rows& gb, const Points& whb, const Points& cb, const Points& xb) {
+        const Gas gas = gas_;
         Kokkos::parallel_for(
             "hydro::moving_pass_gather", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n_), KOKKOS_LAMBDA(int i) {
-                const int base = 2 * V + 2 * V * D;
-                // Summed in registers, written once (not a read-modify-write of the cell rows per face).
-                double W[V] = {}, g[V * D] = {}, wh[D] = {}, c0[D] = {}, x[D] = {};
+                const State Wi = row_state(W, i);
+                const Gradient<D> gi = gradient_row(g, i);
+                State Wbar{};
+                Gradient<D> gbar;
+                for (int v = 0; v < V; ++v) gbar[v] = Vec{};
+                Vec whbar{}, cbar{}, xbar{};
                 for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
                     const int f = geo.face_at(k);
-                    const int s = geo.owned_at(k, f, i) ? 0 : 1;
-                    for (int v = 0; v < V; ++v) W[v] += rows(f, s * V + v);
-                    for (int e = 0; e < V * D; ++e) g[e] += rows(f, 2 * V + s * V * D + e);
-                    for (int c = 0; c < D; ++c) {
-                        wh[c] += rows(f, base + s * D + c);
-                        c0[c] += rows(f, base + 2 * D + s * D + c);
-                        x[c] += rows(f, base + 4 * D + s * D + c);
-                    }
+                    const Vec a = geo.area_of(f);
+                    if (dot(a, a) == 0) continue;
+                    const bool owned = geo.owned_at(k, f, i);
+                    const int o = owned ? i : geo.owner_of(f), j = owned ? geo.neighbour_of(f) : i;
+                    const State Sbar = make_state<D>([&](int v) { return rows(f, (owned ? 0 : V) + v); });
+                    const Vec r = pass_offset(second, dt, geo, f, i, wh, c0);
+                    bool fallback;
+                    FaceFlux<1, true>::side_value(Wi, gi, r, second ? 2 * dt : 0.0, gas, fallback);
+                    FaceFlux<1, true>::side_adjoint(Wi, gi, r, second ? 2 * dt : 0.0, gas, Sbar, Wbar, gbar, fallback);
+                    Vec rbar{};
+                    if (!fallback)
+                        for (int v = 0; v < V; ++v) rbar = rbar + gi[v] * Sbar[v];
+                    cbar = cbar - rbar;
+                    if (second) whbar = whbar + rbar * dt;
+                    if (!owned) xbar = xbar - rbar;                                                     // own offset: + x_o - x_i
+                    if (owned) xbar = xbar + make_vec<D>([&](int c) { return rows(f, 2 * V + D + c); });  // the neighbour's
+                    // The face velocity's adjoint, this side's share: w-hat and the separation d = x_j - x_o.
+                    const Vec d = geo.separation(o, j), xf = geo.face_centroid_of(f);
+                    const Vec wfbar = make_vec<D>([&](int c) { return rows(f, 2 * V + c); });
+                    Vec db{}, xfb{}, wLb{}, wRb{};
+                    FaceVelocity::adjoint(d, xf, geo.row(wh, o), geo.row(wh, j), wfbar, db, xfb, wLb, wRb);
+                    whbar = whbar + (owned ? wLb : wRb);
+                    xbar = owned ? xbar - db : xbar + db;
                 }
-                for (int v = 0; v < V; ++v) Wb(i, v) += W[v];
-                for (int e = 0; e < V * D; ++e) gb(i, e) += g[e];
+                for (int v = 0; v < V; ++v) {
+                    Wb(i, v) += Wbar[v];
+                    for (int c = 0; c < D; ++c) gb(i, D * v + c) += gbar[v][c];
+                }
                 for (int c = 0; c < D; ++c) {
-                    whb(i, c) += wh[c];
-                    cb(i, c) += c0[c];
-                    xb(i, c) += x[c];
+                    whb(i, c) += whbar[c];
+                    cb(i, c) += cbar[c];
+                    xb(i, c) += xbar[c];
                 }
             });
     }
@@ -2684,18 +2692,10 @@ public:
         refresh();
         {
             Rows rows = work<Rows>("hydro_pass_rows", faces_, pass_row);
-            moving_pass_adjoint(true, dt, geometry_, W, g, wh, c0, qbar, rows);
-            moving_pass_gather(geometry_, rows, Wb, gb, whb, cb, xb);
             Points Ab = work<Points>("hydro_Abar2", faces_), xfb = work<Points>("hydro_xfbar2", faces_), cb2 = work<Points>("hydro_cbar2", n_, 1, true);
             Scalars Vb2 = work<Scalars>("hydro_Vbar2", n_, 1, true);
-            const int base = 2 * V + 2 * V * D;
-            Kokkos::parallel_for(
-                "hydro::moving_pass2_faces", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
-                    for (int c = 0; c < D; ++c) {
-                        Ab(f, c) = rows(f, base + 6 * D + c);
-                        xfb(f, c) = rows(f, base + 7 * D + c);
-                    }
-                });
+            moving_pass_adjoint(true, dt, geometry_, W, g, wh, c0, qbar, rows, Ab, xfb);
+            moving_pass_gather(true, dt, geometry_, W, g, wh, c0, rows, Wb, gb, whb, cb, xb);
             geometry.adjoint(Vb2, cb2, Ab, xfb, xb);  // x^n+1's bar, complete
         }
         // x^n+1 = x^n + dt w-hat: x^n's bar and w-hat's.
@@ -2716,8 +2716,9 @@ public:
         const Geometry geo = geometry_;
         {
             Rows rows = work<Rows>("hydro_pass_rows", faces_, pass_row);
-            moving_pass_adjoint(false, dt, geo, W, g, wh, c0, qbar, rows);
-            moving_pass_gather(geo, rows, Wb, gb, whb, cb, xb);
+            Points Ab = work<Points>("hydro_Abar", faces_), xfb = work<Points>("hydro_xfbar", faces_);
+            moving_pass_adjoint(false, dt, geo, W, g, wh, c0, qbar, rows, Ab, xfb);
+            moving_pass_gather(false, dt, geo, W, g, wh, c0, rows, Wb, gb, whb, cb, xb);
             const int entries = [&] {
                 int total = 0;
                 Kokkos::deep_copy(total, Kokkos::subview(geo.start, n_));
@@ -2727,7 +2728,6 @@ public:
             Rows entry_bar = work<Rows>("hydro_entry_bar", entries, E);
             Points angle_Abar = work<Points>("hydro_angle_Abar", n_), angle_dbar = work<Points>("hydro_angle_dbar", n_);
             Kokkos::View<int*, Memory> fmax = work<Kokkos::View<int*, Memory>>("hydro_fmax", n_);
-            Points Ab = work<Points>("hydro_Abar", faces_), xfb = work<Points>("hydro_xfbar", faces_);
             Scalars Vb = work<Scalars>("hydro_Vbar", n_);
             // Per cell: w-hat's bar through the point velocity; g's bar through the fit (entries' bars); the own W bar.
             Kokkos::parallel_for(
@@ -2802,7 +2802,6 @@ public:
                         xb(i, a) += xsum[a];
                     }
                 });
-            const int base = 2 * V + 2 * V * D;
             Kokkos::parallel_for(
                 "hydro::moving_faces_bar_1", Kokkos::RangePolicy<ExecSpace>(exec_, 0, faces_), KOKKOS_LAMBDA(int f) {
                     const int o = geo.owner_of(f), j = geo.neighbour_of(f);
@@ -2811,9 +2810,9 @@ public:
                     const double mag = Kokkos::sqrt(dot(a, a));
                     const double wbar = mag > 0 ? (entry_bar(ko, V + 2 * D) + entry_bar(kj, V + 2 * D)) / mag : 0.0;
                     for (int c = 0; c < D; ++c) {
-                        Ab(f, c) = rows(f, base + 6 * D + c) + a[c] * wbar + (fmax(o) == f ? angle_Abar(o, c) : 0.0) +
+                        Ab(f, c) += a[c] * wbar + (fmax(o) == f ? angle_Abar(o, c) : 0.0) +
                                    (fmax(j) == f ? angle_Abar(j, c) : 0.0);
-                        xfb(f, c) = rows(f, base + 7 * D + c) + entry_bar(ko, V + D + c) + entry_bar(kj, V + D + c);
+                        xfb(f, c) += entry_bar(ko, V + D + c) + entry_bar(kj, V + D + c);
                     }
                 });
             geometry.adjoint(Vb, cb, Ab, xfb, xb);
