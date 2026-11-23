@@ -78,10 +78,12 @@ struct Options {
     int n = 0, order = 1;
     double jitter = 0, courant = 0.8, fixed_dt = 0, inflow_spacing = 1, max_wall = 0;
     // Refinement and derefinement of a moving line (hydro::Adapt). --amr=mass (default) | length | off. Mass: --refine-mass=2
-    // --derefine-mass=0.5 times each cell's target mass; --derefine=f, --refine=F (lengths f L / N, F L / N) then act as a safeguard.
+    // --derefine-mass=0.5 times each cell's target mass, within --split-min / --merge-max (h), and --derefine=f (default 0.03 h) as the
+    // safeguard; --refine=F (F L / N) also splits wider cells.
     // Given without --amr, --derefine / --refine choose length. --split=linear (default) | constant.
     hydro::Adapt amr = hydro::Adapt::mass;
-    double derefine = 0, refine = 0;
+    double derefine = -1, refine = -1;  // -1: not given (mass keeps its safeguard, length has none)
+    double split_min = hydro::split_min_default, merge_max = hydro::merge_max_default;  // --split-min=, --merge-max= (h); mass only
     double refine_mass = hydro::refine_mass_default, derefine_mass = hydro::derefine_mass_default;
     bool refine_linear = true;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
@@ -151,8 +153,9 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     fv.set_inflow_spacing(o.inflow_spacing * pb.L / n);
     fv.set_adapt(o.amr);
     fv.set_adapt_mass(o.refine_mass, o.derefine_mass);
-    fv.set_derefine(o.derefine * pb.L / n);
-    fv.set_refine(o.refine * pb.L / n);
+    fv.set_mass_bounds(o.split_min * pb.L / n, o.merge_max * pb.L / n, hydro::derefine_length_default * pb.L / n);
+    if (o.derefine >= 0) fv.set_derefine(o.derefine * pb.L / n);
+    if (o.refine >= 0) fv.set_refine(o.refine * pb.L / n);
     fv.set_split(o.refine_linear);
     {
         const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
@@ -257,7 +260,12 @@ int main(int argc, char* argv[]) {
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|none|minmod|vanleer]"
                      " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--smallest]"
                      " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name] [--times=t1,t2,...]"
-                     " [--amr=mass|length|off] [--refine-mass=2] [--derefine-mass=0.5] [--derefine=f] [--refine=F] [--split=linear|constant]\n";
+                     " [--amr=mass|length|off] [--refine-mass=2] [--derefine-mass=0.5] [--split-min=0.12] [--merge-max=2] [--derefine=f]"
+                     " [--refine=F] [--split=linear|constant]\n"
+                     "  refinement of a moving line: --amr=mass (default) splits cells above refine-mass times their initial mass if wider than"
+                     " split-min h,\n  removes cells below derefine-mass times it if narrower than merge-max h, and any cell narrower than"
+                     " --derefine=f h (default 0.03);\n  --derefine / --refine without --amr: --amr=length (cells narrower than f h go, wider"
+                     " than F h split); --amr=off: neither\n";
         return 1;
     }
     const std::string name = argv[1];
@@ -282,14 +290,16 @@ int main(int argc, char* argv[]) {
     o.regularise = !has(argc, argv, "--no-regularise");
     o.fused = !has(argc, argv, "--unfused");
     o.smallest = has(argc, argv, "--smallest");
-    o.derefine = std::stod(flag(argc, argv, "--derefine", "0"));
-    o.refine = std::stod(flag(argc, argv, "--refine", "0"));
+    o.derefine = std::stod(flag(argc, argv, "--derefine", "-1"));
+    o.refine = std::stod(flag(argc, argv, "--refine", "-1"));
+    o.split_min = std::stod(flag(argc, argv, "--split-min", std::to_string(hydro::split_min_default).c_str()));
+    o.merge_max = std::stod(flag(argc, argv, "--merge-max", std::to_string(hydro::merge_max_default).c_str()));
     o.refine_mass = std::stod(flag(argc, argv, "--refine-mass", std::to_string(hydro::refine_mass_default).c_str()));
     o.derefine_mass = std::stod(flag(argc, argv, "--derefine-mass", std::to_string(hydro::derefine_mass_default).c_str()));
     o.refine_linear = std::string(flag(argc, argv, "--split", "linear")) == "linear";
     {
         // An explicitly given criterion replaces the default: lengths alone mean --amr=length.
-        const std::string amr = flag(argc, argv, "--amr", (o.derefine > 0 || o.refine > 0) ? "length" : "mass");
+        const std::string amr = flag(argc, argv, "--amr", (o.derefine >= 0 || o.refine >= 0) ? "length" : "mass");
         if (amr != "mass" && amr != "length" && amr != "off") throw std::invalid_argument("hydro_1d: --amr=mass|length|off");
         o.amr = amr == "mass" ? hydro::Adapt::mass : amr == "length" ? hydro::Adapt::length : hydro::Adapt::off;
     }
@@ -332,10 +342,12 @@ int main(int argc, char* argv[]) {
     if (moving) {
         const char* amr = o.amr == hydro::Adapt::mass ? "mass" : o.amr == hydro::Adapt::length ? "length" : "off";
         std::cout << " amr=" << amr;
-        if (o.amr == hydro::Adapt::mass) std::cout << " refine_mass=" << o.refine_mass << " derefine_mass=" << o.derefine_mass;
+        if (o.amr == hydro::Adapt::mass)
+            std::cout << " refine_mass=" << o.refine_mass << " derefine_mass=" << o.derefine_mass << " split_min=" << o.split_min
+                      << " merge_max=" << o.merge_max << " derefine=" << (o.derefine >= 0 ? o.derefine : hydro::derefine_length_default);
         if (o.amr != hydro::Adapt::off) {
-            if (o.derefine > 0) std::cout << " derefine=" << o.derefine;
-            if (o.refine > 0) std::cout << " refine=" << o.refine;
+            if (o.amr == hydro::Adapt::length && o.derefine >= 0) std::cout << " derefine=" << o.derefine;
+            if (o.refine >= 0) std::cout << " refine=" << o.refine;
             std::cout << " split=" << (o.refine_linear ? "linear" : "constant") << " removed=" << best.removed << " refined=" << best.refined;
         }
     }

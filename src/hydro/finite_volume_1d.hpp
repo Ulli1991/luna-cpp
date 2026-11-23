@@ -25,6 +25,10 @@ inline constexpr double courant_static_1d = 0.8, courant_moving_1d = 0.4;
 // neither. research_notes/derefine_1d_2026-11-20.md.
 enum class Adapt { off, mass, length };
 inline constexpr double refine_mass_default = 2.0, derefine_mass_default = 0.5;
+// Adapt::mass's size bounds, in initial spacings h: a cell narrower than derefine_length_default goes whatever its mass (the safeguard
+// that fixes #30, where the cells keep their mass); mass splits only cells wider than split_min_default, mass removes only cells
+// narrower than merge_max_default (a light cell next to dense gas would otherwise split every step, and open walls would empty).
+inline constexpr double derefine_length_default = 0.03, split_min_default = 0.12, merge_max_default = 2.0;
 
 template <class ExecSpace, class Riemann>
 class FiniteVolume<1, ExecSpace, Riemann, Precision<>> {
@@ -57,6 +61,8 @@ public:
             x_ = Points(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_x")), n_);
             Kokkos::deep_copy(exec_, x_, mesh.positions());
             adapt_ = Adapt::mass;
+            const double h = mesh.box() / n_;
+            set_mass_bounds(split_min_default * h, merge_max_default * h, derefine_length_default * h);
         }
     }
 
@@ -77,9 +83,11 @@ public:
     // neighbours share its mass, momentum and energy) or get a new one (refine()). Which cells: set_adapt (default Adapt::mass on a
     // moving line, off on a static one). Mass: below derefine_mass or above refine_mass times the cell's target mass (its mass at the
     // first step; a split's children inherit the parent's, cells from an inflow wall get their mass at birth; cells with target 0 never
-    // adapt by mass). Length (Adapt::length, or a safeguard on top of mass): narrower than min_volume, wider than max_volume (0: none).
-    // The split takes minmod-limited linear profiles (default) or the old cells' means (set_split(false)). Factors and thresholds need
-    // hysteresis: refine_mass >= 4 derefine_mass, max_volume > 4 min_volume.
+    // adapt by mass). Mass's size bounds (set_mass_bounds; defaults 0.12 h, 2 h, 0.03 h, h the initial spacing): it splits only
+    // cells wider than split_min and removes only cells narrower than merge_max; and any cell narrower than the safeguard goes
+    // whatever its mass (set_derefine replaces the safeguard). Length (Adapt::length): narrower than min_volume, wider than max_volume
+    // (set_derefine, set_refine; 0: none). The split takes minmod-limited linear profiles (default) or the old cells' means
+    // (set_split(false)). Factors and thresholds need hysteresis: refine_mass >= 4 derefine_mass, max_volume > 4 min_volume.
     void set_adapt(Adapt mode) {
         adapt_ = motion_ == Motion::moving ? mode : Adapt::off;
         targets_ready_ = false;
@@ -89,6 +97,11 @@ public:
         refine_mass_ = refine_mass;
         deref_mass_ = derefine_mass;
         check_hysteresis();
+    }
+    void set_mass_bounds(double split_min, double merge_max, double safeguard) {
+        split_min_ = split_min;
+        merge_max_ = merge_max;
+        safeguard_ = safeguard;
     }
     void set_derefine(double min_volume) {
         deref_volume_ = motion_ == Motion::moving ? min_volume : 0.0;
@@ -443,8 +456,10 @@ public:
     // next to another one going in the same call (the next step takes it) and keeps 3 cells. Returns whether any went.
     // Used by: step(), run_fused(). Public because CUDA lambdas cannot be in private members.
     bool derefine() {
-        const double limit = length_on() ? deref_volume_ : 0.0;
+        // Mass: the safeguard unless set_derefine gave a length; length: that length.
+        const double limit = !length_on() ? 0.0 : mass_on() && !(deref_volume_ > 0) ? safeguard_ : deref_volume_;
         const double factor = mass_on() && targets_ready_ ? deref_mass_ : 0.0;
+        const double merge_max = merge_max_ > 0 ? merge_max_ : 1e300;
         if (!(limit > 0) && !(factor > 0)) return false;
         const Line line = mesh_->line();
         const int n = n_;
@@ -458,7 +473,7 @@ public:
             "hydro1::deref_find", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n),
             KOKKOS_LAMBDA(int s, int& at, bool final) {
                 const int i = line.order(s);
-                const bool light = factor > 0 && target(i) > 0 && q(i, 0) < factor * target(i);
+                const bool light = factor > 0 && target(i) > 0 && q(i, 0) < factor * target(i) && line.volume(s) < merge_max;
                 if (line.volume(s) < limit || light) {
                     if (final) ids(at) = i;
                     ++at;
@@ -513,6 +528,7 @@ public:
     bool refine() {
         const double limit = length_on() ? refine_volume_ : 0.0;
         const double factor = mass_on() && targets_ready_ ? refine_mass_ : 0.0;
+        const double split_min = split_min_;
         if (!(limit > 0) && !(factor > 0)) return false;
         const Line line = mesh_->line();
         const int n = n_;
@@ -529,7 +545,7 @@ public:
             "hydro1::refine_find", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n),
             KOKKOS_LAMBDA(int s, int& at, bool final) {
                 const int i = line.order(s);
-                const bool heavy = factor > 0 && target0(i) > 0 && q0(i, 0) > factor * target0(i);
+                const bool heavy = factor > 0 && target0(i) > 0 && q0(i, 0) > factor * target0(i) && line.volume(s) > split_min;
                 if (!(limit > 0 && line.volume(s) > limit) && !heavy) return;
                 if (final) {
                     // Behind a wall the gap runs to the generator's mirror, so the same rule keeps the point inside the line.
@@ -934,6 +950,7 @@ private:
     long long refined_ = 0;
     Adapt adapt_ = Adapt::off;  // set_adapt(); the constructor makes it mass on a moving line
     double refine_mass_ = refine_mass_default, deref_mass_ = derefine_mass_default;
+    double split_min_ = 0, merge_max_ = 0, safeguard_ = 0;  // set_mass_bounds(); the constructor sets the defaults on a moving line
     bool targets_ready_ = false;
     Kokkos::View<double*, Memory> target_;        // per id: the target mass (Adapt::mass)
     Points refine_points_;                        // the new generators' positions, one per wide cell
