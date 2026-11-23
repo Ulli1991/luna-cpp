@@ -77,9 +77,13 @@ std::string sci(double x) {
 struct Options {
     int n = 0, order = 1;
     double jitter = 0, courant = 0.8, fixed_dt = 0, inflow_spacing = 1, max_wall = 0;
-    double derefine = 0;  // --derefine=f: moving, remove cells narrower than f L / N (luna-cpp #30); 0: off
-    double refine = 0;    // --refine=F: moving, a new generator in cells wider than F L / N; 0: off
-    bool refine_linear = false;  // --split=linear: the split takes limited linear profiles (default: constant)
+    // Refinement and derefinement of a moving line (hydro::Adapt). --amr=mass (default) | length | off. Mass: --refine-mass=2
+    // --derefine-mass=0.5 times each cell's target mass; --derefine=f, --refine=F (lengths f L / N, F L / N) then act as a safeguard.
+    // Given without --amr, --derefine / --refine choose length. --split=linear (default) | constant.
+    hydro::Adapt amr = hydro::Adapt::mass;
+    double derefine = 0, refine = 0;
+    double refine_mass = hydro::refine_mass_default, derefine_mass = hydro::derefine_mass_default;
+    bool refine_linear = true;
     hydro::Limiter limiter = hydro::Limiter::face_centroid;
     hydro::Motion motion = hydro::Motion::static_mesh;
     bool fixed = false, phases = false, regularise = true, fused = true, smallest = false;
@@ -145,8 +149,11 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
     hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{pb.gamma}, o.order, o.limiter, o.motion,
                                              o.motion == hydro::Motion::moving ? pb.moving_walls : pb.walls, o.regularise);
     fv.set_inflow_spacing(o.inflow_spacing * pb.L / n);
+    fv.set_adapt(o.amr);
+    fv.set_adapt_mass(o.refine_mass, o.derefine_mass);
     fv.set_derefine(o.derefine * pb.L / n);
-    fv.set_refine(o.refine * pb.L / n, o.refine_linear);
+    fv.set_refine(o.refine * pb.L / n);
+    fv.set_split(o.refine_linear);
     {
         const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
         const auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
@@ -249,7 +256,8 @@ int main(int argc, char* argv[]) {
         std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|none|minmod|vanleer]"
                      " [--amp=a] [--pad=length] [--steps=max] [--max-wall=s] [--repeats=r] [--phases] [--memory] [--no-regularise] [--unfused] [--smallest]"
-                     " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name] [--times=t1,t2,...] [--derefine=f] [--refine=F] [--split=constant|linear]\n";
+                     " [--inflow-spacing=s] [--t-end=t] [--out=file.npy] [--series=name] [--times=t1,t2,...]"
+                     " [--amr=mass|length|off] [--refine-mass=2] [--derefine-mass=0.5] [--derefine=f] [--refine=F] [--split=linear|constant]\n";
         return 1;
     }
     const std::string name = argv[1];
@@ -276,7 +284,15 @@ int main(int argc, char* argv[]) {
     o.smallest = has(argc, argv, "--smallest");
     o.derefine = std::stod(flag(argc, argv, "--derefine", "0"));
     o.refine = std::stod(flag(argc, argv, "--refine", "0"));
-    o.refine_linear = std::string(flag(argc, argv, "--split", "constant")) == "linear";
+    o.refine_mass = std::stod(flag(argc, argv, "--refine-mass", std::to_string(hydro::refine_mass_default).c_str()));
+    o.derefine_mass = std::stod(flag(argc, argv, "--derefine-mass", std::to_string(hydro::derefine_mass_default).c_str()));
+    o.refine_linear = std::string(flag(argc, argv, "--split", "linear")) == "linear";
+    {
+        // An explicitly given criterion replaces the default: lengths alone mean --amr=length.
+        const std::string amr = flag(argc, argv, "--amr", (o.derefine > 0 || o.refine > 0) ? "length" : "mass");
+        if (amr != "mass" && amr != "length" && amr != "off") throw std::invalid_argument("hydro_1d: --amr=mass|length|off");
+        o.amr = amr == "mass" ? hydro::Adapt::mass : amr == "length" ? hydro::Adapt::length : hydro::Adapt::off;
+    }
     for (std::string list = flag(argc, argv, "--times", ""); !list.empty();) {
         const std::size_t comma = list.find(',');
         o.times.push_back(std::stod(list.substr(0, comma)));
@@ -313,8 +329,16 @@ int main(int argc, char* argv[]) {
               << " final_cells=" << best.cells << " cell_updates=" << double(best.cell_updates) << " M_cell_updates_per_s=" << rate / 1e6 << " hash=" << best.hash
               << " same_bits=" << (same ? 1 : 0) << " backend=" << Exec::name();
     if (o.smallest) std::cout << " smallest_h=" << best.smallest_h;
-    if (o.derefine > 0) std::cout << " derefine=" << o.derefine << " removed=" << best.removed;
-    if (o.refine > 0) std::cout << " refine=" << o.refine << " split=" << (o.refine_linear ? "linear" : "constant") << " refined=" << best.refined;
+    if (moving) {
+        const char* amr = o.amr == hydro::Adapt::mass ? "mass" : o.amr == hydro::Adapt::length ? "length" : "off";
+        std::cout << " amr=" << amr;
+        if (o.amr == hydro::Adapt::mass) std::cout << " refine_mass=" << o.refine_mass << " derefine_mass=" << o.derefine_mass;
+        if (o.amr != hydro::Adapt::off) {
+            if (o.derefine > 0) std::cout << " derefine=" << o.derefine;
+            if (o.refine > 0) std::cout << " refine=" << o.refine;
+            std::cout << " split=" << (o.refine_linear ? "linear" : "constant") << " removed=" << best.removed << " refined=" << best.refined;
+        }
+    }
     std::cout << "\n";
     if (o.phases) {
         const hydro::Timings& t = best.timings;

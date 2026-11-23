@@ -506,7 +506,9 @@ int main(int argc, char* argv[]) {
             return State{U[0] * (b - a), U[1] * (b - a), U[2] * (b - a)};
         });
         run(fv, problem.t_end, 0.4, hydro::TimeStep::arepo);
-        check.expect(fv.cells() == 256 && fv.cells_added() == 0, name + ", moving: no cells added");
+        check.expect(fv.cells_added() == 0 && fv.cells() == 256 + fv.cells_refined() - fv.cells_removed(),
+                     name + ", moving: no cells from the walls (" + std::to_string(fv.cells_refined()) + " refined, " + std::to_string(fv.cells_removed()) +
+                         " removed by the default mass criterion)");
     }
 
     // Derefinement (luna-cpp #30): a removed cell's mass, momentum and energy go to its neighbours; a uniform state stays
@@ -519,6 +521,7 @@ int main(int argc, char* argv[]) {
         const State W{1.3, 0.7, 0.4};
         set(fv, mesh, [&](double) { return W; }, gas);
         const auto before = totals(fv);
+        fv.set_adapt(hydro::Adapt::length);
         fv.set_derefine(0.6 / n);
         for (int s = 0; s < 20; ++s) fv.step(fv.time_step(0.3, hydro::TimeStep::arepo));
         const auto after = totals(fv);
@@ -535,8 +538,9 @@ int main(int argc, char* argv[]) {
         namespace pr = hydro::problems_1d;
         const pr::Problem problem = pr::problem("sod");
         const hydro::Gas gamma14{pr::gamma_gas};
-        std::array<std::vector<double>, 3> q;
-        for (int k = 0; k < 3; ++k) {
+        // 0: off; 1, 2: length thresholds no cell crosses; 3: mass factors 1e3 and 1e-3, which no cell crosses.
+        std::array<std::vector<double>, 4> q;
+        for (int k = 0; k < 4; ++k) {
             Mesh mesh(exec, problem.L, voronoi::Ends::walls);
             build(mesh, points(256, problem.L, 0.0, 1));
             FV<> fv(exec, mesh, gamma14, 1, hydro::Limiter::face_centroid, Motion::moving, problem.walls);
@@ -544,17 +548,57 @@ int main(int argc, char* argv[]) {
                 const State U = problem.average(a + problem.origin, b + problem.origin);
                 return State{U[0] * (b - a), U[1] * (b - a), U[2] * (b - a)};
             });
+            fv.set_adapt(k == 0 ? hydro::Adapt::off : k == 3 ? hydro::Adapt::mass : hydro::Adapt::length);
             if (k == 1) fv.set_derefine(1e-3 * problem.L / 256);
-            if (k == 2) fv.set_refine(20 * problem.L / 256, true);
+            if (k == 2) fv.set_refine(20 * problem.L / 256);
+            if (k == 3) fv.set_adapt_mass(1e3, 1e-3);
             run(fv, problem.t_end, 0.4, hydro::TimeStep::arepo);
             const auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
             for (int i = 0; i < fv.cells(); ++i)
                 for (int v = 0; v < 3; ++v) q[k].push_back(h(i, v));
             if (k == 1) check.expect(fv.cells_removed() == 0, "derefinement, Sod: no cell below 1e-3 h");
             if (k == 2) check.expect(fv.cells_refined() == 0, "refinement, Sod: no cell above 20 h");
+            if (k == 3) check.expect(fv.cells_refined() + fv.cells_removed() == 0, "mass, Sod: no cell beyond 1e3 or 1e-3 times its target");
         }
         check.expect(q[0] == q[1], "derefinement, Sod: a threshold no cell crosses gives the same bits as off");
         check.expect(q[0] == q[2], "refinement, Sod: a threshold no cell crosses gives the same bits as off");
+        check.expect(q[0] == q[3], "mass, Sod: factors no cell crosses give the same bits as off");
+    }
+    // Mass (the default on a moving line). A uniform state moving with the mesh keeps each cell's mass, so the test changes it: one
+    // step sets the targets, then the density goes to 3 times (every cell above twice its target: they split, the children inheriting
+    // the target) and then to 1/9 (below half: cells go). Totals kept, the state uniform, the same cells changed in a second run.
+    {
+        const int n = 400;
+        std::array<long long, 2> changes{};
+        for (int run = 0; run < 2; ++run) {
+            Mesh mesh(exec, 1.0);
+            build(mesh, points(n, 1.0, 0.5, 7));
+            FV<> fv(exec, mesh, gas, 1, hydro::Limiter::face_centroid, Motion::moving);
+            State W{1.3, 0.7, 0.4};
+            set(fv, mesh, [&](double) { return W; }, gas);
+            fv.step(fv.time_step(0.3, hydro::TimeStep::arepo));  // the targets: the masses before this step
+            double drift = 0, worst = 0;
+            long long added = 0;
+            for (const double scale : {3.0, 1.0 / 9.0}) {
+                W = State{W[0] * scale, W[1], W[2] * scale};
+                set(fv, mesh, [&](double) { return W; }, gas);
+                const auto before = totals(fv);
+                for (int s = 0; s < 10; ++s) fv.step(fv.time_step(0.3, hydro::TimeStep::arepo));
+                const auto after = totals(fv);
+                for (int v = 0; v < 3; ++v) drift = std::max(drift, static_cast<double>(std::abs(after[v] - before[v]) / std::abs(before[v])));
+                for (const Cell& c : cells(fv, mesh))
+                    for (int v = 0; v < 3; ++v) worst = std::max(worst, std::abs(c.W[v] - W[v]) / std::abs(W[v]));
+                if (scale > 1) added = fv.cells_refined();
+            }
+            changes[run] = fv.cells_refined() * 100000 + fv.cells_removed();
+            if (run == 0)
+                check.expect(fv.adapt() == hydro::Adapt::mass && added > 0 && fv.cells_removed() > 0 &&
+                                 fv.cells() == n + fv.cells_refined() - fv.cells_removed() && mesh.particles() == fv.cells() && drift < 1e-14 &&
+                                 worst < 1e-13,
+                             "mass, periodic, uniform: density x3 adds " + std::to_string(added) + ", then x1/9 removes " +
+                                 std::to_string(fv.cells_removed()) + "; totals to " + sci(drift) + ", state to " + sci(worst));
+        }
+        check.expect(changes[0] == changes[1], "mass: two runs add and remove the same cells");
     }
 
     // Refinement: the new cells take what lies on their lengths, so the totals are kept and a uniform state stays uniform, with the
@@ -572,7 +616,9 @@ int main(int argc, char* argv[]) {
             else
                 set(fv, mesh, [&](double x) { return State{1.0 + 0.5 * std::sin(2 * M_PI * x), 0.3, 1.0 + 0.2 * std::cos(2 * M_PI * x)}; }, gas);
             const auto before = totals(fv);
-            fv.set_refine(1.3 / n, linear);
+            fv.set_adapt(hydro::Adapt::length);
+            fv.set_refine(1.3 / n);
+            fv.set_split(linear);
             for (int s = 0; s < 20; ++s) fv.step(fv.time_step(0.3, hydro::TimeStep::arepo));
             const auto after = totals(fv);
             double drift = 0, worst = 0;
@@ -598,6 +644,14 @@ int main(int argc, char* argv[]) {
             refused = true;
         }
         check.expect(refused, "refinement: max_volume 1 h with min_volume 0.3 h is refused (no gap of 4)");
+        refused = false;
+        fv.set_refine(0);  // the refused length stays set; clear it, so only the mass factors are checked
+        try {
+            fv.set_adapt_mass(1.5, 0.5);
+        } catch (const std::invalid_argument&) {
+            refused = true;
+        }
+        check.expect(refused, "mass: refine 1.5 with derefine 0.5 times the target is refused (no gap of 4)");
     }
     return check.failed() != 0;
 }

@@ -3,7 +3,8 @@
     python deref_sweep.py run <bin> <out dir> <configs,...> <N,...> [jobs]   # every ladder problem moving (and moving-wide), each config
     python deref_sweep.py table <out dir> <refs dir>                          # cells removed and added, same bits as off, L1 rho
 
-A config is `off` or parts joined by `+`: d<f> (--derefine=f), r<F> (--refine=F), r<F>lin (--refine=F --split=linear); e.g. d3e-2,
+A config is `off` (--amr=off) or parts joined by `+`: mass (--amr=mass, the default), d<f> (--derefine=f), r<F> (--refine=F, split
+--split=constant), r<F>lin (--refine=F --split=linear); lengths without mass mean --amr=length. E.g. mass, mass+d3e-2, d3e-2,
 r2, r2lin, r2+d3e-2. `off` is always run. Run with LUNA's environment. Each run: hydro_1d <p> <N> --moving [--pad=...] --steps=200 N
 <config flags> --out=<out>/<series>_<p>_<N>_<config>.npy; the log line gives the hash and the cells removed and added. L1 rho as the
 ladder's (ladder_1d.errors; linear waves: plain L1 at amplitude 1e-6).
@@ -26,15 +27,19 @@ SERIES = ("moving", "moving-wide")
 
 
 def flags(config):
-    out = []
-    for part in ([] if config == "off" else config.split("+")):
+    """hydro_1d flags of a config (see the head of this file)."""
+    if config == "off":
+        return ["--amr=off"]
+    parts = config.split("+")
+    out = ["--amr=mass"] if "mass" in parts else []
+    for part in parts:
+        if part == "mass":
+            continue
         if part.startswith("d"):
             out.append(f"--derefine={part[1:]}")
         elif part.startswith("r"):
             linear = part.endswith("lin")
-            out.append(f"--refine={part[1:-3] if linear else part[1:]}")
-            if linear:
-                out.append("--split=linear")
+            out += [f"--refine={part[1:-3] if linear else part[1:]}", f"--split={'linear' if linear else 'constant'}"]
         else:
             raise ValueError(f"config part {part}")
     return out

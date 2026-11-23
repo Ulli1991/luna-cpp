@@ -59,7 +59,8 @@ Run simulate(const std::string& name, int n, Motion motion, Limiter limiter = Li
     }
     hydro::FiniteVolume<1, Exec, Riemann> fv(exec, mesh, hydro::Gas{pb.gamma}, 1, limiter, motion, motion == Motion::moving ? pb.moving_walls : pb.walls);
     fv.set_inflow_spacing(pb.L / n);
-    fv.set_derefine(derefine * pb.L / n);  // luna-cpp #30; 0: off
+    if (derefine > 0) fv.set_adapt(hydro::Adapt::length);  // luna-cpp #30's gate: the length criterion; else the default (mass)
+    fv.set_derefine(derefine * pb.L / n);
     auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.positions());
     auto c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.centroid());
     auto V = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.volume());
