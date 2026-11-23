@@ -32,10 +32,20 @@ struct Options {
     bool split = true;                   // LUNA's split step: a predictor pass, then the faces pass (+(D + 2) doubles a padded cell); false: one kernel
 };
 
+// The team policy of the Kokkos kernels; -DLUNA_GRID_MIN_BLOCKS=b -DLUNA_GRID_MAX_THREADS=t adds launch bounds, as grid_cuda.hpp.
+#if defined(LUNA_GRID_MIN_BLOCKS)
+template <class Exec>
+using GridTeams = Kokkos::TeamPolicy<Exec, Kokkos::LaunchBounds<LUNA_GRID_MAX_THREADS, LUNA_GRID_MIN_BLOCKS>>;
+#else
+template <class Exec>
+using GridTeams = Kokkos::TeamPolicy<Exec>;
+#endif
+
 template <int D, class Riemann = HLLC, class Exec = Kokkos::DefaultExecutionSpace>
 class GridFiniteVolume {
 public:
     using Memory = typename Exec::memory_space;
+    using Teams = GridTeams<Exec>;
     using Fields = Kokkos::View<double**, Kokkos::LayoutRight, Memory>;  // (D + 2, cells): variable-major, cells z fastest
     static constexpr bool device = !Kokkos::SpaceAccessibility<Kokkos::HostSpace, Memory>::accessible;
 
@@ -50,8 +60,10 @@ public:
         }
         p_ = make_params(gamma, dx, o.cfl, o.limiter, o.floors, o.smallr, o.smallc, o.allow_first_order);
         cells_ = static_cast<long>(n_[0]) * n_[1] * n_[2];
-        // LUNA's FUSED_TILE (Pallas tile_for: the largest power of two up to the cap that divides the extent); a host runs one cell a team.
-        const int caps[3][3] = {{64, 1, 1}, {4, 32, 1}, {1, 4, 64}};
+        // LUNA's FUSED_TILE, or with split its SPLIT_TILE faces tile (Pallas tile_for: the largest power of two up to the cap that divides the
+        // extent; 3D split 1 x 2 x 64, 128 threads: 1.38x the 256 of 1 x 4 x 64 at 256^3, job 32819613); a host runs one cell a team.
+        const int fused[3][3] = {{64, 1, 1}, {4, 32, 1}, {1, 4, 64}}, faces[3][3] = {{256, 1, 1}, {2, 64, 1}, {1, 2, 64}};
+        const int (&caps)[3][3] = o.split ? faces : fused;
         for (int a = 0; a < 3; ++a) {
             int t = 1;
             const int cap = o.tile[a] > 0 ? o.tile[a] : device ? caps[D - 1][a] : 1;
@@ -138,7 +150,7 @@ public:
             from_key_ = true;
 #endif
         } else {
-            const Kokkos::TeamPolicy<Exec> teams(exec_, tiles_[0] * tiles_[1] * tiles_[2], tile_[0] * tile_[1] * tile_[2]);
+            const Teams teams(exec_, tiles_[0] * tiles_[1] * tiles_[2], tile_[0] * tile_[1] * tile_[2]);
             if (o_.split) {
                 const Params p = p_;
                 const double h = 0.5 * dt;
@@ -171,7 +183,7 @@ public:
         double dt;
         int tile[3], tiles[3];
 
-        KOKKOS_INLINE_FUNCTION void operator()(const typename Kokkos::TeamPolicy<Exec>::member_type& m, double& best) const {
+        KOKKOS_INLINE_FUNCTION void operator()(const typename Teams::member_type& m, double& best) const {
             const int r = m.league_rank();
             const int tz = r % tiles[2], ty = (r / tiles[2]) % tiles[1], tx = r / (tiles[2] * tiles[1]);
             double tile_low = Kokkos::Experimental::infinity_v<double>;

@@ -389,6 +389,29 @@ ncu at 256³ minmod:
 
 The predictor now matches LUNA's (0.11 ns). The faces kernel does 928 FP64 instructions per cell against LUNA's 1390, but takes 1.03 ns against LUNA's 0.50. With 156 registers in 256-thread blocks it still runs one block, 8 warps, per SM. 128-thread blocks would fit three blocks, 12 warps, as LUNA's (lever 4).
 
+**Lever 4, block shape and registers (done, 2026-11-23).** Done before lever 2 because the ncu numbers pointed there. The faces tile sweep at 256³ (job 32819613, one binary, `--tile`) put the 128-thread tiles at 1.38× the 256-thread one, and 64-thread tiles at 1.30×. The default 3D split tile is now 1 × 2 × 64, LUNA's SPLIT_TILE faces tile, in both forms. Jobs 32894404/06 and 32894932 ran lever 1 against lever 4 against LUNA in each job, with ncu in 32894934; ravg1002 at 1305 MHz, the same box as above.
+
+| N | limiter | LUNA | CUDA lever 1 | **CUDA lever 4** | Kokkos lever 1 | Kokkos lever 4 | CUDA cap 4 blocks |
+|---|---|---|---|---|---|---|---|
+| 128³ | minmod | 0.76–0.92 | 0.885 | **1.220** | 0.580 | 0.770 | 1.279 |
+| 128³ | MC | 0.78–0.87 | 0.842 | **1.139** | 0.540 | 0.720 | 1.200 |
+| 256³ | minmod | 1.090 | 0.885 | **1.221** | 0.547 | 0.727 | 1.057 |
+| 256³ | MC | 0.977 | 0.844 | **1.154** | 0.514 | 0.686 | 1.088 |
+| 384³ | minmod | 1.140 | 0.851 | **1.167** | 0.592 | 0.781 | 0.952 |
+| 384³ | MC | 1.028 | 0.814 | **1.115** | 0.556 | 0.747 | 0.927 |
+
+The CUDA step is now ahead of LUNA at 256³ and 384³: 1.12× and 1.02× with minmod, 1.18× and 1.08× with MC. Bits: the bit-exact build equals LUNA after 100 Sedov steps at 128³, in both forms and with both limiters.
+
+ncu at 256³ minmod, faces kernel:
+
+| Variant | ns/cell | regs | warps active | FP64 pipe | local B/cell | DRAM B/cell |
+|---|---|---|---|---|---|---|
+| 256 threads (lever 1) | 1.03 | 156 | 12.5 % | 26 % | 0 | 310 |
+| 128 threads (lever 4) | 0.73 | 156 | 18.75 % | 37 % | 0 | 304 |
+| 128 threads, cap 4 blocks | 0.84 | 128 | 25 % | 32 % | 488 | 369 |
+
+The cap spills, and its extra warps do not pay for that at 256³ and up. It is off, and the macro stays for sweeps. Our whole step now takes 0.11 + 0.73 = 0.84 ns/cell of kernel time, against LUNA's 0.86. LUNA's faces kernel is still busier (0.50 ns, 78 % FP64 pipe) but does 1390 FP64 instructions per cell against our 928, and LUNA carries 0.20 ns/cell of padding and update that we do not have.
+
 ## 10. Speed LUNA leaves unused
 
 LUNA's own profile, CODE_NOTES 2026-11-04 (Sedov 256³, FP64, minmod, HLLC, split Pallas path, at ncu's base clock of 1095 MHz), and what each item would be worth:

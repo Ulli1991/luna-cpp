@@ -11,13 +11,21 @@
 
 #include <cstdint>
 
+// Launch bounds of step_kernel for a register sweep: -DLUNA_GRID_MIN_BLOCKS=b -DLUNA_GRID_MAX_THREADS=t caps the registers so that b
+// blocks of t threads fit an SM. Off by default (caps are measured both ways, research_notes/fixed_grid_2026-11-19.md).
+#if defined(LUNA_GRID_MIN_BLOCKS)
+#define LUNA_GRID_BOUNDS __launch_bounds__(LUNA_GRID_MAX_THREADS, LUNA_GRID_MIN_BLOCKS)
+#else
+#define LUNA_GRID_BOUNDS
+#endif
+
 namespace hydro::grid {
 
 // One block per tile, one thread per cell (z fastest within the tile, tiles numbered z fastest as the Kokkos kernel's league), the
 // tile's minimum time step by a shared-memory tree (block sizes are powers of two), then one atomicMin on its order key.
 // Split: the faces pass of the split step, reading the half-step states H.
 template <int D, class Riemann, bool Split>
-__global__ void step_kernel(Field<D> W, HalfField<D> H, Arrays a, Params p, double dt, int3 tile, int3 tiles, unsigned long long* key) {
+__global__ void LUNA_GRID_BOUNDS step_kernel(Field<D> W, HalfField<D> H, Arrays a, Params p, double dt, int3 tile, int3 tiles, unsigned long long* key) {
     __shared__ double low[1024];
     const int r = static_cast<int>(blockIdx.x), t = static_cast<int>(threadIdx.x);
     const int tz = r % tiles.z, ty = (r / tiles.z) % tiles.y, tx = r / (tiles.z * tiles.y);

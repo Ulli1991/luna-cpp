@@ -29,7 +29,11 @@ nvidia-smi --query-gpu=name,uuid,clocks.sm,clocks.max.sm,clocks.applications.gra
 nvidia-smi --query-gpu=timestamp,clocks.sm,utilization.gpu,power.draw,temperature.gpu --format=csv,noheader -l 1 >"$OUT/clock-$job.csv" &
 logger=$!
 trap 'kill $logger 2>/dev/null' EXIT
-for b in $BINS; do echo "build ${b%%=*}: ${b#*=}"; done
+# A build is name=dir or name=dir@flag+flag (hydro_sedov flags, + for a space, : for a comma: sbatch --export splits on commas),
+# e.g. tile128=/path@--tile=1:2:64.
+bdir() { local x=${1#*=}; echo "${x%%@*}"; }
+bflags() { local x=${1#*=}; [[ $x == *@* ]] && echo "${x#*@}" | tr "+:" " ,"; }
+for b in $BINS; do echo "build ${b%%=*}: $(bdir "$b") flags: $(bflags "$b")"; done
 luna() {  # N LIMITER [out=...]
     (module purge; module load gcc/13 cuda/12
      cd "$OUT" && PYTHONDONTWRITEBYTECODE=1 "$py" -u "$here/luna_grid_time.py" "$1" "$2" steps="$STEPS" warm=10 "${@:3}" 2>&1 | grep -E "^luna_|Error|error")
@@ -53,9 +57,9 @@ for side in $SIDES; do
         for round in $(seq 1 "$ROUNDS"); do
             for b in $BINS; do
                 for kernel in cuda kokkos; do
-                    extra=()
-                    [[ $side == 128 && $round == 1 ]] && extra=(--out="$OUT/${b%%=*}_${kernel}_${side}_$lim.npy")
-                    echo "round $round ${b%%=*} $kernel: $(ours "${b#*=}/hydro_sedov" $kernel "$side" $lim "$ic" "${extra[@]}")"
+                    read -r -a extra <<< "$(bflags "$b")"
+                    [[ $side == 128 && $round == 1 ]] && extra+=(--out="$OUT/${b%%=*}_${kernel}_${side}_$lim.npy")
+                    echo "round $round ${b%%=*} $kernel: $(ours "$(bdir "$b")/hydro_sedov" $kernel "$side" $lim "$ic" "${extra[@]}")"
                 done
             done
             [[ $round -gt 1 ]] && echo "round $round $(luna "$side" "$l" | grep luna_run)"
@@ -89,7 +93,7 @@ if [[ -n "${NCU:-}" ]]; then
         for kernel in cuda kokkos; do
             (module purge; module load gcc/14 cuda/13.0 hdf5-serial
              timeout 900 "$NCU_BIN" --target-processes all --clock-control none --kernel-name-base demangled --kernel-name "regex:step_kernel|predictor_kernel|StepTeam|ParallelFor" \
-                --launch-skip 4 --launch-count 6 --metrics "$M" --csv --page raw "${b#*=}/hydro_sedov" 256 grid --grid --kernel=$kernel --limiter=minmod \
+                --launch-skip 4 --launch-count 6 --metrics "$M" --csv --page raw "$(bdir "$b")/hydro_sedov" 256 grid --grid --kernel=$kernel --limiter=minmod $(bflags "$b") \
                 --steps=5 >"$OUT/ncu_${b%%=*}_$kernel-$job.csv" 2>"$OUT/ncu_${b%%=*}_$kernel-$job.err"; echo "ncu ${b%%=*} $kernel exit $?")
         done
     done
