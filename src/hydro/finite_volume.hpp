@@ -412,7 +412,9 @@ public:
 
     // The sweep of time_step(), one thread per cell: the point velocity (moving), then the limited least-squares gradients (order 1).
     // Reads prims_; writes gradients_/exponents_ (read by FaceFlux::gradient()) and w_ (read by face_velocity()). Used by: sweep().
-    template <bool Moving, bool Grad>
+    // Fixed: the run's options as constants (|area| kept, lists with the owner bit, the face-centroid limiter), so no
+    // run-time checks per list entry; sweep() picks it when the run has them, the general functor otherwise.
+    template <bool Moving, bool Grad, bool Fixed = false>
     struct Sweep {
         Prims prim;
         Points w;
@@ -425,9 +427,15 @@ public:
 
         // |area| of face f: cached (the same bits) or from the area row.
         KOKKOS_INLINE_FUNCTION double magnitude_of(int f) const {
+            if constexpr (Fixed) return magnitudes(f);
             if (magnitudes.data()) return magnitudes(f);
             const Vec a = geo.area_of(f);
             return Kokkos::sqrt(dot(a, a));
+        }
+        // The other cell of list entry k (face f) of cell i.
+        KOKKOS_INLINE_FUNCTION int other_at(int k, int f, int i) const {
+            if constexpr (Fixed) return geo.face(k) >= 0 ? geo.neighbour_of(f) : geo.owner_of(f);
+            return geo.other_at(k, f, i);
         }
 
         KOKKOS_INLINE_FUNCTION void operator()(int i) const {
@@ -451,12 +459,12 @@ public:
             // so each entry waits for one level of loads, not three (list, face sides, rows).
             const int first = geo.start(i), end = geo.start(i + 1);
             int f_next = first < end ? geo.face_at(first) : 0;
-            int j_next = first < end ? geo.other_at(first, f_next, i) : 0;
+            int j_next = first < end ? other_at(first, f_next, i) : 0;
             for (int k = first; k < end; ++k) {
                 const int f = f_next, j = j_next;
                 if (k + 1 < end) {
                     f_next = geo.face_at(k + 1);
-                    j_next = geo.other_at(k + 1, f_next, i);
+                    j_next = other_at(k + 1, f_next, i);
                 }
                 const State Wj = primitive_row(prim, j);
                 const Vec d = geo.separation(i, j);
@@ -502,7 +510,9 @@ public:
             }
             if constexpr (Grad) {
                 for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                    if (limiter == Limiter::none) break;
+                    if constexpr (!Fixed) {
+                        if (limiter == Limiter::none) break;
+                    }
                     const int f = geo.face_at(k);
                     if (any_tiny && magnitude_of(f) < tiny) continue;
                     const Vec offset = geo.face_offset(f, i);
@@ -534,7 +544,7 @@ public:
                 hi[v] = -Kokkos::Experimental::finite_max_v<G>;
             }
             for (int k = geo.start(i); k < geo.start(i + 1); ++k) {
-                const int f = geo.face_at(k), j = geo.other_at(k, f, i);
+                const int f = geo.face_at(k), j = other_at(k, f, i);
                 if (magnitude_of(f) < tiny) continue;
                 const State Wj = primitive_row(prim, j);
                 for (int v = 0; v < V; ++v) {
@@ -877,10 +887,20 @@ public:
     template <bool Moving, int Order>
     double sweep(double courant) {
         const Kokkos::RangePolicy<ExecSpace> cells(exec_, 0, n_);
+        // The sweep with the run's options as constants when it has the common ones (order 1, |area| kept, owner bit,
+        // face-centroid limiter); LUNA_SWEEP_GENERAL forces the general functor (measurement).
+        bool fixed = false;
+        if constexpr (Order == 1) {
+            fixed = !sweep_general_ && magnitudes_valid_ && geometry_.bit && limiter_ == Limiter::face_centroid;
+            if (fixed)
+                Kokkos::parallel_for("hydro::sweep", cells,
+                                     Sweep<Moving, true, true>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_, magnitudes_});
+        }
         if constexpr (Moving || Order == 1)
-            Kokkos::parallel_for("hydro::sweep", cells,
-                                 Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
-                                                           magnitudes_valid_ ? magnitudes_ : Magnitudes()});
+            if (!fixed)
+                Kokkos::parallel_for("hydro::sweep", cells,
+                                     Sweep<Moving, Order == 1>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_,
+                                                               magnitudes_valid_ ? magnitudes_ : Magnitudes()});
         double smallest = 0;
         if constexpr (D == 2) {
             if (rule_ == StepRule::luna) {
@@ -1656,6 +1676,7 @@ private:
     bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr;
     // apply()'s chunked schedule (LUNA_UPDATE_CHUNK = log2 faces a chunk; 0: off) and its cell ranges per face chunk.
     int chunk_shift_ = std::getenv("LUNA_UPDATE_CHUNK") ? std::atoi(std::getenv("LUNA_UPDATE_CHUNK")) : 0;
+    bool sweep_general_ = std::getenv("LUNA_SWEEP_GENERAL") != nullptr;  // sweep(): the general functor only (measurement)
     bool ranges_valid_ = false;
     std::vector<std::vector<std::pair<int, int>>> range_schedule_;
     Kokkos::View<long long*, Memory> chunk_counts_;
