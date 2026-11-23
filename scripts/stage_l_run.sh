@@ -4,6 +4,7 @@
 # static, moving: build-omp/hydro_1d (or build-cuda with BACKEND=cuda) stage-l-<k> <N> --t-end=4 --times=<TIMES>, one run writing
 #   <series>_stage-l-<k>_<N>_t<t>.npy snapshots (x, Q) and the final state; moving: AREPO's rule at 0.4, static LUNA's at 0.8.
 #   B: where the build directories are (default R). DEREF=f: moving with derefinement, cells narrower than f h removed (luna-cpp #30); default 0, off.
+#   REFINE=F: moving with refinement, a new generator in cells wider than F h; SPLIT=linear: limited linear split (default constant).
 # luna: scripts/luna_1d_run.py, HLLC, MC, CFL 0.8, LUNA's floors on (floor=1), one run per time of LUNA_TIMES.
 #SBATCH -J stagel
 #SBATCH -p general
@@ -36,7 +37,7 @@ one() {
         CFL=0.8 floor=1 max_s=$max_s resume=$out/state_$f.npz 2>&1 | grep -E "^luna|rror" | sed "s/^/$f: /"
     done
   else
-    local f=${s}_${p}_${n} flags=(); [[ $s == moving ]] && flags=(--moving --derefine=${DEREF:-0})
+    local f=${s}_${p}_${n} flags=(); [[ $s == moving ]] && flags=(--moving --derefine=${DEREF:-0} --refine=${REFINE:-0} --split=${SPLIT:-constant})
     grep -qs '"reached": 1' $f.npy.json && return
     $bin $p $n --t-end=4 --times=$TIMES --repeats=1 --series=$s --max-wall=$max_s --out=$f.npy "${flags[@]}" 2>&1 | grep -E "^ours|rror" \
       | sed "s/^/$f: /"

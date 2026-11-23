@@ -535,8 +535,8 @@ int main(int argc, char* argv[]) {
         namespace pr = hydro::problems_1d;
         const pr::Problem problem = pr::problem("sod");
         const hydro::Gas gamma14{pr::gamma_gas};
-        std::array<std::vector<double>, 2> q;
-        for (int k = 0; k < 2; ++k) {
+        std::array<std::vector<double>, 3> q;
+        for (int k = 0; k < 3; ++k) {
             Mesh mesh(exec, problem.L, voronoi::Ends::walls);
             build(mesh, points(256, problem.L, 0.0, 1));
             FV<> fv(exec, mesh, gamma14, 1, hydro::Limiter::face_centroid, Motion::moving, problem.walls);
@@ -545,13 +545,59 @@ int main(int argc, char* argv[]) {
                 return State{U[0] * (b - a), U[1] * (b - a), U[2] * (b - a)};
             });
             if (k == 1) fv.set_derefine(1e-3 * problem.L / 256);
+            if (k == 2) fv.set_refine(20 * problem.L / 256, true);
             run(fv, problem.t_end, 0.4, hydro::TimeStep::arepo);
             const auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fv.state());
             for (int i = 0; i < fv.cells(); ++i)
                 for (int v = 0; v < 3; ++v) q[k].push_back(h(i, v));
             if (k == 1) check.expect(fv.cells_removed() == 0, "derefinement, Sod: no cell below 1e-3 h");
+            if (k == 2) check.expect(fv.cells_refined() == 0, "refinement, Sod: no cell above 20 h");
         }
         check.expect(q[0] == q[1], "derefinement, Sod: a threshold no cell crosses gives the same bits as off");
+        check.expect(q[0] == q[2], "refinement, Sod: a threshold no cell crosses gives the same bits as off");
+    }
+
+    // Refinement: the new cells take what lies on their lengths, so the totals are kept and a uniform state stays uniform, with the
+    // constant and the linear split; a sine wave, both splits, keeps its totals; refinement and derefinement need a gap.
+    for (const bool linear : {false, true}) {
+        const std::string split = linear ? "linear" : "constant";
+        for (const bool uniform : {true, false}) {
+            const int n = 400;
+            Mesh mesh(exec, 1.0);
+            build(mesh, points(n, 1.0, 0.95, 11));  // jittered: some cells far wider than 1 / n
+            FV<> fv(exec, mesh, gas, 1, hydro::Limiter::face_centroid, Motion::moving);
+            const State W{1.3, 0.7, 0.4};
+            if (uniform)
+                set(fv, mesh, [&](double) { return W; }, gas);
+            else
+                set(fv, mesh, [&](double x) { return State{1.0 + 0.5 * std::sin(2 * M_PI * x), 0.3, 1.0 + 0.2 * std::cos(2 * M_PI * x)}; }, gas);
+            const auto before = totals(fv);
+            fv.set_refine(1.3 / n, linear);
+            for (int s = 0; s < 20; ++s) fv.step(fv.time_step(0.3, hydro::TimeStep::arepo));
+            const auto after = totals(fv);
+            double drift = 0, worst = 0;
+            for (int v = 0; v < 3; ++v) drift = std::max(drift, static_cast<double>(std::abs(after[v] - before[v]) / std::abs(before[v])));
+            if (uniform)
+                for (const Cell& c : cells(fv, mesh))
+                    for (int v = 0; v < 3; ++v) worst = std::max(worst, std::abs(c.W[v] - W[v]) / std::abs(W[v]));
+            check.expect(fv.cells_refined() > 0 && fv.cells() == n + fv.cells_refined() && mesh.particles() == fv.cells() && drift < 1e-14 &&
+                             worst < 1e-13,
+                         "refinement, periodic, " + split + ", " + (uniform ? "uniform" : "sine") + ": " + std::to_string(fv.cells_refined()) +
+                             " cells added, totals to " + sci(drift) + (uniform ? ", state to " + sci(worst) : std::string()));
+        }
+    }
+    {
+        Mesh mesh(exec, 1.0);
+        build(mesh, points(64, 1.0, 0.0, 1));
+        FV<> fv(exec, mesh, gas, 1, hydro::Limiter::face_centroid, Motion::moving);
+        fv.set_derefine(0.3 / 64);
+        bool refused = false;
+        try {
+            fv.set_refine(1.0 / 64);
+        } catch (const std::invalid_argument&) {
+            refused = true;
+        }
+        check.expect(refused, "refinement: max_volume 1 h with min_volume 0.3 h is refused (no gap of 4)");
     }
     return check.failed() != 0;
 }

@@ -67,9 +67,22 @@ public:
     }
     // Derefinement (moving only, luna-cpp #30): after each step a cell narrower than `min_volume` loses its generator and its
     // two neighbours share its mass, momentum and energy (derefine()). 0: off, the default; the step is then unchanged.
-    void set_derefine(double min_volume) { deref_volume_ = motion_ == Motion::moving ? min_volume : 0.0; }
+    void set_derefine(double min_volume) {
+        deref_volume_ = motion_ == Motion::moving ? min_volume : 0.0;
+        check_hysteresis();
+    }
     double derefine_volume() const { return deref_volume_; }
     long long cells_removed() const { return removed_; }
+    // Refinement (moving only): after each step a cell wider than `max_volume` gets a new generator (refine()); `linear`: the split
+    // takes minmod-limited linear profiles of the old cells instead of their means. 0: off, the default. With derefinement on as well,
+    // max_volume must exceed 4 min_volume: every cell a split leaves is at least a quarter of the split one, so none is removed again.
+    void set_refine(double max_volume, bool linear = false) {
+        refine_volume_ = motion_ == Motion::moving ? max_volume : 0.0;
+        refine_linear_ = linear;
+        check_hysteresis();
+    }
+    double refine_volume() const { return refine_volume_; }
+    long long cells_refined() const { return refined_; }
     int order() const { return order_; }
     Motion motion() const { return motion_; }
     const Gas& gas() const { return gas_; }
@@ -315,6 +328,7 @@ public:
             mesh_stats_.rebuilds += report.rebuilt;
             if (due()) supply_cells();
             derefine();
+            refine();
             looked_ = false;
             phase_end(timings, &Timings::mesh);
         }
@@ -435,6 +449,114 @@ public:
             });
         n_ -= change.done;
         removed_ += change.done;
+        return true;
+    }
+
+    // Gives every cell wider than refine_volume_ a new generator, at the midpoint of its larger gap: between its generator and the
+    // farther neighbour's, or, if that side is a wall, halfway to the wall. The two gaps there become equal, and every cell the split
+    // leaves (the new one, the parent, the neighbour across the gap) is at least a quarter of the split cell's length. (Its centre of
+    // mass would not do: in a regular cell it is the generator itself.) Mesh<1>::insert reports the length the new cell takes from
+    // each of its two old neighbours, the parent and the cell across the gap. The new cell gets what lies on those lengths and the
+    // old cells keep the rest, so the totals are kept by construction:
+    //  - constant (default): the fraction overlap / volume of the old cell's totals (exact for a uniform state);
+    //  - linear: the old cell's minmod-limited linear profile of each conserved density integrated over the piece (slope 0 next to a
+    //    wall); a uniform state has slope 0, so it stays uniform too.
+    // Three passes (pieces, then the old cells left of new ones, then those right of them): no old cell is touched twice in a pass,
+    // so no atomics and the same bits every run. One request per gap (Mesh<1>::insert defers a second). Returns whether any went in.
+    // Used by: step(), run_fused(). Public because CUDA lambdas cannot be in private members.
+    bool refine() {
+        if (!(refine_volume_ > 0)) return false;
+        const Line line = mesh_->line();
+        const double limit = refine_volume_;
+        const int n = n_;
+        if (refine_points_.extent(0) < static_cast<std::size_t>(n))
+            refine_points_ = Points(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_refine_points")), capacity_);
+        const auto points = refine_points_;
+        int count = 0;
+        Kokkos::parallel_scan(
+            "hydro1::refine_find", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n),
+            KOKKOS_LAMBDA(int s, int& at, bool final) {
+                if (!(line.volume(s) > limit)) return;
+                if (final) {
+                    const i64 left = line.gap(s - 1), right = line.gap(s), k = static_cast<i64>(line.key(s));
+                    const bool wall_left = !line.periodic && s == 0, wall_right = !line.periodic && s == line.n - 1;
+                    i64 key;
+                    if (right >= left)
+                        key = wall_right ? k + right / 4 : k + right / 2;  // behind a wall the gap runs to the mirror: half of it is the wall
+                    else
+                        key = wall_left ? k - left / 4 : k - left / 2;
+                    if (key < 0) key += line.period;
+                    if (key >= line.period) key -= line.period;
+                    points(at, 0) = (static_cast<double>(key) + 0.5) * line.step;  // inside grid step `key`
+                }
+                ++at;
+            },
+            count);
+        if (count == 0) return false;
+        reserve_cells(n_ + count);
+        const bool linear = refine_linear_;
+        if (linear) {
+            if (slope_.extent(0) < static_cast<std::size_t>(capacity_))
+                slope_ = Kokkos::View<double* [V], Memory>(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_refine_slope")), capacity_);
+            const auto q = q_;
+            const auto slope = slope_;
+            Kokkos::parallel_for(
+                "hydro1::refine_slopes", Kokkos::RangePolicy<ExecSpace>(exec_, 0, n), KOKKOS_LAMBDA(int s) {
+                    const int i = line.order(s), a = line.slot(s, -1), b = line.slot(s, 1);
+                    const double Vs = line.volume(s);
+                    for (int v = 0; v < V; ++v) slope(i, v) = 0;
+                    if (a < 0 || b < 0) return;
+                    const double Va = line.volume(a), Vb = line.volume(b);
+                    for (int v = 0; v < V; ++v) {
+                        const double u = q(i, v) / Vs;
+                        const double dl = (u - q(line.order(a), v) / Va) / (0.5 * (Va + Vs));
+                        const double dr = (q(line.order(b), v) / Vb - u) / (0.5 * (Vb + Vs));
+                        slope(i, v) = dl * dr <= 0 ? 0.0 : (Kokkos::fabs(dl) < Kokkos::fabs(dr) ? dl : dr);
+                    }
+                });
+        }
+        if (piece_.extent(0) < static_cast<std::size_t>(count))
+            piece_ = Kokkos::View<double* [2][V], Memory>(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("hydro_refine_piece")), capacity_);
+        const auto wanted = Kokkos::subview(points, std::make_pair(0, count), Kokkos::ALL);
+        const typename Mesh::Changes& change = mesh_->insert(wanted);
+        if (change.done == 0) return false;
+        const auto q = q_;
+        const auto x = x_;
+        const auto slope = slope_;
+        const auto piece = piece_;
+        const auto id = change.id;
+        const auto neighbour = change.neighbour;
+        const auto overlap = change.overlap;
+        const auto volume = change.volume;
+        Kokkos::parallel_for(
+            "hydro1::refine_split", Kokkos::RangePolicy<ExecSpace>(exec_, 0, change.requested), KOKKOS_LAMBDA(int r) {
+                const int i = id(r);
+                if (i < 0) return;
+                for (int v = 0; v < V; ++v) q(i, v) = 0;
+                for (int side = 0; side < 2; ++side) {
+                    const int old = neighbour(r, side);
+                    for (int v = 0; v < V; ++v) piece(r, side, v) = 0;
+                    if (old < 0) continue;  // a wall: nothing taken on that side
+                    const double l = overlap(r, side), Vo = volume(r, side);
+                    // The piece lies at the old cell's end next to the new generator: right end for side 0, left end for side 1.
+                    const double offset = (side == 0 ? 0.5 : -0.5) * (Vo - l);
+                    for (int v = 0; v < V; ++v) {
+                        const double part = linear ? (q(old, v) / Vo + slope(old, v) * offset) * l : q(old, v) * (l / Vo);
+                        piece(r, side, v) = part;
+                        q(i, v) += part;
+                    }
+                }
+                x(i, 0) = wanted(r, 0);
+            });
+        for (int side = 0; side < 2; ++side)
+            Kokkos::parallel_for(
+                "hydro1::refine_take", Kokkos::RangePolicy<ExecSpace>(exec_, 0, change.requested), KOKKOS_LAMBDA(int r) {
+                    const int old = neighbour(r, side);
+                    if (id(r) < 0 || old < 0) return;
+                    for (int v = 0; v < V; ++v) q(old, v) -= piece(r, side, v);
+                });
+        n_ += change.done;
+        refined_ += change.done;
         return true;
     }
 
@@ -671,6 +793,7 @@ public:
             looked_ = watching_;
             if (due()) again = supply_cells() || again;
             again = derefine() || again;
+            again = refine() || again;
             looked_ = false;
             if (again) return time_step(courant, TimeStep::luna);
         }
@@ -741,6 +864,17 @@ private:
     double deref_volume_ = 0;  // set_derefine(); 0: off
     long long removed_ = 0;
     Kokkos::View<int*, Memory> deref_ids_;
+    double refine_volume_ = 0;  // set_refine(); 0: off
+    bool refine_linear_ = false;
+    long long refined_ = 0;
+    Points refine_points_;                        // the new generators' positions, one per wide cell
+    Kokkos::View<double* [V], Memory> slope_;    // linear split: limited slopes of the conserved densities, per old id
+    Kokkos::View<double* [2][V], Memory> piece_;  // what each new cell takes from its two old neighbours
+
+    void check_hysteresis() const {
+        if (refine_volume_ > 0 && deref_volume_ > 0 && !(refine_volume_ > 4 * deref_volume_))
+            throw std::invalid_argument("FiniteVolume<1>: refinement needs max_volume > 4 min_volume of derefinement");
+    }
     Kokkos::View<double[5], Memory> ends_{"hydro_ends"};
     typename Kokkos::View<double[5], Memory>::host_mirror_type ends_host_ = Kokkos::create_mirror_view(ends_);
     Points points_{"hydro_new_points", 2};
