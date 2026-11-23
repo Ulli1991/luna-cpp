@@ -20,8 +20,8 @@ cmake -S . -B $b -DCMAKE_BUILD_TYPE=Release -DKokkos_DIR=/u/uli/kokkos-cuda/lib6
 cmake --build $b --parallel 16 --target hydro_derivatives_test > $b.build.log 2>&1; echo "build exit $?"
 grep -E "warning|error" $b.build.log | grep -v "extern/" | head -40
 [[ -x $b/hydro_derivatives_test ]] || exit 1
-if [[ "${1:-}" == cost-moving ]]; then  # the 2D moving step's derivatives only: 512^2 and 1024^2 cells
-    for nx in 512 1024; do $b/hydro_derivatives_test --cost-moving $nx; done
+if [[ "${1:-}" == cost-moving || "${1:-}" == profile-moving ]]; then  # the 2D moving step's derivatives only: 512^2 and 1024^2 cells
+    for nx in 512 1024; do $b/hydro_derivatives_test --cost-moving $nx ${1%-moving}; done
     exit 0
 fi
 time $b/hydro_derivatives_test

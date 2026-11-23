@@ -1525,17 +1525,119 @@ void tests_2d(Check& check) {
     step_test_2d<FV2_32>(check, "2D HLLC grad32", 32, 3, 0.01, &reference);
 }
 
+// Per label while on: kernel and copy time (fenced at both ends), and the device allocations' count and bytes.
+// Used by: cost_moving_2d (its profile), DeviceBytes.
+struct KernelClock {
+    struct Row {
+        long long calls = 0, bytes = 0;
+        double ms = 0;
+    };
+    static inline bool on = false;
+    static inline std::map<std::string, Row> kernels, copies, allocations;
+    static inline std::vector<std::string> open;
+    static inline Kokkos::Timer timer;
+    static void begin(const char* name, const uint32_t, uint64_t* id) {
+        if (!on) return;
+        Kokkos::fence();
+        open.emplace_back(name);
+        *id = open.size() - 1;
+        timer.reset();
+    }
+    static void end(uint64_t) {
+        if (!on || open.empty()) return;
+        Kokkos::fence();
+        Row& r = kernels[open.back()];
+        r.ms += timer.seconds() * 1e3;
+        ++r.calls;
+        open.pop_back();
+    }
+    static void copy_begin(Kokkos_Profiling_SpaceHandle dst, const char* dst_name, const void*, Kokkos_Profiling_SpaceHandle src, const char*,
+                           const void*, uint64_t size) {
+        if (!on) return;
+        Kokkos::fence();
+        open.push_back(std::string("deep_copy ") + src.name + "->" + dst.name + " [" + dst_name + "]");
+        copies[open.back()].bytes += static_cast<long long>(size);
+        timer.reset();
+    }
+    static void copy_end() {
+        if (!on || open.empty()) return;
+        Kokkos::fence();
+        Row& r = copies[open.back()];
+        r.ms += timer.seconds() * 1e3;
+        ++r.calls;
+        open.pop_back();
+    }
+    static void allocated(const char* label, uint64_t size) {
+        if (!on) return;
+        Row& r = allocations[label];
+        ++r.calls;
+        r.bytes += static_cast<long long>(size);
+    }
+    static void install() {
+        Kokkos::Tools::Experimental::set_begin_parallel_for_callback(begin);
+        Kokkos::Tools::Experimental::set_end_parallel_for_callback(end);
+        Kokkos::Tools::Experimental::set_begin_parallel_reduce_callback(begin);
+        Kokkos::Tools::Experimental::set_end_parallel_reduce_callback(end);
+        Kokkos::Tools::Experimental::set_begin_parallel_scan_callback(begin);
+        Kokkos::Tools::Experimental::set_end_parallel_scan_callback(end);
+        Kokkos::Tools::Experimental::set_begin_deep_copy_callback(copy_begin);
+        Kokkos::Tools::Experimental::set_end_deep_copy_callback(copy_end);
+    }
+    static void reset() {
+        kernels.clear();
+        copies.clear();
+        allocations.clear();
+    }
+    // The table: kernels, then copies, by time; allocations by bytes; ns and B per cell; the rest of `total_ms` as "outside".
+    static void print(const char* what, double total_ms, double reference_ms, int n) {
+        auto sorted = [](const std::map<std::string, Row>& m, bool by_bytes) {
+            std::vector<std::pair<std::string, Row>> v(m.begin(), m.end());
+            std::sort(v.begin(), v.end(), [&](const auto& a, const auto& b) { return by_bytes ? a.second.bytes > b.second.bytes : a.second.ms > b.second.ms; });
+            return v;
+        };
+        double inside = 0;
+        std::printf("profile %s: %.3f ms in all, %.3f ms the reference geometry (host), n %d\n", what, total_ms, reference_ms, n);
+        for (const auto& [name, r] : sorted(kernels, false)) {
+            inside += r.ms;
+            std::printf("  kernel %8.3f ms %7.2f ns/cell %4lld x  %s\n", r.ms, r.ms * 1e6 / n, r.calls, name.c_str());
+        }
+        for (const auto& [name, r] : sorted(copies, false)) {
+            inside += r.ms;
+            std::printf("  copy   %8.3f ms %7.2f ns/cell %4lld x %7.1f B/cell  %s\n", r.ms, r.ms * 1e6 / n, r.calls, double(r.bytes) / n, name.c_str());
+        }
+        long long bytes = 0, count = 0;
+        for (const auto& [name, r] : sorted(allocations, true)) {
+            bytes += r.bytes;
+            count += r.calls;
+            std::printf("  alloc  %7.1f B/cell %4lld x  %s\n", double(r.bytes) / n, r.calls, name.c_str());
+        }
+        std::printf("  kernels and copies %.3f ms; outside them (host work, allocation, launch gaps) %.3f ms without the reference; "
+                    "%lld device allocations, %.1f B/cell\n",
+                    inside, total_ms - inside - reference_ms, count, double(bytes) / n);
+    }
+};
 // Device bytes in use and their peak, from Kokkos's allocation callbacks (every space but the host's). Used by: cost_moving_2d.
 struct DeviceBytes {
     static inline long long now = 0, peak = 0;
-    static void allocate(const Kokkos_Profiling_SpaceHandle h, const char*, const void*, const uint64_t size) {
+    static void allocate(const Kokkos_Profiling_SpaceHandle h, const char* label, const void*, const uint64_t size) {
         if (std::string(h.name) == "Host") return;
         now += static_cast<long long>(size);
         peak = std::max(peak, now);
+        KernelClock::allocated(label, size);
     }
     static void deallocate(const Kokkos_Profiling_SpaceHandle h, const char*, const void*, const uint64_t size) {
         if (std::string(h.name) != "Host") now -= static_cast<long long>(size);
     }
+};
+// A geometry derivative of zero on the device: for timing the hydro alone (the library's version replaces the tests' host reference).
+struct NullGeometry : hydro::GeometryDerivative<2, Exec::memory_space> {
+    void tangent(const Points&, const Scalars& dV, const Points& dc, const Points& dA, const Points& dxf) const override {
+        Kokkos::deep_copy(dV, 0.0);
+        Kokkos::deep_copy(dc, 0.0);
+        Kokkos::deep_copy(dA, 0.0);
+        Kokkos::deep_copy(dxf, 0.0);
+    }
+    void adjoint(const Scalars&, const Points&, const Points&, const Points&, const Points&) const override {}
 };
 // A GeometryDerivative that times the one it wraps (the tests' host reference: its time is not the hydro's).
 struct TimedGeometry : hydro::GeometryDerivative<2, Exec::memory_space> {
@@ -1545,24 +1647,30 @@ struct TimedGeometry : hydro::GeometryDerivative<2, Exec::memory_space> {
     void tangent(const Points& dx, const Scalars& dV, const Points& dc, const Points& dA, const Points& dxf) const override {
         Kokkos::fence();
         Kokkos::Timer t;
+        const bool clock = KernelClock::on;  // the reference's own kernels and copies are not the hydro's
+        KernelClock::on = false;
         inner.tangent(dx, dV, dc, dA, dxf);
+        KernelClock::on = clock;
         Kokkos::fence();
         ms += t.seconds() * 1e3;
     }
     void adjoint(const Scalars& Vbar, const Points& cbar, const Points& Abar, const Points& xfbar, const Points& xbar) const override {
         Kokkos::fence();
         Kokkos::Timer t;
+        const bool clock = KernelClock::on;
+        KernelClock::on = false;
         inner.adjoint(Vbar, cbar, Abar, xfbar, xbar);
+        KernelClock::on = clock;
         Kokkos::fence();
         ms += t.seconds() * 1e3;
     }
 };
 
 // The moving step's derivatives on an nx x nx jittered periodic 2D mesh, order 1: time_step + step against step_moving_tangent and
-// step_moving_adjoint (medians of 5 after a warm-up; each from the same state, the reload not timed). The geometry's derivative is
-// the tests' host reference, timed apart: "hydro" is the rest. Peak: the device bytes in use at most during the call.
+// step_moving_adjoint (medians of 5 after a warm-up; each from the same state, the reload not timed). The geometry's derivative is a
+// null one on the device (zeros), standing in for the library's: the host reference would dominate and blur the hydro's time.
 template <class F>
-void cost_moving_2d(int nx) {
+void cost_moving_2d(int nx, bool profile = false) {
     using Mesh = typename F::Mesh;
     const hydro::Gas gas{5.0 / 3.0};
     const exact_predicates::BoxN<2> box(1.0);
@@ -1633,7 +1741,7 @@ void cost_moving_2d(int nx) {
         std::sort(g.begin(), g.end());
         return Result{t[t.size() / 2], g[g.size() / 2], peak};
     };
-    const reference::Geometry2D<Mesh, Exec::memory_space> ref(mesh);
+    const NullGeometry ref;
     const Result forward = time([&] {
         fv.step(fv.time_step(0.3));
         return 0.0;
@@ -1651,13 +1759,67 @@ void cost_moving_2d(int nx) {
     long long resident = DeviceBytes::now;
     auto line = [&](const char* what, const Result& r) {
         const double hydro_ms = r.ms - r.geometry_ms;
-        std::printf("  %-8s %9.3f ms (%5.2fx), without the reference geometry %9.3f ms (%5.2fx, %.4f G cell steps/s); peak +%.0f B/cell\n", what,
+        std::printf("  %-8s %9.3f ms (%5.2fx), without the geometry derivative %9.3f ms (%5.2fx, %.4f G cell steps/s); peak +%.0f B/cell\n", what,
                     r.ms, r.ms / forward.ms, hydro_ms, hydro_ms / forward.ms, n / (hydro_ms * 1e-3) * 1e-9, double(r.peak) / n);
     };
     std::printf("cost_moving_2d n %d faces %d, order 1, resident %.0f B/cell:\n", n, mesh.faces(), double(resident) / n);
     line("forward", forward);
     line("tangent", tangent);
     line("adjoint", adjoint);
+    if (!profile) return;
+    // The speed-of-light table: each kernel and copy fenced and timed by label, each allocation counted (one call each).
+    KernelClock::install();
+    auto table = [&](const char* what, auto&& f) {
+        load();
+        Kokkos::deep_copy(dq, 1e-6);
+        Kokkos::deep_copy(dx, 0.0);
+        Kokkos::deep_copy(qbar, 1.0);
+        Kokkos::deep_copy(xbar, 1.0);
+        Kokkos::fence();
+        KernelClock::reset();
+        KernelClock::on = true;
+        Kokkos::Timer timer;
+        const double reference_ms = f();
+        Kokkos::fence();
+        const double total = timer.seconds() * 1e3;
+        KernelClock::on = false;
+        KernelClock::print(what, total, reference_ms, n);
+    };
+    table("forward", [&] {
+        fv.step(fv.time_step(0.3));
+        return 0.0;
+    });
+    table("tangent", [&] {
+        const TimedGeometry timed(ref);
+        fv.step_moving_tangent(dt, dq, dx, timed);
+        return timed.ms;
+    });
+    table("adjoint", [&] {
+        const TimedGeometry timed(ref);
+        fv.step_moving_adjoint(dt, qbar, xbar, timed);
+        return timed.ms;
+    });
+    // The allocations alone, as the adjoint makes them (two face-row arrays of 40, the list entries' 9, twenty cell arrays of 2), each
+    // freed at the end, with and without the zero fill: what the arrays cost outside the kernels.
+    for (const bool fill : {true, false}) {
+        Kokkos::fence();
+        Kokkos::Timer timer;
+        {
+            using Rows = Kokkos::View<double**, Kokkos::LayoutRight, Exec::memory_space>;
+            auto make = [&](const char* label, int rows, int width) {
+                return fill ? Rows(label, rows, width) : Rows(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string(label)), rows, width);
+            };
+            std::vector<Rows> keep;
+            keep.push_back(make("probe_rows", mesh.faces(), 40));
+            keep.push_back(make("probe_rows2", mesh.faces(), 40));
+            keep.push_back(make("probe_entries", 2 * mesh.faces(), 9));
+            for (int a = 0; a < 20; ++a) keep.push_back(make("probe_cells", n, 2));
+            Kokkos::fence();
+        }
+        Kokkos::fence();
+        std::printf("probe: 23 allocations and frees (%.0f B/cell)%s: %.3f ms\n", (2 * 40 * 8.0 * mesh.faces() + 2 * 9 * 8.0 * mesh.faces()) / n + 20 * 16,
+                    fill ? ", zero-filled" : ", not filled", timer.seconds() * 1e3);
+    }
 }
 
 // One warm-up of each, then time_step + step, time_step + step_tangent, step_adjoint once each: the kernels ncu measures.
@@ -1693,7 +1855,7 @@ int main(int argc, char** argv) {
         if (std::string(argv[a]) == "--cost-moving") {  // the 2D moving step's derivatives, nx x nx cells
             Kokkos::Tools::Experimental::set_allocate_data_callback(DeviceBytes::allocate);
             Kokkos::Tools::Experimental::set_deallocate_data_callback(DeviceBytes::deallocate);
-            cost_moving_2d<FV2>(std::stoi(argv[a + 1]));
+            cost_moving_2d<FV2>(std::stoi(argv[a + 1]), a + 2 < argc && std::string(argv[a + 2]) == "profile");
             return 0;
         } else if (std::string(argv[a]) == "--cost") {
             cost<FV>(std::stoi(argv[a + 1]), "double");
