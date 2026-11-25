@@ -81,9 +81,14 @@ What is expected:
 
 The move from the last pin, 1741a1a to 7da61fb (2026-11-23; luna-cpp branch `voronoi-latest`, logs in
 `/raven/u/uli/voronoi-cpp-joblogs/latest/`):
-- Builds and tests (jobs 32906593, 32906592): [A100 ctest n of n; CI's host steps ctest n of n with sanitizers off
-  and on, lint clean].
-- Bits (job 32906593): [results].
+- Builds and tests (jobs 32906593, 32906592): A100 ctest 5 of 5 (`hydro1d_issue30` disabled, as before); CI's host
+  steps (gcc 15, OpenMP Kokkos, 2 threads, voronoi-cpp from a local checkout with `-DLUNA_VORONOI_COMMIT=7da61fb`):
+  ctest 5 of 5 with sanitizers off and on, lint clean.
+- Bits (job 32906593): every hash equal, moving 3D included: Q, x and volume of Sedov 128³ after 50 steps on all six
+  paths (static, moving, order 0, per-cell moving, HLL moving, double moving) and moving to 1e4 yr (349 steps); 1D Sod,
+  Shu-Osher and Woodward-Colella at N = 1024, static and moving; 2D KH 256², 300 steps, static and moving; the 3D vortex
+  64 state, static and moving. Only the device flip counts differ, by a few in 10⁶, as between two runs of one binary.
+  The rounding allowance for moving 3D was not needed for this move.
 - Stuck steps and field L1 (job 32906612): [results].
 - Speed (job 32906612): [moving step at 128³ and 256³: G cell updates/s, mesh part in ms, B/cell].
 
