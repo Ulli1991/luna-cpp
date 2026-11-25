@@ -1,18 +1,6 @@
 // The Sod tube's six parameters theta = (rho_L, P_L, u_L, rho_R, P_R, u_R) and the derivatives of a final-state objective with respect
 // to them, by the hand-written tangents (FiniteVolume<1>::step_tangent, six of them) and adjoint (step_adjoint, one), at a fixed dt.
-// The problem is astronomix's shock-tube sensitivity setup (arXiv:2607.18176 sec. 5.2): [0, 1], N = 200, gamma = 5/3, outflow walls,
-// 250 steps of 8e-4 to t = 0.2; objective J = 1/2 int (rho^2 + v^2 + P^2) dx. A second objective, L = 1/2 int (rho - rho_obs)^2 dx,
-// is the misfit of the final density against a target set by `target` (the inverse problem).
-//
-// Usage: sod_theta [--n=200] [--steps=250] [--dt=8e-4] [--gamma=1.6666666666666667] [--limiter=minmod|mc|vanleer] [--order=1]
-//   serve: reads commands on stdin, one per line, and answers one line each (for scripts/sod_theta.py):
-//     forward t1..t6               -> "J <J> L <L>"
-//     adjoint J|L t1..t6           -> "<value> <g1..g6> <ms forward with the tape> <ms adjoint>"
-//     tangent J|L t1..t6           -> "<value> <g1..g6> <ms of the six tangent runs>"
-//     target t1..t6                -> "ok": rho_obs = the final density at theta
-//     dump <path> J|L t1..t6       -> "ok": raw doubles, N rows of (x, rho, u, P, qbar_rho, qbar_mom, qbar_E) at the end, qbar = dObj/dU0 / dx
-//     quit
-//   --cost=<N>: times of a forward step, a tangent step and an adjoint step at N cells (fixed dt, the Sod state), median of 5, and B/cell.
+// The problem is astronomix's shock-tube sensitivity setup (arXiv:2607.18176 sec. 5.2); `usage` below has the numbers and objectives.
 #include "finite_volume_1d.hpp"
 
 #include <algorithm>
@@ -26,6 +14,22 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+// What --help prints.
+static const char usage[] = R"(Sod tube on [0, 1], N = 200, gamma = 5/3, outflow walls, 250 steps of 8e-4 to t = 0.2.
+Objectives: J = 1/2 int (rho^2 + v^2 + P^2) dx, and L = 1/2 int (rho - rho_obs)^2 dx, the misfit of the final density
+against a target set by `target` (the inverse problem).
+
+Usage: sod_theta [--n=200] [--steps=250] [--dt=8e-4] [--gamma=1.6666666666666667] [--limiter=minmod|mc|vanleer] [--order=1]
+  serve: reads commands on stdin, one per line, and answers one line each (for scripts/sod_theta.py):
+    forward t1..t6               -> "J <J> L <L>"
+    adjoint J|L t1..t6           -> "<value> <g1..g6> <ms forward with the tape> <ms adjoint>"
+    tangent J|L t1..t6           -> "<value> <g1..g6> <ms of the six tangent runs>"
+    target t1..t6                -> "ok": rho_obs = the final density at theta
+    dump <path> J|L t1..t6       -> "ok": raw doubles, N rows of (x, rho, u, P, qbar_rho, qbar_mom, qbar_E) at the end, qbar = dObj/dU0 / dx
+    quit
+  --cost=<N>: times of a forward step, a tangent step and an adjoint step at N cells (fixed dt, the Sod state), median of 5, and B/cell.
+)";
 
 namespace {
 
@@ -276,6 +280,11 @@ void cost(int n, double gamma, hydro::Limiter limiter, int order) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    for (int a = 1; a < argc; ++a)
+        if (std::string(argv[a]) == "--help") {
+            std::cout << usage;
+            return 0;
+        }
     Kokkos::ScopeGuard kokkos(argc, argv);
     const double gamma = std::stod(flag(argc, argv, "--gamma", "1.6666666666666667"));
     const hydro::Limiter limiter = limiter_of(flag(argc, argv, "--limiter", "minmod"));

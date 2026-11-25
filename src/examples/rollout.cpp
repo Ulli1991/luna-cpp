@@ -1,20 +1,6 @@
 // A rollout of the 2D or 3D finite-volume step at a fixed dt and its reverse-mode derivative, for optimisers in Python
 // (scripts/examples/rollout.py): the KH twin experiment, the field-level inference and the emergence examples. The mesh is the
 // Voronoi mesh of a regular n^D lattice in the periodic unit box (the Cartesian grid), static or moving.
-//
-// Usage: rollout --dim=2|3 --n=<cells a side> --steps=<k> --dt=<dt> [--gamma=5/3] [--moving] [--courant=0.3]
-//   serve: one command a line on stdin, one answer a line (paths are raw float64 files, C order):
-//     forward <U0 in> <final out>     U0: N x V intensive (rho, rho v, E) at the lattice cells; runs the steps, keeping the tape;
-//                                     final: N x (V + D + 1) rows of (Q extensive, x, volume). Answers "ok <ms> <cfl violations>".
-//     adjoint <bars in> <U0bar out>   bars: N x (V + D + 1) rows of (Q bar, x bar, volume bar) at the end of the last forward;
-//                                     U0bar = dL/dU0 (intensive, N x V). Answers "ok <ms>".
-//     tangent <U0 in> <dU0 in> <dQ out>  the forward with the tangent dU0 (intensive) beside it, the positions' tangent 0;
-//                                     dQ: N x V (extensive) at the end. Answers "ok <ms>".
-//     cfl <U0 in>                     "ok <time_step(courant) at U0>".
-//     geometry <out>                  N x (D + 1) rows of (x, volume) of the initial lattice. Answers "ok".
-//     memory                          "ok <peak device bytes> <bytes now>" (Kokkos Tools allocation callbacks).
-//     quit
-// The fixed dt is checked against time_step(courant) of every step; the steps where it is larger are counted.
 #include "finite_volume.hpp"
 #include "mesh_derivative.hpp"
 
@@ -30,6 +16,22 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+// What --help prints.
+static const char usage[] = R"(Usage: rollout --dim=2|3 --n=<cells a side> --steps=<k> --dt=<dt> [--gamma=5/3] [--moving] [--courant=0.3]
+  serve: one command a line on stdin, one answer a line (paths are raw float64 files, C order):
+    forward <U0 in> <final out>     U0: N x V intensive (rho, rho v, E) at the lattice cells; runs the steps, keeping the tape;
+                                    final: N x (V + D + 1) rows of (Q extensive, x, volume). Answers "ok <ms> <cfl violations>".
+    adjoint <bars in> <U0bar out>   bars: N x (V + D + 1) rows of (Q bar, x bar, volume bar) at the end of the last forward;
+                                    U0bar = dL/dU0 (intensive, N x V). Answers "ok <ms>".
+    tangent <U0 in> <dU0 in> <dQ out>  the forward with the tangent dU0 (intensive) beside it, the positions' tangent 0;
+                                    dQ: N x V (extensive) at the end. Answers "ok <ms>".
+    cfl <U0 in>                     "ok <time_step(courant) at U0>".
+    geometry <out>                  N x (D + 1) rows of (x, volume) of the initial lattice. Answers "ok".
+    memory                          "ok <peak device bytes> <bytes now>" (Kokkos Tools allocation callbacks).
+    quit
+The fixed dt is checked against time_step(courant) of every step; the steps where it is larger are counted.
+)";
 
 namespace {
 
@@ -328,6 +330,11 @@ int serve(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    for (int a = 1; a < argc; ++a)
+        if (std::string(argv[a]) == "--help") {
+            std::cout << usage;
+            return 0;
+        }
     Kokkos::ScopeGuard kokkos(argc, argv);
     DeviceMemory::start();
     const int dim = std::stoi(flag(argc, argv, "--dim", "2"));
