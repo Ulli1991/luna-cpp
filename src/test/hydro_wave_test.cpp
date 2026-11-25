@@ -2,6 +2,7 @@
 // Drives FiniteVolume<3>::time_step and step on hydro::wave_initial problems (src/hydro/finite_volume.hpp, problems_3d.hpp).
 // Bounds are measured plus 10 %; rates sit just below measured: rho 2.2 and 1.7.
 
+#include "build_info.hpp"
 #include "check.hpp"
 #include "finite_volume.hpp"
 #include "problems_3d.hpp"
@@ -130,6 +131,7 @@ void against_double(Check& check, const std::string& problem, hydro::Motion moti
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::print_build_info();
     Check check;
     gate(check, "vortex", {"moving", {2.6e-3, 7.2e-3, 3.6e-3}, {5.7e-4, 1.3e-3, 7.6e-4}, 2.0}, 24, 0, 0.1, 2);
     gate(check, "sound", {"moving", {2.7e-5, 2.7e-5, 2.7e-5}, {8.2e-6, 7.4e-6, 7.3e-6}, 1.6}, 24, 1e-3, 0.25, 1);

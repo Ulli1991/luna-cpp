@@ -1,7 +1,7 @@
 // LUNA's 1D tests, timed. Usage: hydro_1d <problem of problems_1d.hpp> <N> [flags] (docs/design.md).
 // Drives: main -> problem() -> simulate: Mesh::update -> FiniteVolume<1> (set state) -> loop time_step / step[_and_time_step] -> --out npy.
 
-#include "pin_notice.hpp"
+#include "build_info.hpp"
 #include "finite_volume_1d.hpp"
 #include "problems_1d.hpp"
 
@@ -114,6 +114,7 @@ void write_npy(const std::string& path, const std::vector<std::array<double, 6>>
     int length = std::snprintf(header, sizeof header, "{'descr': '<f8', 'fortran_order': False, 'shape': (%zu, 6), }", rows.size());
     while ((10 + length + 1) % 64 != 0) header[length++] = ' ';
     header[length++] = '\n';
+    luna::write_build_json(path);
     std::ofstream file(path, std::ios::binary);
     file.write("\x93NUMPY\x01\x00", 8);
     const unsigned short size = static_cast<unsigned short>(length);
@@ -236,7 +237,7 @@ Result simulate(const Problem& pb, const Options& o, const std::string& out) {
 
 int main(int argc, char* argv[]) {
     Kokkos::ScopeGuard kokkos(argc, argv);
-    luna::pin_notice();
+    luna::print_build_info();
     if (argc < 3) {
         std::cerr << "usage: hydro_1d <problem> <N> [--moving] [--riemann=hllc|hll] [--order=0|1]"
                      " [--dt=luna|arepo|fixed] [--courant=c] [--fixed-dt=dt] [--jitter=s] [--limiter=face|none|minmod|vanleer]"
@@ -319,7 +320,9 @@ int main(int argc, char* argv[]) {
         json << "{\"series\": \"" << series << "\", \"problem\": \"" << name << "\", \"N\": " << box_cells << ", \"steps\": " << best.steps
              << ", \"wall_s\": " << best.wall_s << ", \"peak_MB\": " << DeviceMemory::peak / 1e6 << ", \"sorts\": " << best.sorts
              << ", \"t\": " << best.t << ", \"reached\": " << (best.reached ? 1 : 0) << (o.smallest ? ", \"smallest_h\": " + sci(best.smallest_h) : std::string())
-             << ", \"final_cells\": " << best.cells << ", \"cell_updates\": " << best.cell_updates << ", \"file\": \"" << out.substr(out.find_last_of('/') + 1) << "\"}\n";
+             << ", \"final_cells\": " << best.cells << ", \"cell_updates\": " << best.cell_updates << ", \"file\": \"" << out.substr(out.find_last_of('/') + 1)
+             << "\", \"luna_cpp\": \"" << luna::build_info().luna_commit << "\", \"voronoi_cpp\": \"" << luna::build_info().voronoi_commit
+             << "\", \"voronoi_dirty\": " << (luna::build_info().voronoi_dirty ? 1 : 0) << "}\n";
     }
     if (DeviceMemory::peak > 0)
         std::cout << "memory: peak_MB=" << DeviceMemory::peak / 1e6 << " peak_bytes_per_cell=" << double(DeviceMemory::peak) / o.n << "\n";

@@ -370,6 +370,8 @@ def npz(runs, out, s, p, n, t, meta):
         e = np.linspace(lo, hi, coarse + 1)
         W = np.stack(lad.Reference(np.concatenate([a, b[-1:]]), *W).average(e[:-1], e[1:]))
         keys["n_coarse"] = coarse
+    if os.path.exists(f + ".build.json"):   # the luna-cpp and voronoi-cpp commits of the run (luna::write_build_json)
+        keys.update({k: v for k, v in json.load(open(f + ".build.json")).items() if k not in keys})
     keys.update(rho=W[0], u=W[1], p=W[2])
     if s == "moving":
         keys.update(x_left=a, x_right=b)

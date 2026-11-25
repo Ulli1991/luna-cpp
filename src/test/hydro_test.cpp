@@ -1,6 +1,7 @@
 // Checks the 3D Riemann fluxes, mesh hydro (uniform, conservation, determinism, moving mesh, Galilean invariance), the moving step and lattice cases.
 // Drives HLL/HLLC::flux and FiniteVolume<3>::time_step, step (src/hydro/euler.hpp, finite_volume.hpp).
 
+#include "build_info.hpp"
 #include "check.hpp"
 #include "finite_volume.hpp"
 #include "support.hpp"
@@ -661,6 +662,7 @@ void magnitude_tests(Check& check, const std::string& name_of_precision) {
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::print_build_info();
     Check check;
     flux_tests<hydro::HLL>(check, "HLL", luna_hll);
     flux_tests<hydro::HLLC>(check, "HLLC", luna_hllc);

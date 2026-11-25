@@ -1,6 +1,7 @@
 // Checks 1D hydro (uniform, conservation, determinism, inflow, Sod, Shu-Osher, wall cell supply) against exact and LUNA references.
 // Drives FiniteVolume<1>::time_step, step, step_and_time_step, supply_cells, set_inflow_spacing (src/hydro/finite_volume_1d.hpp).
 
+#include "build_info.hpp"
 #include "check.hpp"
 #include "exact_riemann.hpp"
 #include "finite_volume_1d.hpp"
@@ -112,6 +113,7 @@ int run(F& fv, double t_end, double courant, hydro::TimeStep rule) {
 
 int main(int argc, char* argv[]) {
     Kokkos::ScopeGuard kokkos(argc, argv);
+    luna::print_build_info();
     Check check;
     const Exec exec;
     const hydro::Gas gas{1.4};

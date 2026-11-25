@@ -1,7 +1,7 @@
 // Smooth Kelvin-Helmholtz (McNally, Lyra & Passy 2012), timed. Usage: hydro_kh2d <N> [flags] (docs/design.md).
 // Drives: main -> run<Riemann>: Mesh::update/update_cells -> FiniteVolume<2> (profile, seed) -> loop time_step, step -> mode_amplitude.
 
-#include "pin_notice.hpp"
+#include "build_info.hpp"
 #include "device_memory.hpp"
 #include "finite_volume.hpp"
 
@@ -206,6 +206,7 @@ int run(const Options& o) {
             Kokkos::deep_copy(centroid, mesh.centroid());
             auto positions = Kokkos::create_mirror_view(mesh.positions());
             Kokkos::deep_copy(positions, mesh.positions());
+            luna::write_build_json(prefix);
             std::ofstream binary(prefix + ".bin", std::ios::binary);
             for (int i = 0; i < n; ++i) {
                 const double row[7] = {positions(i, 0), positions(i, 1), positions(i, 0) + centroid(i, 0), positions(i, 1) + centroid(i, 1),
@@ -338,7 +339,7 @@ int run_precision(const Options& o) {
 
 int main(int argc, char** argv) {
     Kokkos::ScopeGuard guard(argc, argv);
-    luna::pin_notice();
+    luna::print_build_info();
     if (argc < 2) {
         std::puts("usage: hydro_kh2d <N> [--moving] [--dt=luna|arepo|fixed] [--courant=c] ... (see the top of the source)");
         return 2;

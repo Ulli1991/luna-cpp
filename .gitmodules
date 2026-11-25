@@ -1,3 +1,0 @@
-[submodule "extern/voronoi-cpp"]
-	path = extern/voronoi-cpp
-	url = https://github.com/Ulli1991/voronoi-cpp.git

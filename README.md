@@ -1,6 +1,6 @@
 # luna-cpp
 
-Moving-mesh hydrodynamics on GPUs. luna-cpp solves the Euler equations with finite volumes on the exact Voronoi meshes of [voronoi-cpp](https://github.com/Ulli1991/voronoi-cpp), included as a git submodule. The mesh can stay fixed, or move with the gas so that cells follow the flow. It is written in Kokkos C++ and runs on CUDA (tested on an A100 40 GB), with OpenMP and Serial builds of the same code for checks. Every result is measured against LUNA, a static-grid GPU code, as the yardstick.
+Moving-mesh hydrodynamics on GPUs. luna-cpp solves the Euler equations with finite volumes on the exact Voronoi meshes of [voronoi-cpp](https://github.com/Ulli1991/voronoi-cpp), whose latest `main` the build fetches. The mesh can stay fixed, or move with the gas so that cells follow the flow. It is written in Kokkos C++ and runs on CUDA (tested on an A100 40 GB), with OpenMP and Serial builds of the same code for checks. Every result is measured against LUNA, a static-grid GPU code, as the yardstick.
 
 ![Control flow of a run](docs/figures/flow_step.png)
 
@@ -17,10 +17,15 @@ BSD 3-Clause, see [LICENSE](LICENSE).
 ## Install and build
 
 ```sh
-git clone --recursive https://github.com/Ulli1991/luna-cpp.git
+git clone https://github.com/Ulli1991/luna-cpp.git
 ```
 
-In an existing clone, run `git submodule update --init --recursive`. `extern/voronoi-cpp` holds the library's full source at a pinned commit, so it can be edited and committed from here. A build warns if the pin is behind voronoi-cpp `main`; the pin moves when luna-cpp needs a newer library (`git submodule update --remote extern/voronoi-cpp`, then commit). `-DLUNA_STRICT_PIN=ON` makes that warning stop the build. The pin is voronoi-cpp 1741a1a (main of 2026-11-18, its step-2x levers), moved from abd3d39: the mesh update is 9 to 10 % faster and the moving step 3.6 to 3.8 %, at 66 B/cell more. 1D, 2D and static 3D runs keep their bits; moving 3D runs differ in Q at rounding level with the same field errors ([TESTING.md](TESTING.md#moving-the-pin)).
+luna-cpp builds against the latest voronoi-cpp: the configure step fetches voronoi-cpp's current `main` from GitHub (CMake FetchContent, into `<build>/_deps/`), and a reconfigure fetches it again when `main` has moved. Two options change that:
+
+- `-DLUNA_VORONOI_COMMIT=<sha>` builds exactly that commit, for runs that must be reproduced (papers, bit gates).
+- `-DLUNA_VORONOI_SOURCE=<dir>` builds against a local voronoi-cpp checkout as it is, with uncommitted changes: for work on both repositories at once, and where there is no network. Raven's compute nodes have none, so there either configure on the login node or an `interactive` node and compile in Slurm, or give a local checkout. With `LUNA_VORONOI_COMMIT` as well, configure stops unless the checkout is at that commit.
+
+Without network a reconfigure keeps the commit fetched before and warns. Every program and test prints the commits it was built with as its first line, `build: luna-cpp=<sha> luna_dirty=0 voronoi-cpp=<sha> voronoi_dirty=0 voronoi_origin=main|commit|local` (`dirty`: uncommitted changes in that tree), and so does `<build>/luna_build_info.txt`. The same goes into `hydro_sedov`'s snapshots (attributes `luna_cpp_commit`, `voronoi_cpp_commit`, their `_dirty` flags and `voronoi_cpp_origin` on `/cells`) and, as `<file>.build.json`, next to the `.npy` and `.bin` files of `hydro_1d`, `hydro_wave3d` and `hydro_kh2d`. Until 2026-11-23 voronoi-cpp was a submodule pinned at 1741a1a. Against 7da61fb (voronoi-cpp main of 2026-11-23) [BITS: 1D, 2D and static 3D runs keep their bits; moving 3D runs differ in Q at rounding level with the same field errors], and the moving step is [SPEED: x % faster/slower at 128³ and 256³, mesh part a to b ms, c B/cell]. What a voronoi-cpp change may change, and what to rerun, is in [TESTING.md](TESTING.md#when-voronoi-cpp-changes).
 
 Dependencies:
 
@@ -47,9 +52,9 @@ cmake -S . -B build-omp -DCMAKE_BUILD_TYPE=Release \
 cmake --build build-omp -j4
 ```
 
-Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the backend you want. On Raven, build with at most `-j4` on the login node, or inside a Slurm job, and run GPU work through Slurm.
+Elsewhere, point `CMAKE_PREFIX_PATH` at a Kokkos installation with the backend you want. On Raven, configure where there is network (login or `interactive` node; it fetches voronoi-cpp) or with `-DLUNA_VORONOI_SOURCE`, compile inside a Slurm job (at most `-j4` on the login node), and run GPU work through Slurm.
 
-`cmake --build` with no target gives `hydro_sedov`, `hydro_1d`, `hydro_kh2d`, `hydro_wave3d` and the tests. voronoi-cpp (the submodule) is the mesh library only, so the solver lives here. The CMake targets keep the `luna_` prefix from the split: `luna_hydro_library`, `luna_hydro_sedov`, `luna_hydro_1d`, `luna_hydro_kh2d`, `luna_hydro_wave3d`; build one with `--target luna_hydro_1d`.
+`cmake --build` with no target gives `hydro_sedov`, `hydro_1d`, `hydro_kh2d`, `hydro_wave3d` and the tests. voronoi-cpp (fetched at configure) is the mesh library only, so the solver lives here. The CMake targets keep the `luna_` prefix from the split: `luna_hydro_library`, `luna_hydro_sedov`, `luna_hydro_1d`, `luna_hydro_kh2d`, `luna_hydro_wave3d`; build one with `--target luna_hydro_1d`.
 
 ### Compiler flags in use
 
@@ -74,7 +79,7 @@ hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--precision=...]
 sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 ```
 
-`hydro_sedov` needs HDF5 and writes snapshots. Every program prints a banner on stderr at start if the configure step found the pinned voronoi-cpp behind voronoi-cpp `main`.
+`hydro_sedov` needs HDF5 and writes snapshots. Every program prints its `build:` line (the luna-cpp and voronoi-cpp commits) first on stdout.
 
 ## The method
 
@@ -333,7 +338,7 @@ ctest --test-dir build-cuda --output-on-failure
 OMP_NUM_THREADS=1 ctest --test-dir build-omp
 ```
 
-CI (`.github/workflows/checks.yml`) runs clang-tidy (ordinary build) and the CPU tests (ordinary and sanitizer builds) against a pinned Serial Kokkos 5.0.2, with the submodule checked out. It does not run GPU jobs.
+CI (`.github/workflows/checks.yml`) runs clang-tidy (ordinary build) and the CPU tests (ordinary and sanitizer builds) against a pinned Serial Kokkos 5.0.2 and voronoi-cpp's current `main`, on every push and pull request and daily, so a voronoi-cpp change that breaks luna-cpp shows within a day; the log names the commits built with. It does not run GPU jobs.
 
 
 ## Limitations
@@ -363,6 +368,6 @@ More ideas, each with a first test: [docs/ideas.md](docs/ideas.md).
 - `src/hydro/`: the solver, header-only: `precision.hpp`, `euler.hpp` (gas and fluxes), `finite_volume.hpp` (2D and 3D), `finite_volume_1d.hpp`, and the initial conditions and snapshots.
 - `src/bench/`: the programs `hydro_sedov`, `hydro_1d`, `hydro_wave3d`, `hydro_kh2d`.
 - `src/test/`: the tests.
-- `extern/voronoi-cpp/`: the mesh library, a pinned submodule with its full source.
+- `cmake/voronoi.cmake`: where voronoi-cpp comes from (fetched `main`, a commit, or a local checkout); `cmake/build_info.cmake`: the commits each build records.
 - `scripts/`: run scripts for the A100, figure scripts (`make_figures.py`, LUNA's `figstyle.py`), lint.
 - `docs/`: figures, `design.md`, `measurements.md`, `ideas.md`.
