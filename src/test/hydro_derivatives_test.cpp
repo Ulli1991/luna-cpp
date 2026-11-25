@@ -588,6 +588,134 @@ HostCells step_test(Check& check, const std::string& name, int n, int steps, dou
     return tangent;
 }
 
+// Close-out checks (2026-11-25). Test designs after astronomix (Storcks, Thuerey, Buck: dot-product test over
+// a fixed-step run, zero cotangent stays zero), differentiable-voronoi-fluids (Mocz: reverse mode against central differences over 20
+// steps, segmented checkpoints give the same gradient) and LUNA (conservation identities, corrupted adjoint must fail). No code of theirs.
+// Tolerances fixed before the first run:
+//   C1 dot test over `steps` steps:                      |<w, J dq> - <J^T w, dq>| / size < 1e-12
+//   C2 adjoint against central differences of <w, Q^N>:  best of h = 1e-4 .. 1e-9 below 1e-6 relative (smooth state only), and
+//      the direction is not degenerate: |<J^T w, dq>| > 1e-3 of its size
+//   C3 conservation: J^T (1 on row v, every cell) = the same, max deviation < 1e-12, v = 0 .. 4; sum_i (J dq)_iv = sum_i dq_iv to 1e-12
+//   C4 a zero cotangent gives a zero adjoint, bit for bit
+// Known positives, which must FAIL: P1 the cotangent scaled by 1.01 after one reverse step (C1, C2, C3); P2 one reverse step linearised
+// at the next checkpoint, Q^{s+1} for Q^s (C1, C2; whether C3 sees it is recorded, not required).
+template <class F>
+void closeout_test(Check& check, const std::string& name, int n, int steps, double noise) {
+    const hydro::Gas gas{5.0 / 3.0};
+    const Points points = make_points_off_grid("jittered", n);
+    typename F::Mesh mesh(Exec{}, 1.0);
+    mesh.update(to_device(points));
+    mesh.update_cells();
+    F fv(Exec{}, mesh, gas, 1, hydro::Update::per_face);
+    const auto volume = to_host(mesh.volume());
+    const HostCells q0 = smooth_state(points, volume, gas, noise);
+    std::mt19937_64 rng(17);
+    std::uniform_real_distribution<double> unit(-1, 1);
+    HostCells dq0("dq0", n), wbar("wbar", n);
+    for (int i = 0; i < n; ++i)
+        for (int v = 0; v < V; ++v) {
+            dq0(i, v) = unit(rng) * std::abs(q0(i, v)) + 0.1 * unit(rng) * volume(i);
+            wbar(i, v) = unit(rng);
+        }
+    write(fv, q0);
+    std::vector<double> dts;
+    std::vector<HostCells> checkpoints{q0};
+    for (int s = 0; s < steps; ++s) {
+        dts.push_back(fv.time_step(0.3));
+        fv.step(dts.back());
+        checkpoints.push_back(read(fv));
+    }
+    auto run = [&](const HostCells& start) {
+        write(fv, start);
+        for (int s = 0; s < steps; ++s) fv.step(dts[s]);
+        return read(fv);
+    };
+    // mode 0: the adjoint; 1: P1, the cotangent scaled by 1.01 after the reverse of step steps/2; 2: P2, that step linearised at Q^{s+1}.
+    auto reverse = [&](const HostCells& w, int mode) {
+        typename F::Cells bar("bar", n);
+        Kokkos::deep_copy(bar, w);
+        for (int s = steps - 1; s >= 0; --s) {
+            write(fv, checkpoints[(mode == 2 && s == steps / 2) ? s + 1 : s]);
+            fv.step_adjoint(dts[s], bar);
+            if (mode == 1 && s == steps / 2) {
+                HostCells b("b", n);
+                Kokkos::deep_copy(b, bar);
+                for (int i = 0; i < n; ++i)
+                    for (int v = 0; v < V; ++v) b(i, v) *= 1.01;
+                Kokkos::deep_copy(bar, b);
+            }
+        }
+        HostCells out("adjoint", n);
+        Kokkos::deep_copy(out, bar);
+        return out;
+    };
+    write(fv, q0);
+    typename F::Cells dqd("dq", n);
+    Kokkos::deep_copy(dqd, dq0);
+    for (int s = 0; s < steps; ++s) fv.step_tangent(dts[s], dqd);
+    HostCells tangent("tangent", n);
+    Kokkos::deep_copy(tangent, dqd);
+    const std::string tag = name + ", " + std::to_string(steps) + " steps";
+    // Central differences of the scalar <w, Q^N> along dq0, over h.
+    double fd[6];
+    const double hs[6] = {1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9};
+    for (int k = 0; k < 6; ++k) fd[k] = (inner(wbar, run(combine(q0, hs[k], dq0))) - inner(wbar, run(combine(q0, -hs[k], dq0)))) / (2 * hs[k]);
+    const char* modes[3] = {"adjoint", "P1 cotangent x 1.01 at one step", "P2 one step at the wrong checkpoint"};
+    for (int mode = 0; mode < 3; ++mode) {
+        const HostCells adjoint = reverse(wbar, mode);
+        double size_l = 0, size_r = 0;
+        const double lhs = inner(wbar, tangent, &size_l), rhs = inner(adjoint, dq0, &size_r);
+        const double dot = std::abs(lhs - rhs) / std::max(size_l, size_r);
+        double best = 1e300;
+        std::printf("closeout %s [%s]: <J^T w, dq> %.15e  <w, J dq> %.15e  dot %.2e  degeneracy %.2e\n   adjoint - FD, relative, h = 1e-4 .. 1e-9:", tag.c_str(),
+                    modes[mode], rhs, lhs, dot, std::abs(rhs) / size_r);
+        for (int k = 0; k < 6; ++k) {
+            const double e = std::abs(rhs - fd[k]) / std::abs(fd[k]);
+            best = std::min(best, e);
+            std::printf(" %.2e", e);
+        }
+        std::printf("\n");
+        // Conservation: the adjoint of the total of row v is 1 on row v and 0 elsewhere.
+        double conservation = 0;
+        for (int row = 0; row < V; ++row) {
+            HostCells ones("ones", n);
+            for (int i = 0; i < n; ++i) ones(i, row) = 1;
+            const HostCells back = reverse(ones, mode);
+            for (int i = 0; i < n; ++i)
+                for (int v = 0; v < V; ++v) conservation = std::max(conservation, std::abs(back(i, v) - ones(i, v)));
+        }
+        std::printf("   conservation of the adjoint, max deviation over 5 rows: %.2e\n", conservation);
+        const bool smooth = noise <= 0.05;
+        if (mode == 0) {
+            check.expect(dot < 1e-12, tag + ": C1 <w, J dq> = <J^T w, dq> (" + sci(dot) + ")");
+            if (smooth) {
+                check.expect(std::abs(rhs) > 1e-3 * size_r, tag + ": C2 the direction is not degenerate (" + sci(std::abs(rhs) / size_r) + ")");
+                check.expect(best < 1e-6, tag + ": C2 adjoint equals central differences of <w, Q^N> at the best h (" + sci(best) + ")");
+            }
+            check.expect(conservation < 1e-12, tag + ": C3 J^T of a row total is that row (" + sci(conservation) + ")");
+            double tangent_sum = 0;
+            for (int v = 0; v < V; ++v) {
+                double a = 0, b = 0, size = 0;
+                for (int i = 0; i < n; ++i) a += tangent(i, v), b += dq0(i, v), size += std::abs(dq0(i, v));
+                tangent_sum = std::max(tangent_sum, std::abs(a - b) / size);
+            }
+            check.expect(tangent_sum < 1e-12, tag + ": C3 the tangent keeps the row totals of dq (" + sci(tangent_sum) + ")");
+            HostCells zero("zero", n);
+            const HostCells back = reverse(zero, 0);
+            bool all_zero = true;
+            for (int i = 0; i < n; ++i)
+                for (int v = 0; v < V; ++v) all_zero = all_zero && back(i, v) == 0.0;
+            check.expect(all_zero, tag + ": C4 a zero cotangent gives a zero adjoint");
+        } else if (mode == 1) {
+            check.expect(!(dot < 1e-12) && !(smooth && best < 1e-6) && !(conservation < 1e-12),
+                         tag + ": P1 is caught by C1, C2 and C3 (" + sci(dot) + ", " + sci(best) + ", " + sci(conservation) + ")");
+        } else {
+            check.expect(!(dot < 1e-12) && !(smooth && best < 1e-6), tag + ": P2 is caught by C1 and C2 (" + sci(dot) + ", " + sci(best) + ")");
+            std::printf("   P2 against C3 (recorded, not required): %s\n", conservation < 1e-12 ? "NOT seen" : "seen");
+        }
+    }
+}
+
 // Times of the forward step, step_tangent and step_adjoint of policy F on n jittered cells; median of 5.
 template <class F>
 void cost(int n, const char* policy) {
@@ -1924,6 +2052,14 @@ int main(int argc, char** argv) {
             return 0;
         }
     Check check;
+    for (int a = 1; a < argc; ++a)
+        if (std::string(argv[a]) == "--closeout") {
+            closeout_test<FV>(check, "HLLC smooth", 1000, 20, 0.01);
+            closeout_test<FVHLL>(check, "HLL smooth", 1000, 20, 0.01);
+            closeout_test<FV>(check, "HLLC rough", 1000, 20, 0.3);
+            closeout_test<FV>(check, "HLLC smooth", 1000, 100, 0.01);
+            return check.failed() != 0;
+        }
     // `--scan`: the rough step's cells off against h; where differences cross switches they fall with h, a wrong derivative does not.
     for (int a = 1; a < argc; ++a)
         if (std::string(argv[a]) == "--scan") {
