@@ -75,7 +75,7 @@ def main(argv):
     dt_rule = probe.cfl(U0_of(ps, n, B))
     probe.close()
     dt_c = 0.4 / n / (np.sqrt(GAMMA * P0) + 0.5 * DV + 0.05)
-    steps = int(np.ceil(T / min(dt_rule, dt_c)))
+    steps = int(np.ceil(T / min(0.9 * dt_rule, dt_c)))  # 0.9: the rule's dt drifts below its value at t = 0 as the layer rolls
     dt = T / steps
     print(f"{'moving' if moving else 'static'} {n}^2: T = {T}, dt = {dt:.4e} ({steps} steps; rule's dt {dt_rule:.4e}, Courant 0.4 {dt_c:.4e})")
     r = Rollout(binary, 2, n, steps, dt, work, moving=moving, tag="kh")
