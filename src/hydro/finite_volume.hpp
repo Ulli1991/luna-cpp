@@ -810,6 +810,165 @@ public:
         });
     }
 
+    // The sweep with a sub-warp of lanes per cell (LUNA_SWEEP_LANES = 4 or 8; order 1, the common options of Sweep's
+    // Fixed form). Each list entry is visited once, lane l taking entries l, l + lanes, ...; its contribution is Sweep's
+    // arithmetic. The fit's sums, the neighbours' range, the surface, the smallest face and the largest face angle are
+    // combined by Kokkos's vector reduction (a fixed shuffle tree: the same bits run to run, other bits than Sweep's).
+    // The limiter takes, per variable, the smallest scaling factor over the faces, each from the unlimited gradient: the
+    // product of Sweep's successive scalings equals that minimum up to rounding. Used by: sweep().
+    template <bool Moving>
+    struct LaneSweep {
+        using Member = typename Kokkos::TeamPolicy<ExecSpace>::member_type;
+        static constexpr int U = D + 1;
+        static constexpr int MU = U * (U + 1) / 2;  // the upper triangle of M
+        // The per-cell sums of the list walk: M's upper triangle, b, the neighbours' range, surface, smallest face, angle.
+        struct Walk {
+            G M[MU], b[V][U], lo[V], hi[V];
+            double surface, smallest, angle;
+        };
+        struct WalkReducer {
+            using reducer = WalkReducer;
+            using value_type = Walk;
+            using result_view_type = Kokkos::View<value_type, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>;
+            value_type* value;
+            KOKKOS_INLINE_FUNCTION explicit WalkReducer(value_type& v) : value(&v) {}
+            KOKKOS_INLINE_FUNCTION void join(value_type& dest, const value_type& src) const {
+                for (int p = 0; p < MU; ++p) dest.M[p] += src.M[p];
+                for (int v = 0; v < V; ++v) {
+                    for (int p = 0; p < U; ++p) dest.b[v][p] += src.b[v][p];
+                    dest.lo[v] = Kokkos::fmin(dest.lo[v], src.lo[v]);
+                    dest.hi[v] = Kokkos::fmax(dest.hi[v], src.hi[v]);
+                }
+                dest.surface += src.surface;
+                dest.smallest = Kokkos::fmin(dest.smallest, src.smallest);
+                dest.angle = Kokkos::fmax(dest.angle, src.angle);
+            }
+            KOKKOS_INLINE_FUNCTION void init(value_type& v) const {
+                for (int p = 0; p < MU; ++p) v.M[p] = 0;
+                for (int k = 0; k < V; ++k) {
+                    for (int p = 0; p < U; ++p) v.b[k][p] = 0;
+                    v.lo[k] = Kokkos::Experimental::finite_max_v<G>;
+                    v.hi[k] = -Kokkos::Experimental::finite_max_v<G>;
+                }
+                v.surface = 0;
+                v.smallest = Kokkos::Experimental::infinity_v<double>;
+                v.angle = 0;
+            }
+            KOKKOS_INLINE_FUNCTION value_type& reference() const { return *value; }
+            KOKKOS_INLINE_FUNCTION result_view_type view() const { return result_view_type(value); }
+        };
+        // The limiter's smallest scaling factor per variable.
+        struct Factors {
+            G f[V];
+        };
+        struct FactorReducer {
+            using reducer = FactorReducer;
+            using value_type = Factors;
+            using result_view_type = Kokkos::View<value_type, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>;
+            value_type* value;
+            KOKKOS_INLINE_FUNCTION explicit FactorReducer(value_type& v) : value(&v) {}
+            KOKKOS_INLINE_FUNCTION void join(value_type& dest, const value_type& src) const {
+                for (int v = 0; v < V; ++v) dest.f[v] = Kokkos::fmin(dest.f[v], src.f[v]);
+            }
+            KOKKOS_INLINE_FUNCTION void init(value_type& v) const {
+                for (int k = 0; k < V; ++k) v.f[k] = G(1);
+            }
+            KOKKOS_INLINE_FUNCTION value_type& reference() const { return *value; }
+            KOKKOS_INLINE_FUNCTION result_view_type view() const { return result_view_type(value); }
+        };
+
+        Sweep<Moving, true, true> s;
+        int n = 0;
+
+        KOKKOS_INLINE_FUNCTION void operator()(const Member& m) const {
+            constexpr bool exact = std::is_same_v<G, double>;
+            const int i = m.league_rank() * m.team_size() + m.team_rank();
+            if (i >= n) return;
+            const auto& geo = s.geo;
+            const State Wi = primitive_row(s.prim, i);
+            const Vec centroid = geo.row(geo.centroid, i);
+            const int first = geo.start(i), count = geo.start(i + 1) - first;
+            Walk walk;
+            Kokkos::parallel_reduce(
+                Kokkos::ThreadVectorRange(m, count),
+                [&](int e, Walk& a) {
+                    const int k = first + e, f = geo.face_at(k), j = s.other_at(k, f, i);
+                    const State Wj = primitive_row(s.prim, j);
+                    const Vec d = geo.separation(i, j);
+                    const double magnitude = s.magnitude_of(f);
+                    a.surface += magnitude;
+                    a.smallest = Kokkos::fmin(a.smallest, magnitude);
+                    if constexpr (Moving) a.angle = Kokkos::fmax(a.angle, face_angle(magnitude) / (0.5 * Kokkos::sqrt(dot(d, d))));
+                    G X[U];
+                    const Vec between = d + geo.row(geo.centroid, j) - centroid;
+                    X[0] = 1;
+                    for (int p = 1; p < U; ++p) X[p] = static_cast<G>(between[p - 1]);
+                    const G w = static_cast<G>(magnitude);
+                    for (int p = 0, q = 0; p < U; ++p)
+                        for (int t = p; t < U; ++t, ++q) a.M[q] += w * X[p] * X[t];
+                    for (int v = 0; v < V; ++v) {
+                        const double dW = Wj[v] - Wi[v];
+                        for (int p = 0; p < U; ++p) a.b[v][p] += w * X[p] * static_cast<G>(dW);
+                        const G value = exact ? static_cast<G>(Wj[v]) : static_cast<G>(dW);
+                        a.lo[v] = Kokkos::fmin(a.lo[v], value);
+                        a.hi[v] = Kokkos::fmax(a.hi[v], value);
+                    }
+                },
+                WalkReducer(walk));
+            // Rare: a face below 1e-6 of the surface does not count for the range or the limiter (each lane walks it).
+            const double tiny = 1e-6 * walk.surface;
+            const bool any_tiny = walk.smallest < tiny;
+            if (any_tiny) s.neighbour_range(i, Wi, tiny, walk.lo, walk.hi);
+            G M[U][U] = {};
+            for (int p = 0, q = 0; p < U; ++p)
+                for (int t = p; t < U; ++t, ++q) M[p][t] = walk.M[q];
+            Gradient<D, G> grad;
+            s.solve(M, walk.b, grad);
+            if constexpr (Moving) {
+                Kokkos::single(Kokkos::PerThread(m), [&]() {
+                    double fraction = 0;
+                    if (walk.angle > 0.75 * cell_max_angle_factor)
+                        fraction = walk.angle > cell_max_angle_factor
+                                       ? cell_shaping_speed
+                                       : cell_shaping_speed * (walk.angle - 0.75 * cell_max_angle_factor) / (0.25 * cell_max_angle_factor);
+                    Vec wi = velocity(Wi);
+                    const Vec c = centroid;
+                    const double cd = Kokkos::sqrt(dot(c, c));
+                    if (cd > 0 && fraction > 0) wi = wi + c * (fraction * s.prim(i, V) / cd);
+                    for (int a = 0; a < D; ++a) s.w(i, a) = wi[a];
+                });
+            }
+            Factors factors;
+            Kokkos::parallel_reduce(
+                Kokkos::ThreadVectorRange(m, count),
+                [&](int e, Factors& a) {
+                    const int f = geo.face_at(first + e);
+                    if (any_tiny && s.magnitude_of(f) < tiny) return;
+                    const hydro::Vec<D, G> rg = cast<G>(geo.face_offset(f, i));
+                    for (int v = 0; v < V; ++v) {
+                        const G dp = dot(grad[v], rg);
+                        G factor = G(1);
+                        if constexpr (exact) {
+                            if (dp > 0 && Wi[v] + dp > walk.hi[v])
+                                factor = walk.hi[v] > Wi[v] ? (walk.hi[v] - Wi[v]) / dp : 0.0;
+                            else if (dp < 0 && Wi[v] + dp < walk.lo[v])
+                                factor = walk.lo[v] < Wi[v] ? (walk.lo[v] - Wi[v]) / dp : 0.0;
+                        } else {
+                            if (dp > 0 && dp > walk.hi[v])
+                                factor = walk.hi[v] > 0 ? walk.hi[v] / dp : G(0);
+                            else if (dp < 0 && dp < walk.lo[v])
+                                factor = walk.lo[v] < 0 ? walk.lo[v] / dp : G(0);
+                        }
+                        a.f[v] = Kokkos::fmin(a.f[v], factor);
+                    }
+                },
+                FactorReducer(factors));
+            for (int v = 0; v < V; ++v)
+                if (factors.f[v] < G(1)) grad[v] = grad[v] * factors.f[v];
+            Kokkos::single(Kokkos::PerThread(m), [&]() { s.store(i, grad); });
+        }
+    };
+
     // The cell terms of the time step (AREPO rule). Used by: TimeStep.
     template <bool Moving>
     struct CellStep {
@@ -892,9 +1051,16 @@ public:
         bool fixed = false;
         if constexpr (Order == 1) {
             fixed = !sweep_general_ && magnitudes_valid_ && geometry_.bit && limiter_ == Limiter::face_centroid;
-            if (fixed)
-                Kokkos::parallel_for("hydro::sweep", cells,
-                                     Sweep<Moving, true, true>{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_, magnitudes_});
+            const Sweep<Moving, true, true> fixed_sweep{prims_, w_, gradients_, exponents_, geometry_, gas_, limiter_, magnitudes_};
+            if (fixed && sweep_lanes_ > 0 && !host_space) {
+                // Lanes per cell (LUNA_SWEEP_LANES): teams of 128 threads, 128 / lanes cells a team.
+                const int cells_per_team = 128 / sweep_lanes_;
+                Kokkos::parallel_for("hydro::sweep",
+                                     Kokkos::TeamPolicy<ExecSpace>(exec_, (n_ + cells_per_team - 1) / cells_per_team, cells_per_team, sweep_lanes_),
+                                     LaneSweep<Moving>{fixed_sweep, n_});
+            } else if (fixed) {
+                Kokkos::parallel_for("hydro::sweep", cells, fixed_sweep);
+            }
         }
         if constexpr (Moving || Order == 1)
             if (!fixed)
@@ -1677,6 +1843,8 @@ private:
     // apply()'s chunked schedule (LUNA_UPDATE_CHUNK = log2 faces a chunk; 0: off) and its cell ranges per face chunk.
     int chunk_shift_ = std::getenv("LUNA_UPDATE_CHUNK") ? std::atoi(std::getenv("LUNA_UPDATE_CHUNK")) : 0;
     bool sweep_general_ = std::getenv("LUNA_SWEEP_GENERAL") != nullptr;  // sweep(): the general functor only (measurement)
+    int sweep_lanes_ = std::getenv("LUNA_SWEEP_LANES") ? std::atoi(std::getenv("LUNA_SWEEP_LANES")) : 0;  // sweep(): lanes per cell (4, 8; 0: one thread a cell)
+    static constexpr bool host_space = Kokkos::SpaceAccessibility<Kokkos::HostSpace, Memory>::accessible;
     bool ranges_valid_ = false;
     std::vector<std::vector<std::pair<int, int>>> range_schedule_;
     Kokkos::View<long long*, Memory> chunk_counts_;
