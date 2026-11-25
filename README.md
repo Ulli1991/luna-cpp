@@ -73,7 +73,7 @@ hydro_kh2d <N> [--moving] [--out-times=t,...] [--stop-after=<s>] [--resume] ...
 hydro_1d <problem> <N> [--moving] [--limiter=face|none|minmod|vanleer] [--dt=luna|arepo|fixed] [--courant=c] ...
 hydro_wave3d <sound|simple|vortex|tube> <nx> [--moving] [--precision=...]
 hydro_sedov <side> grid --grid [--kernel=cuda|kokkos] [--limiter=minmod|mc|vanleer] [--riemann=hllc|hll] [--cfl=0.8]
-            [--tile=x,y,z] [--split=1|0] [--specialise=1|0] [--steps=max] [--out=file.npy]
+            [--tile=x,y,z] [--split=1|0] [--specialise=1|0] [--bounded=1|0] [--steps=max] [--out=file.npy]
 sbatch -o <logs>/hydro-%j.out scripts/hydro_a100.sh build-cuda <out> <mode>
 ```
 

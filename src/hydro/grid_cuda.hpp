@@ -10,6 +10,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <type_traits>
 
 // Launch bounds of step_kernel for a register sweep: -DLUNA_GRID_MIN_BLOCKS=b -DLUNA_GRID_MAX_THREADS=t caps the registers so that b
 // blocks of t threads fit an SM. Off by default (caps are measured both ways, research_notes/fixed_grid_2026-11-19.md).
@@ -52,14 +53,25 @@ __device__ inline double block_min(double x) {
 // One block per tile, one thread per cell (z fastest within the tile, tiles numbered z fastest as the Kokkos kernel's league), the
 // tile's minimum time step by block_min(), then one atomicMin on its order key. Split: the faces pass of the split step, reading the
 // half-step states H. S: the options fixed at compile time (Fixed).
-template <int D, class Riemann, bool Split, class S = Fixed<>>
-__global__ void LUNA_GRID_BOUNDS step_kernel(Field<D> W, HalfField<D> H, Arrays a, Params p, double dt, int3 tile, int3 tiles, unsigned long long* key) {
+template <int D, class Riemann, bool Split, class S>
+__device__ inline void step_body(Field<D> W, HalfField<D> H, Arrays a, Params p, double dt, int3 tile, int3 tiles, unsigned long long* key) {
     S::apply(p, W);
     const int r = static_cast<int>(blockIdx.x), t = static_cast<int>(threadIdx.x);
     const int tz = r % tiles.z, ty = (r / tiles.z) % tiles.y, tx = r / (tiles.z * tiles.y);
     const int k = tz * tile.z + t % tile.z, j = ty * tile.y + (t / tile.z) % tile.y, i = tx * tile.x + t / (tile.z * tile.y);
     const double low = block_min(cell_step<D, Riemann, Split>(W, a, i, j, k, p, dt, H));
     if (t == 0) atomicMin(key, static_cast<unsigned long long>(order_key(low)));
+}
+template <int D, class Riemann, bool Split, class S = Fixed<>>
+__global__ void LUNA_GRID_BOUNDS step_kernel(Field<D> W, HalfField<D> H, Arrays a, Params p, double dt, int3 tile, int3 tiles, unsigned long long* key) {
+    step_body<D, Riemann, Split, S>(W, H, a, p, dt, tile, tiles, key);
+}
+// The specialised faces pass with registers capped for 4 blocks of 128 threads per SM (lever 8: 142 -> 128 registers, 24 B of stack,
+// 16 warps); blocks of at most 128 threads. Used by: split_cuda() (Launch::bounded).
+template <int D, class Riemann, class S>
+__global__ void __launch_bounds__(128, 4) faces_kernel_128x4(Field<D> W, HalfField<D> H, Arrays a, Params p, double dt, int3 tile, int3 tiles,
+                                                             unsigned long long* key) {
+    step_body<D, Riemann, true, S>(W, H, a, p, dt, tile, tiles, key);
 }
 
 // The predictor pass of the split step: one thread per cell of the grid plus its ghost ring, numbered z fastest.
@@ -85,12 +97,19 @@ struct Launch {
     int3 tile, tiles;
     int threads, blocks;
     unsigned long long* key;
+    bool bounded;  // the specialised faces pass with launch bounds (faces_kernel_128x4) where the block has at most 128 threads
 };
 
 // The split step with the options S fixed at compile time: the predictor pass (256 threads a block), then the faces pass.
 template <int D, class Riemann, class S>
 void split_cuda(const Launch<D>& l) {
     predictor_kernel<D, S><<<static_cast<unsigned>((l.H.cells + 255) / 256), 256, 0, l.stream>>>(l.W, l.H, l.p, 0.5 * l.dt);
+    if constexpr (!std::is_same_v<S, Fixed<>>) {
+        if (l.bounded && l.threads <= 128) {
+            faces_kernel_128x4<D, Riemann, S><<<l.blocks, l.threads, 0, l.stream>>>(l.W, l.H, l.a, l.p, l.dt, l.tile, l.tiles, l.key);
+            return;
+        }
+    }
     step_kernel<D, Riemann, true, S><<<l.blocks, l.threads, 0, l.stream>>>(l.W, l.H, l.a, l.p, l.dt, l.tile, l.tiles, l.key);
 }
 // The dispatch over the boundary for limiter L (lever 5). Used by: step_cuda().
@@ -112,10 +131,10 @@ void split_cuda_boundary(const Launch<D>& l) {
 // runs a kernel instantiated for the limiter and boundary (and no floors or first-order faces; with them, the run-time kernel).
 // Used by: GridFiniteVolume::step.
 template <int D, class Riemann>
-void step_cuda(cudaStream_t stream, const Field<D>& W, const HalfField<D>& H, bool split, bool specialise, const Arrays& a, const Params& p,
-               double dt, const int (&tile)[3], const int (&tiles)[3], unsigned long long* key) {
+void step_cuda(cudaStream_t stream, const Field<D>& W, const HalfField<D>& H, bool split, bool specialise, bool bounded, const Arrays& a,
+               const Params& p, double dt, const int (&tile)[3], const int (&tiles)[3], unsigned long long* key) {
     const Launch<D> l{stream, W, H, a, p, dt, make_int3(tile[0], tile[1], tile[2]), make_int3(tiles[0], tiles[1], tiles[2]),
-                      tile[0] * tile[1] * tile[2], tiles[0] * tiles[1] * tiles[2], key};
+                      tile[0] * tile[1] * tile[2], tiles[0] * tiles[1] * tiles[2], key, bounded};
     if (!split) {
         step_kernel<D, Riemann, false><<<l.blocks, l.threads, 0, stream>>>(W, H, a, p, dt, l.tile, l.tiles, key);
         return;

@@ -441,6 +441,7 @@ void run_grid(const Options& o, int argc, char** argv) {
     go.kernel = kernel == "kokkos" ? g::Kernel::kokkos : g::Kernel::cuda;
     go.split = flag(argc, argv, "--split", "1") == "1";
     go.specialise = flag(argc, argv, "--specialise", "1") == "1";
+    go.bounded = flag(argc, argv, "--bounded", "1") == "1";
     if (const std::string t = flag(argc, argv, "--tile", ""); !t.empty()) std::sscanf(t.c_str(), "%d,%d,%d", &go.tile[0], &go.tile[1], &go.tile[2]);
     Kokkos::Timer timer;
     g::GridFiniteVolume<3, R> fv(exec, {n, n, n}, {o.box.side[0], o.box.side[1], o.box.side[2]}, sedov.gamma, go);
@@ -482,7 +483,7 @@ void run_grid(const Options& o, int argc, char** argv) {
         return s;
     };
     const std::array<double, 5> before = sums();
-    std::cout << "grid: n=" << n << "^3 kernel=" << kernel << " split=" << go.split << " specialise=" << go.specialise << " tile=" << fv.tile()[0] << "," << fv.tile()[1] << "," << fv.tile()[2]
+    std::cout << "grid: n=" << n << "^3 kernel=" << kernel << " split=" << go.split << " specialise=" << go.specialise << " bounded=" << go.bounded << " tile=" << fv.tile()[0] << "," << fv.tile()[1] << "," << fv.tile()[2]
               << " limiter=" << limiter << " riemann=" << o.riemann << " cfl=" << go.cfl << " t_end=" << sedov.t_end()
               << " setup_s=" << timer.seconds() << "\n";
     std::vector<double> wall_ms;
@@ -510,7 +511,7 @@ void run_grid(const Options& o, int argc, char** argv) {
     const std::vector<double> warm(wall_ms.begin() + static_cast<long>(skip), wall_ms.end());
     const double ms = median(warm);
     const double cells = static_cast<double>(fv.cells());
-    std::cout << "run: grid=1 kernel=" << kernel << " split=" << go.split << " specialise=" << go.specialise << " steps=" << steps << " t=" << t << " wall_s=" << wall_s << " step_wall_ms_median=" << ms
+    std::cout << "run: grid=1 kernel=" << kernel << " split=" << go.split << " specialise=" << go.specialise << " bounded=" << go.bounded << " steps=" << steps << " t=" << t << " wall_s=" << wall_s << " step_wall_ms_median=" << ms
               << " G_cell_updates_per_s=" << cells / (ms * 1e-3) / 1e9 << " ns_per_cell=" << ms * 1e6 / cells << "\n";
     std::cout << "conservation: mass=" << (after[0] - before[0]) / before[0] << " energy=" << (after[4] - before[4]) / before[4]
               << " momentum=(" << after[1] - before[1] << "," << after[2] - before[2] << "," << after[3] - before[3] << ")\n";
@@ -568,7 +569,7 @@ int main(int argc, char** argv) {
                      " [--snapshots=10] [--steps=max] [--input-order] [--memory] [--gradients] [--cold=f]"
                      " [--curve=morton|hilbert|moore|gray|row|rcm] [--every=k] [--far=share] [--owner-faces] [--owner-bit] [--plain-faces] [--phases] [--keep-mesh]\n"
                      "       hydro_sedov <side> grid --grid [--kernel=cuda|kokkos] [--limiter=minmod|mc|vanleer] [--riemann=hllc|hll] [--cfl=0.8]"
-                     " [--tile=x,y,z] [--split=1|0] [--specialise=1|0] [--steps=max] [--out=file.npy]\n";
+                     " [--tile=x,y,z] [--split=1|0] [--specialise=1|0] [--bounded=1|0] [--steps=max] [--out=file.npy]\n";
         return 2;
     }
     if (flag(argc, argv, "--memory", "") == "1") DeviceMemory::start();
