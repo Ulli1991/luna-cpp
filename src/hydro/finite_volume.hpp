@@ -1840,15 +1840,15 @@ private:
     Magnitudes magnitudes_;
     bool magnitudes_valid_ = false;
     bool cache_magnitudes_ = std::getenv("LUNA_NO_MAGNITUDES") == nullptr;
+    bool sweep_general_ = std::getenv("LUNA_SWEEP_GENERAL") != nullptr;  // sweep(): the general functor only (measurement)
+    bool ranges_valid_ = false;  // apply()'s chunked schedule: range_schedule_ is of the current mesh
+    bool dt_trace_ = std::getenv("LUNA_DT_TRACE") != nullptr;  // trace_step(): the limiting terms of each time step (diagnostic)
     // apply()'s chunked schedule (LUNA_UPDATE_CHUNK = log2 faces a chunk; 0: off) and its cell ranges per face chunk.
     int chunk_shift_ = std::getenv("LUNA_UPDATE_CHUNK") ? std::atoi(std::getenv("LUNA_UPDATE_CHUNK")) : 0;
-    bool sweep_general_ = std::getenv("LUNA_SWEEP_GENERAL") != nullptr;  // sweep(): the general functor only (measurement)
     int sweep_lanes_ = std::getenv("LUNA_SWEEP_LANES") ? std::atoi(std::getenv("LUNA_SWEEP_LANES")) : 0;  // sweep(): lanes per cell (4, 8; 0: one thread a cell)
     static constexpr bool host_space = Kokkos::SpaceAccessibility<Kokkos::HostSpace, Memory>::accessible;
-    bool ranges_valid_ = false;
     std::vector<std::vector<std::pair<int, int>>> range_schedule_;
     Kokkos::View<long long*, Memory> chunk_counts_;
-    bool dt_trace_ = std::getenv("LUNA_DT_TRACE") != nullptr;  // trace_step(): the limiting terms of each time step (diagnostic)
     long long traced_steps_ = 0;
     // Fallbacks of the two flux passes of the last step (one pass: the first), read back by fallbacks() once a step.
     Kokkos::View<long long[2], Memory> fallback_counts_{"hydro_fallbacks"};
