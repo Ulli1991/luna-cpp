@@ -90,3 +90,10 @@ if(BUILD_TESTING AND LUNA_DERIVATIVE_TESTS)
     add_test(NAME hydro_derivatives COMMAND hydro_derivatives_test)
     set_tests_properties(hydro_derivatives PROPERTIES TIMEOUT ${hydro_test_timeout})
 endif()
+
+# The derivative examples (research_notes/autodiff_examples_2026-11-23.md): the drivers scripts/examples calls.
+option(LUNA_DERIVATIVE_EXAMPLES "Build the derivative examples" OFF)
+if(LUNA_DERIVATIVE_EXAMPLES)
+    hydro_program(luna_sod_theta sod_theta src/examples/sod_theta.cpp)
+    hydro_program(luna_rollout rollout src/examples/rollout.cpp)
+endif()
