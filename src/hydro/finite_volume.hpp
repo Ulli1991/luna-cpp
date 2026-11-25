@@ -2398,6 +2398,10 @@ public:
                       "derivatives of a step: double flux rows, Riemann solve and geometry");
         if (motion_ != Motion::moving || update_ != Update::per_face)
             throw std::logic_error(std::string("hydro::FiniteVolume::") + what + ": a moving mesh, the per-face loop");
+        if constexpr (D == 3) {  // the work arrays are by cell: a re-sort between the passes would mix them
+            if (mesh_ && mesh_->layout().resorts())
+                throw std::logic_error(std::string("hydro::FiniteVolume::") + what + ": a layout without re-sorting (no_resort())");
+        }
     }
 
     // W, c_s of every cell and, with dq and dV given, their tangents (cell rows: W in [0, V), c_s in V). Used by: the moving derivatives.
